@@ -52,3 +52,28 @@ def test_backup_snapshots_each_runtime_database_across_wal_checkpoint(tmp_path, 
         assert not (destination / f"{name}-shm").exists()
     finally:
         conn.close()
+
+
+def test_runtime_database_snapshot_failure_does_not_fall_back_to_raw_copy(tmp_path, monkeypatch):
+    source = tmp_path / "agent-runtime.db"
+    with closing(sqlite3.connect(source)) as conn:
+        conn.execute("CREATE TABLE important_data (value TEXT)")
+        conn.commit()
+
+    def fail_connect(*args, **kwargs):
+        raise sqlite3.OperationalError("synthetic snapshot failure")
+
+    monkeypatch.setattr(backup.sqlite3, "connect", fail_connect)
+    with pytest.raises(sqlite3.OperationalError, match="synthetic snapshot failure"):
+        backup._copy_file(str(source), str(tmp_path / "snapshot.db"))
+    assert not (tmp_path / "snapshot.db").exists()
+
+
+def test_legacy_non_sqlite_file_keeps_copy_compatibility(tmp_path):
+    source = tmp_path / "chat.db"
+    source.write_text("legacy non-SQLite content", encoding="utf-8")
+    target = tmp_path / "snapshot.db"
+
+    backup._copy_file(str(source), str(target))
+
+    assert target.read_bytes() == source.read_bytes()

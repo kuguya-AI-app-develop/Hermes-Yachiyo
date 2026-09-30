@@ -240,13 +240,17 @@ def _unique_backup_archive(root: Path) -> Path:
 
 def _copy_sqlite_database(source: Path, target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        with closing(sqlite3.connect(source.resolve().as_uri() + "?mode=ro", uri=True)) as source_conn:
-            with closing(sqlite3.connect(target)) as target_conn:
-                source_conn.backup(target_conn)
-        shutil.copystat(source, target, follow_symlinks=False)
-    except sqlite3.Error:
+    with source.open("rb") as stream:
+        is_sqlite = stream.read(16) == b"SQLite format 3\x00"
+    if not is_sqlite:
+        # Preserve compatibility with legacy non-database files, but never
+        # silently raw-copy a real database after a failed consistent snapshot.
         shutil.copy2(source, target, follow_symlinks=False)
+        return
+    with closing(sqlite3.connect(source.resolve().as_uri() + "?mode=ro", uri=True)) as source_conn:
+        with closing(sqlite3.connect(target)) as target_conn:
+            source_conn.backup(target_conn)
+    shutil.copystat(source, target, follow_symlinks=False)
 
 
 def _copy_file(source: str, target: str) -> str:
