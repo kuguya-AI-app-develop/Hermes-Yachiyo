@@ -108,7 +108,11 @@ def _apply_single_file_unified_diff(original: str, patch: str, *, expected_path:
         old_start = int(match.group("old_start"))
         old_count = int(match.group("old_count") or "1")
         new_count = int(match.group("new_count") or "1")
-        hunk_old_pos = max(0, old_start - 1)
+        # Empty old ranges identify the line *after* which insertion occurs;
+        # nonempty ranges identify the first line consumed by the hunk.
+        hunk_old_pos = old_start if old_count == 0 else old_start - 1
+        if not 0 <= hunk_old_pos <= len(original_lines):
+            raise AgentRuntimeError("workspace.write_patch hunk 位置超出文件范围")
         if hunk_old_pos < old_pos:
             raise AgentRuntimeError("workspace.write_patch hunk 顺序无效")
         output.extend(original_lines[old_pos:hunk_old_pos])
