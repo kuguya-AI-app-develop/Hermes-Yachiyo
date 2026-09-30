@@ -41,7 +41,7 @@ _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = _QUOTED_SECRET_PATTERNS + (
         r"\s*[:=]\s*([^\s,;\"']{6,})"
     ),
     re.compile(
-        r"\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:API_KEY|TOKEN|SECRET|PASSWORD|PASSWD))"
+        r"(?i)\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:API_KEY|TOKEN|SECRET|PASSWORD|PASSWD))"
         r"\s*=\s*([^\s,;\"']{6,})"
     ),
     re.compile(r"(?i)\b(bearer)\s+([A-Za-z0-9._\-]{8,})\b"),

@@ -190,6 +190,7 @@ def test_redact_log_text_scrubs_python_repr_and_quoted_environment_values():
         "OPENAI_API_KEY='demo provider secret 123456'",
         'CUSTOM_ACCESS_TOKEN="demo-access-123456"',
         'OPENAI_API_KEY=demo-provider-123456',
+        'custom_access_token=demo-provider-123456',
     ):
         assert security.contains_sensitive_text(original), original
         redacted = security.redact_log_text(original)
