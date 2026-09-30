@@ -160,3 +160,55 @@ def test_sanitize_sensitive_value_keeps_numeric_token_usage_counts():
     assert output["usage"]["completion_tokens"] == 7
     assert output["usage"]["total_tokens"] == 18
     assert output["usage"]["token"] == "[redacted]"
+
+
+def test_redact_log_text_scrubs_quoted_json_secrets_without_breaking_json():
+    import json
+
+    payload = {
+        "api_key": "demo-provider-123456",
+        "password": 'pass with spaces and "quotes"',
+        "authorization": "Bearer demo-auth-123456",
+        "message": "ordinary text",
+    }
+    original = json.dumps(payload)
+
+    assert security.contains_sensitive_text(original)
+    redacted = security.redact_log_text(original)
+    assert json.loads(redacted) == {
+        "api_key": security.REDACTED,
+        "password": security.REDACTED,
+        "authorization": security.REDACTED,
+        "message": "ordinary text",
+    }
+    assert not security.contains_sensitive_text(redacted)
+
+
+def test_redact_log_text_scrubs_python_repr_and_quoted_environment_values():
+    for original in (
+        "{'password': 'demo-password-123456'}",
+        "OPENAI_API_KEY='demo provider secret 123456'",
+        'CUSTOM_ACCESS_TOKEN="demo-access-123456"',
+        'OPENAI_API_KEY=demo-provider-123456',
+    ):
+        assert security.contains_sensitive_text(original), original
+        redacted = security.redact_log_text(original)
+        assert "demo" not in redacted
+        assert security.REDACTED in redacted
+        assert not security.contains_sensitive_text(redacted)
+
+
+def test_secret_scan_rejects_unredacted_quoted_provider_response(tmp_path):
+    output = tmp_path / "provider-error.log"
+    output.write_text('{"api_key": "demo-provider-123456"}\n', encoding="utf-8")
+
+    assert verify_secret_redaction(paths=[output])
+    output.write_text(security.redact_log_text(output.read_text()), encoding="utf-8")
+    assert verify_secret_redaction(paths=[output]) == []
+
+
+def test_redact_log_text_preserves_empty_secrets_and_token_usage():
+    original = '{"api_key": "", "prompt_tokens": 12, "completion_tokens": 8}'
+
+    assert security.redact_log_text(original) == original
+    assert not security.contains_sensitive_text(original)

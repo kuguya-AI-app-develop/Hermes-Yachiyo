@@ -19,13 +19,30 @@ _ORIGINAL_LOG_RECORD_FACTORY: Any = None
 _EXCEPTHOOK_INSTALLED = False
 _ORIGINAL_EXCEPTHOOK: Any = None
 
-_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
+_SECRET_FIELD = (
+    r"(?:[a-z0-9]+[_-])*(?:api[_-]?key|token|password|passwd|secret|authorization)"
+)
+# Provider errors and log messages often contain JSON, Python repr, or quoted
+# environment assignments. Keep their quotes/delimiters intact and consume the
+# entire escaped value, rather than leaking the tail after its first space.
+_QUOTED_SECRET_PATTERNS = tuple(
+    re.compile(
+        rf"(?i)(?P<prefix>\b{_SECRET_FIELD}\b[\"']?\s*[:=]\s*)"
+        rf"(?P<quote>{quote})(?P<secret>(?:\\.|[^{quote}\\])*)(?P=quote)"
+    )
+    for quote in ('"', "'")
+)
+_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = _QUOTED_SECRET_PATTERNS + (
     re.compile(
         r"(?i)\b(authorization)\b\s*[:=]\s*(?:bearer\s+)?([^\s,;\"']{6,})"
     ),
     re.compile(
         r"(?i)\b(api[_-]?key|token|password|passwd|secret)\b"
         r"\s*[:=]\s*([^\s,;\"']{6,})"
+    ),
+    re.compile(
+        r"\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:API_KEY|TOKEN|SECRET|PASSWORD|PASSWD))"
+        r"\s*=\s*([^\s,;\"']{6,})"
     ),
     re.compile(r"(?i)\b(bearer)\s+([A-Za-z0-9._\-]{8,})\b"),
     re.compile(r"\b(sk-[A-Za-z0-9._\-]{8,})\b"),
@@ -278,12 +295,19 @@ def install_secret_excepthook(*, stream: Any | None = None, force: bool = False)
 
 
 def _secret_replacement(match: re.Match[str]) -> str:
+    if "secret" in match.re.groupindex:
+        if not match.group("secret"):
+            return match.group(0)
+        return f'{match.group("prefix")}{match.group("quote")}{REDACTED}{match.group("quote")}'
     if match.lastindex and match.lastindex > 1:
         return f"{match.group(1)}={REDACTED}"
     return REDACTED
 
 
 def _sensitive_match_is_unredacted(match: re.Match[str]) -> bool:
+    if "secret" in match.re.groupindex:
+        secret = match.group("secret")
+        return bool(secret) and secret != REDACTED
     if match.lastindex and match.lastindex > 1:
         return not str(match.group(2) or "").strip().startswith(REDACTED)
     return str(match.group(0) or "").strip() != REDACTED
