@@ -47,6 +47,7 @@ from apps.locald.screenshot import ScreenCapturePermissionError, capture_screens
 from apps.shell.agent.runtime.config import MAIN_CHAT_AGENT_ID
 from apps.shell.agent.runtime.group_run_support import create_runnable_run
 from apps.shell.agent.runtime.group_runs import project_group_terminal_after_member
+from apps.shell.agent.runtime.music_followups import bind_selected_agent_music_followup
 from apps.shell.agent.runtime.run_group_attachments import (
     issue_run_group_child_attachment,
     normalize_run_group_child_identity,
@@ -2910,6 +2911,7 @@ class ChatAPI:
         ) = None
         runnable_daily_desktop_requests: list[dict[str, Any]] = []
         runnable_planning_goal = user_goal
+        runnable_music_followup_binding: dict[str, str] | None = None
         if (
             runnable.get("kind") == "agent"
             and (
@@ -2937,6 +2939,35 @@ class ChatAPI:
                     metadata=user_metadata,
                 )
             )
+            query = self._daily_desktop_music_followup_query(user_goal)
+            if query and runnable_planning_goal == f"用Apple Music播放{query}":
+                bound_followup = bind_selected_agent_music_followup(
+                    runnable_daily_desktop_runtime_plan,
+                    original_goal=user_goal,
+                    planning_goal=runnable_planning_goal,
+                    query=query,
+                    conversation_id=self._session.session_id,
+                    runnable=runnable,
+                    messages=self._chat_store().load_messages(
+                        self._session.session_id, limit=12,
+                    ),
+                    get_run=service.get_run,
+                    list_run_events=lambda run_id: service.list_run_events(
+                        run_id, include_internal=True,
+                    )["events"],
+                )
+                if bound_followup is None:
+                    runnable_planning_goal = user_goal
+                    runnable_daily_desktop_runtime_plan = (
+                        self._daily_desktop_entrypoint_runtime_plan(
+                            user_goal, metadata=user_metadata,
+                        )
+                    )
+                else:
+                    (
+                        runnable_daily_desktop_runtime_plan,
+                        runnable_music_followup_binding,
+                    ) = bound_followup
             runnable_daily_desktop_requests = list(
                 runnable_daily_desktop_runtime_plan.entrypoint_requests
             )
@@ -3171,6 +3202,33 @@ class ChatAPI:
             }
 
         self._session.mark_message_completed(message_id)
+        append_event = getattr(service, "append_run_event", None)
+        if (
+            callable(append_event)
+            and runnable_daily_desktop_runtime_plan is not None
+            and runnable_daily_desktop_runtime_plan.has_plan
+            and getattr(
+                getattr(runnable_daily_desktop_runtime_plan.decision, "selected_intent", None),
+                "kind", "",
+            ) == "media_playback"
+        ):
+            append_event(
+                run["run_id"], "agent.chat.user_turn.bound",
+                {
+                    "conversation_id": self._session.session_id,
+                    "user_message_id": message_id,
+                    "assistant_message_id": assistant_id,
+                    "runnable_id": str(runnable.get("id") or ""),
+                    "original_goal": user_goal,
+                },
+                visibility="internal", sensitivity="private",
+            )
+        if runnable_music_followup_binding is not None and callable(append_event):
+            append_event(
+                run["run_id"], "agent.desktop.music_followup.bound",
+                {"source": "native_chat_history", **runnable_music_followup_binding},
+                visibility="internal", sensitivity="private",
+            )
         runnable = run.get("runnable") or runnable
         self._attach_processing_agent_run_metadata(assistant_id, initial_content, run)
 
