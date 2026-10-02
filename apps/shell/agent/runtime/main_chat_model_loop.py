@@ -16,6 +16,7 @@ from apps.shell.agent.runtime.goal_runtime import (
     goal_contract_event_payload,
     planned_goal_contract_payload,
     runtime_goal_contract,
+    supplied_image_goal_contract_payload,
 )
 from apps.shell.agent.runtime.model_messages import (
     message_visible_content_text,
@@ -28,6 +29,11 @@ from apps.shell.agent.runtime.model_intent_planning import (
 )
 from apps.shell.agent.runtime.tool_brokers import (
     close_owned_browser_target_best_effort,
+)
+from apps.shell.agent.runtime.supplied_images import (
+    SUPPLIED_IMAGE_EVENT,
+    persisted_supplied_image_binding,
+    supplied_image_binding_from_messages,
 )
 from apps.shell.yachiyo_agent.daily_desktop import (
     daily_desktop_requests_can_complete_without_model,
@@ -185,6 +191,34 @@ class MainChatModelLoopRunner:
         user_goal = str(run.get("user_goal") or "").strip()
         if not user_goal:
             raise ValueError("goal_contract_invalid: user_goal_required")
+        current_image_binding = supplied_image_binding_from_messages(
+            run_id=run_id, original_goal=user_goal, messages=messages
+        )
+        persisted_image_binding = persisted_supplied_image_binding(
+            run_id=run_id, original_goal=user_goal, timeline=timeline
+        )
+        newly_bound_images = None
+        if current_image_binding is not None:
+            if persisted_image_binding and persisted_image_binding != current_image_binding:
+                return self._fail_main_chat_run(run_id, "supplied_image_binding_conflict")
+            if persisted_image_binding is None:
+                newly_bound_images = current_image_binding
+                timeline.append(self._timeline(
+                    SUPPLIED_IMAGE_EVENT, "User image input bound", visibility="internal", **current_image_binding
+                ))
+        image_goal_template = supplied_image_goal_contract_payload(
+            run_id=run_id, original_goal=user_goal, timeline=timeline
+        )
+        if image_goal_template:
+            if direct_tool_request or direct_tool_requests:
+                return self._fail_main_chat_run(run_id, "supplied_image_goal_has_external_tool_request")
+            agent = self._main_chat_agent_config(
+                model_profile_id=default_profile_id,
+                tool_policy={"allowed_tools": [], "response_only": True},
+                workspace_policy=workspace_policy,
+            )
+            runtime = self._compile_agent_runtime(agent)
+            allowed_tools = runtime["tool_policy"].get("allowed_tools") or []
         budget = self._run_budget(run_id, timeline)
         self._check_context_budget(budget, messages)
         authoritative_direct_daily_desktop_intent = (
@@ -196,12 +230,13 @@ class MainChatModelLoopRunner:
             )
         )
         has_persisted_goal_contract = _timeline_has_goal_contract_event(timeline)
-        goal_contract_template = None
+        goal_contract_template = image_goal_template or None
         model_assisted_selection = None
         if not has_persisted_goal_contract:
             if (
                 self._resolve_initial_model_plan is not None
                 and not authoritative_direct_daily_desktop_intent
+                and not image_goal_template
             ):
                 try:
                     initial_plan_resolution = self._resolve_initial_model_plan(
@@ -270,7 +305,7 @@ class MainChatModelLoopRunner:
                         model_assisted_selection.event_payload
                     ),
                 }
-            else:
+            elif not image_goal_template:
                 goal_contract_template = planned_goal_contract_payload(
                     user_goal,
                     allowed_tools=allowed_tools,
@@ -325,6 +360,14 @@ class MainChatModelLoopRunner:
             )
             if not committed:
                 return contract_run
+            if newly_bound_images and self._append_run_event(
+                run_id,
+                SUPPLIED_IMAGE_EVENT,
+                {**newly_bound_images, "visibility": "internal"},
+                visibility="internal",
+                **_run_event_fence(contract_run, status="running"),
+            ) is None:
+                return self._get_run(run_id)
             if self._append_run_event(
                 run_id,
                 "agent.goal.contract",
