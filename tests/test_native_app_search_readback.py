@@ -105,7 +105,8 @@ def _receipt(source, verifier, observation):
     )
 
 
-def test_exact_query_and_results_readback_completes_declared_search_criterion():
+@pytest.mark.parametrize("private_context", [False, True])
+def test_exact_query_and_results_readback_completes_declared_search_criterion(private_context):
     contract, source, verifier, observation = _case()
     assert runtime_goal_assessment(contract, [source]).completed is False
     receipt = _receipt(source, verifier, observation)
@@ -119,6 +120,8 @@ def test_exact_query_and_results_readback_completes_declared_search_criterion():
         "input_preview": verifier["input"],
         "result": _tool_result_with_trusted_observation_receipt(observation, receipt),
     }
+    if private_context:
+        event["result"]["verification_context_trusted"] = True
     assert runtime_goal_assessment(contract, [source, event]).completed is True
 
 
