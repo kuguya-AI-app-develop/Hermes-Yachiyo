@@ -10,6 +10,7 @@
     "dev": "concurrently -k -s first \"vite --host 127.0.0.1 --port 5174 --strictPort\" \"wait-on http-get://127.0.0.1:5174 && tsc -p tsconfig.electron.json && electron dist-electron/main.js\"",
     "build": "tsc -b && vite build && tsc -p tsconfig.electron.json",
     "test:consumer-presentations": "node --test scripts/consumer-presentations.test.mjs",
+    "test:markdown": "node --test scripts/markdown.test.mjs",
     "test:cua-mcp-bridge": "tsc -p tsconfig.electron.json && node --test electron/cuaMcpBridge.test.mjs",
     "test:background-control-readiness": "node scripts/test-background-control-readiness.mjs",
     "bundle:budget": "vite build --manifest manifest.json && node ../../scripts/check_frontend_bundle_budget.mjs --dist dist --manifest dist/manifest.json --mode freeze",
