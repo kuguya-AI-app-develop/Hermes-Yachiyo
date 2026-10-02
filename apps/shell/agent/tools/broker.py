@@ -104,6 +104,100 @@ def _app_lifecycle_status_verified(
     )
 
 
+def _without_media_completion_claims(result: dict[str, Any]) -> dict[str, Any]:
+    """Completion comes from native media observations, not supplied flags."""
+
+    authority_keys = {
+        "postcondition_verified", "postcondition_ok", "verification_passed",
+        "verified", "verified_observed_state", "verification_context_trusted",
+        "verification_satisfied_by_native_receipt",
+    }
+    cleaned = {key: value for key, value in result.items() if key not in authority_keys}
+    if isinstance(result.get("data"), dict):
+        cleaned["data"] = {
+            key: value for key, value in result["data"].items()
+            if key not in authority_keys
+        }
+    return cleaned
+
+
+def _native_media_result(result: dict[str, Any], expected_tool: str) -> bool:
+    return bool(
+        result.get("ok") is True
+        and result.get("action") == expected_tool
+        and not result.get("fallback_used")
+        and not result.get("permission_error")
+        and isinstance(result.get("data"), dict)
+        and not result["data"].get("playback_state_unverified")
+    )
+
+
+def _apple_music_control_readback_verified(result: dict[str, Any], action: str) -> bool:
+    if not _native_media_result(result, "media.apple_music_control"):
+        return False
+    data = result["data"]
+    expected_action = desktop._clean_music_control_action(action)
+    if data.get("control") != expected_action:
+        return False
+    state = str(data.get("player_state") or "").strip().casefold()
+    if expected_action in {"play", "pause"}:
+        return state == {"play": "playing", "pause": "paused"}[expected_action]
+    if expected_action not in {"next", "previous"} or state not in {
+        "playing", "paused", "stopped",
+    }:
+        return False
+    before = str(data.get("before_track_id") or "").strip()
+    after = str(data.get("after_track_id") or "").strip()
+    source = data.get("track_identity_source")
+    if source == "music_database_id":
+        valid_ids = bool(
+            re.fullmatch(r"[1-9][0-9]*", before)
+            and re.fullmatch(r"[1-9][0-9]*", after)
+        )
+    elif source == "music_persistent_id":
+        valid_ids = bool(
+            re.fullmatch(r"[0-9A-Fa-f]{16}", before)
+            and re.fullmatch(r"[0-9A-Fa-f]{16}", after)
+            and before.strip("0") and after.strip("0")
+        )
+    else:
+        valid_ids = False
+    return bool(
+        valid_ids and before.casefold() != after.casefold()
+        and str(data.get("track_id") or "").strip() == after
+        and data.get("track_identity_conflict") is not True
+    )
+
+
+def _apple_music_play_readback_verified(result: dict[str, Any], query: str) -> bool:
+    if not _native_media_result(result, "media.apple_music_play"):
+        return False
+    data = result["data"]
+    expected_query = str(query or "").strip()
+    identity = data.get("album") if data.get("match_kind") == "album" else data.get("track")
+    return bool(
+        expected_query and str(data.get("query") or "").strip() == expected_query
+        and data.get("status") == "played"
+        and str(data.get("player_state") or "").strip().casefold() == "playing"
+        and data.get("playback_started") is True
+        and data.get("track_identity_verified") is True
+        and desktop._apple_music_identity_matches(expected_query, identity)
+        and str(data.get("track") or "").strip()
+        and str(data.get("artist") or "").strip()
+    )
+
+
+def _apple_music_open_readback_verified(result: dict[str, Any]) -> bool:
+    if not _native_media_result(result, "media.apple_music_open_and_play"):
+        return False
+    data = result["data"]
+    return bool(
+        data.get("app_name") == "Music" and data.get("open_ok") is True
+        and data.get("playback_ok") is True and data.get("control") == "play"
+        and str(data.get("player_state") or "").strip().casefold() == "playing"
+    )
+
+
 _WORKSPACE_LIST_FILE_TYPE_PATTERNS: dict[str, tuple[str, ...]] = {
     "screenshot": ("*.png", "*.jpg", "*.jpeg", "*.heic", "*.gif", "*.webp"),
     "image": ("*.png", "*.jpg", "*.jpeg", "*.heic", "*.gif", "*.webp"),
@@ -1802,19 +1896,32 @@ class ToolBroker:
         return desktop.open_path_with_app(path, app_name)
 
     def media_apple_music_play(self, query: str) -> dict[str, Any]:
-        return desktop.apple_music_play(query)
+        result = _without_media_completion_claims(desktop.apple_music_play(query))
+        return _with_native_postcondition_receipt(
+            result, verified=_apple_music_play_readback_verified(result, query)
+        )
 
     def media_apple_music_status(self) -> dict[str, Any]:
         return desktop.apple_music_status()
 
     def media_apple_music_open_and_play(self) -> dict[str, Any]:
-        return desktop.apple_music_open_and_play()
+        result = _without_media_completion_claims(desktop.apple_music_open_and_play())
+        return _with_native_postcondition_receipt(
+            result, verified=_apple_music_open_readback_verified(result)
+        )
 
     def media_apple_music_control(self, action: str) -> dict[str, Any]:
-        return desktop.apple_music_control(action)
+        result = _without_media_completion_claims(desktop.apple_music_control(action))
+        return _with_native_postcondition_receipt(
+            result, verified=_apple_music_control_readback_verified(result, action)
+        )
 
     def media_music_app_open_and_play(self, app_name: str) -> dict[str, Any]:
-        return desktop.music_app_open_and_play(app_name)
+        result = _without_media_completion_claims(desktop.music_app_open_and_play(app_name))
+        return _with_native_postcondition_receipt(
+            result, verified=str(app_name or "").strip() == "Music"
+            and _apple_music_open_readback_verified(result),
+        )
 
     def media_music_app_control(self, app_name: str, action: str) -> dict[str, Any]:
         return desktop.music_app_control(app_name, action)
