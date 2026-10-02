@@ -598,7 +598,7 @@ function runtimeToolRecoveryExecutableLabel(tool: string, input: Record<string, 
   if (tool === 'media.apple_music_status') return '查看Apple Music播放状态';
   if (tool === 'media.apple_music_open_and_play') return '打开Apple Music并播放';
   if (tool === 'media.apple_music_control') return appleMusicControlRetryPrompt(String(input.action || '').trim());
-  if (tool === 'media.music_app_open_and_play' && appName) return `打开${appName}并播放`;
+  if (tool === 'media.music_app_open_and_play' && appName) return musicAppOpenAndPlayPrompt(appName);
   if (tool === 'system.volume') return systemVolumeRetryPrompt(String(input.action || '').trim(), input);
   if (tool === 'system.brightness') return systemBrightnessRetryPrompt(String(input.action || '').trim());
   if (tool === 'clipboard.read') return '读取剪贴板';
@@ -727,12 +727,17 @@ function runtimeToolRecoveryRetryPrompt(tool: string, input: Record<string, unkn
   if (tool === 'media.apple_music_play' && query) return `播放${query}`;
   if (tool === 'media.apple_music_open_and_play') return '打开Apple Music并播放';
   if (tool === 'media.apple_music_control') return appleMusicControlRetryPrompt(action);
-  if (tool === 'media.music_app_open_and_play' && appName) return `打开${appName}并播放`;
+  if (tool === 'media.music_app_open_and_play' && appName) return musicAppOpenAndPlayPrompt(appName);
   if (tool === 'system.settings_open') return target ? `打开${target}` : '打开系统设置';
   if (tool === 'system.volume') return systemVolumeRetryPrompt(action, input);
   if (tool === 'system.brightness') return systemBrightnessRetryPrompt(action);
   if (tool === 'clipboard.write' && typeof input.text === 'string') return `复制${input.text}到剪贴板`;
   return '';
+}
+
+function musicAppOpenAndPlayPrompt(appName: string): string {
+  const displayName = appName.toLowerCase() === 'music' ? 'Apple Music' : appName;
+  return `打开${displayName}并播放`;
 }
 
 function appleMusicControlRetryPrompt(action: string): string {
