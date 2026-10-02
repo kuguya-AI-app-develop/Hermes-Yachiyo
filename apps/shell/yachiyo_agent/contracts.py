@@ -1766,6 +1766,7 @@ class FutureTaskSnapshot(_PublicSnapshot):
     created_at: str = ""
     updated_at: str = ""
     cancelled_at: str | None = None
+    trigger_in_flight: bool = False
 
 
 class AgentGroupMemberSnapshot(_PublicSnapshot):

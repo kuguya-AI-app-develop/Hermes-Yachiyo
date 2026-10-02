@@ -47,7 +47,7 @@ export function useRuntimeMemoryManagement({
     const taskLabel = futureTask.title.trim() || futureTask.future_task_id;
     showConfirmDialog({
       title: `取消 FutureTask「${taskLabel.slice(0, 40)}」？`,
-      description: '这个 FutureTask 不会再自动触发；已经生成的 Run 不会被删除。',
+      description: '这个 FutureTask 不会再自动触发；已经开始的 Run 会继续执行。',
       confirmLabel: '取消 FutureTask',
       variant: 'danger',
       onConfirm: () => void runAction(async () => {
