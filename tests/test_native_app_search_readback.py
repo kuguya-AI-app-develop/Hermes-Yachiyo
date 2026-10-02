@@ -208,6 +208,63 @@ def test_explicit_field_click_keeps_approval_and_full_search_chain_with_rich_too
     assert not any("shortcut" in (step.tool_name or "") for step in steps)
 
 
+def test_search_then_click_keeps_semantic_query_when_app_discovery_refines_scope():
+    goal = "打开 Finder 查找 Downloads 然后打开第一个"
+    selection = planner_first_direct_tool_selection(goal, DAILY_DESKTOP_TOOL_NAMES)
+    envelope = runtime_execution_envelope_from_decision(
+        selection.decision, allowed_tools=DAILY_DESKTOP_TOOL_NAMES, full_plan=True,
+    ).model_dump()
+    request = next(r for r in envelope["requests"] if r["tool_name"] == "desktop.search_submit")
+    assert request["action_target"]["query"] == "Downloads"
+    assert request["action_target"]["target"] == "搜索"
+    assert request["action_target"]["role_filter"] == "text"
+    assert request["action_target"]["selection_query"] == "Finder"
+    assert request["input"] == {}
+
+
+@pytest.mark.parametrize("change", [
+    "none", "dispatch", "public", "provider_self_claim", "wrong_query", "wrong_app",
+    "wrong_run", "wrong_plan", "wrong_step", "wrong_request", "wrong_call", "missing_provider",
+])
+def test_search_dependency_requires_exact_runtime_owned_ax_receipt(change):
+    from apps.shell.agent.runtime.tool_execution import (
+        _approval_dependency_semantic_verification_succeeded,
+    )
+
+    _, source, verifier, observation = _case()
+    dependency = {**source, "tool": "desktop.search_submit"}
+    result = _tool_result_with_trusted_observation_receipt(
+        observation, _receipt(source, verifier, observation),
+    )
+    event = {**verifier, "source": "runtime_native_postcondition_receipt"}
+    tool = "desktop.ui_elements"
+    if change == "dispatch":
+        result = source["result"]
+        tool = "desktop.search_submit"
+    elif change == "public":
+        event["visibility"] = "public"
+    elif change == "provider_self_claim":
+        event["source"] = "runtime_planner"
+    elif change == "wrong_query":
+        result["observed_query"] = "李四"
+    elif change == "wrong_app":
+        result["observed_app_name"] = "Finder"
+    elif change == "wrong_run":
+        result["run_id"] = "other"
+    elif change == "wrong_plan":
+        result["plan_id"] = "other"
+    elif change in {"wrong_step", "wrong_request", "wrong_call"}:
+        key = {"wrong_step": "source_step_id", "wrong_request": "source_request_id",
+               "wrong_call": "source_tool_call_id"}[change]
+        result[key] = "other"
+    elif change == "missing_provider":
+        result.pop(RUNTIME_EXECUTION_PROVENANCE_KEY)
+        result.pop("local_desktop_provider")
+    assert _approval_dependency_semantic_verification_succeeded(
+        result, dependency, approval_request={}, event=event, event_payload={}, event_tool=tool,
+    ) is (change == "none")
+
+
 def test_main_chat_search_completes_from_actual_ordered_dispatch_and_ax_results(
     tmp_path, monkeypatch
 ):
@@ -356,3 +413,29 @@ def test_main_chat_search_completes_from_actual_ordered_dispatch_and_ax_results(
     finally:
         service.close()
         store.close()
+
+
+@pytest.mark.parametrize("provider_self_claims", [False, True])
+def test_return_dispatch_cannot_replace_independent_query_results_observation(provider_self_claims):
+    from apps.shell.agent.runtime.tool_execution import (
+        _native_postcondition_receipt_for_verifier,
+        _tool_result_with_trusted_exact_dispatch,
+    )
+
+    contract, source, verifier, observation = _case()
+    raw = deepcopy(source["result"])
+    if provider_self_claims:
+        raw.update(postcondition_verified=True, verified_observed_state="fulfilled", verified=True)
+        raw["data"].update(postcondition_verified=True, verified_observed_state="fulfilled")
+    source["result"] = _tool_result_with_trusted_exact_dispatch(
+        "desktop.search_submit", source, raw, run_id="run-search"
+    )
+    assert source["result"]["native_dispatch_verified"] is True
+    assert source["result"]["verified_observed_state"] == "dispatched"
+    assert source["result"].get("postcondition_verified") is not True
+    assert (
+        _native_postcondition_receipt_for_verifier(verifier, [source], tool_timeline_start=0) == {}
+    )
+    assert not runtime_goal_assessment(contract, [source]).completed
+    receipt = _receipt(source, verifier, observation)
+    assert receipt["verification_predicate_kind"] == "exact_app_search_result_present"

@@ -49,6 +49,7 @@ from apps.shell.agent.runtime.dispatch_semantics import (
     intrinsic_native_postcondition_state,
     intrinsic_native_postcondition_target_matches,
     is_semantic_safe_key,
+    is_semantic_search_submit,
     is_semantic_safe_shortcut,
 )
 from apps.shell.agent.runtime.errors import (
@@ -2000,6 +2001,14 @@ def _approval_dependency_semantic_verification_succeeded(
         or (dependency_request or {}).get("tool_name")
         or ""
     ).strip()
+    if is_semantic_search_submit(expected_tool):
+        return _approval_dependency_exact_search_receipt_succeeded(
+            result,
+            dependency_request or {},
+            event=event,
+            event_payload=event_payload,
+            event_tool=event_tool,
+        )
     if _approval_dependency_is_clipboard_paste(dependency_request):
         return _approval_dependency_exact_paste_receipt_succeeded(
             result,
@@ -2084,6 +2093,56 @@ def _approval_dependency_semantic_verification_succeeded(
     if event_tool in {"desktop.ui_elements", "desktop.read_ui"}:
         return _approval_dependency_ui_observation_has_content(result)
     return False
+
+
+def _approval_dependency_exact_search_receipt_succeeded(
+    result: Mapping[str, Any],
+    dependency_request: Mapping[str, Any],
+    *,
+    event: Mapping[str, Any],
+    event_payload: Mapping[str, Any],
+    event_tool: str,
+) -> bool:
+    """A dependent click requires the exact submitted query's AX receipt."""
+    if event_tool not in {"desktop.ui_elements", "desktop.read_ui", "desktop.verify"}:
+        return False
+    context = {**dict(event_payload), **dict(event)}
+    if any(context.get(key) != value for key, value in {
+        "source": "runtime_native_postcondition_receipt",
+        "actor": "native_runtime",
+        "execution_authority": "runtime_tool_executor",
+        "visibility": "internal",
+    }.items()):
+        return False
+    target = dependency_request.get("action_target")
+    if not isinstance(target, Mapping) or not target.get("query"):
+        return False
+    for key in ("step_id", "request_id", "tool_call_id"):
+        expected = str(dependency_request.get(key) or "")
+        source_key = f"source_{key}"
+        if not expected or result.get(source_key) != expected:
+            return False
+    run_id = str(context.get("run_id") or "")
+    plan_id = str(dependency_request.get("plan_id") or "")
+    if (
+        not run_id or result.get("run_id") != run_id
+        or (dependency_request.get("run_id") and dependency_request["run_id"] != run_id)
+        or not plan_id or result.get("plan_id") != plan_id
+        or context.get("plan_id") != plan_id
+    ):
+        return False
+    return bool(
+        result.get("postcondition_verified") is True
+        and result.get("verification_satisfied_by_native_receipt") is True
+        and result.get("verification_predicate_kind") == "exact_app_search_result_present"
+        and result.get("source_tool") == "desktop.search_submit"
+        and result.get("observed_query") == target["query"]
+        and _app_lookups_same_identity(
+            str(target.get("app_name") or ""),
+            str(result.get("observed_app_name") or ""),
+        )
+        and all(_trusted_runtime_execution_provider_identity(context, result))
+    )
 
 
 def _approval_dependency_is_clipboard_paste(
@@ -11534,7 +11593,7 @@ def _tool_result_with_trusted_exact_dispatch(
         )
     ):
         return result
-    if is_semantic_safe_key(tool_name):
+    if is_semantic_safe_key(tool_name) or is_semantic_search_submit(tool_name):
         # Delivery is auditable, but does not prove changed focus/selection/UI.
         # Never mint a postcondition receipt from the key mutation itself.
         return {

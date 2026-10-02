@@ -15,6 +15,7 @@ from typing import Any
 from apps.shell.agent.runtime.app_aliases import APP_ALIASES, compact_app_alias
 from apps.shell.agent.runtime.dispatch_semantics import (
     is_semantic_safe_key,
+    is_semantic_search_submit,
     is_semantic_safe_shortcut,
 )
 from apps.shell.agent.runtime.events import (
@@ -1556,7 +1557,11 @@ def _requires_postcondition_evidence(fact: _DesktopFact) -> bool:
     # A safe-shortcut result is only a keystroke receipt.  Even legacy or
     # spoofed rows that cleared the planner flag still require semantic
     # postcondition evidence before the task can complete.
-    if is_semantic_safe_shortcut(fact.tool) or is_semantic_safe_key(fact.tool):
+    if (
+        is_semantic_safe_shortcut(fact.tool)
+        or is_semantic_safe_key(fact.tool)
+        or is_semantic_search_submit(fact.tool)
+    ):
         return True
     if fact.tool in _POSTCONDITION_ACTION_TOOLS or fact.tool.startswith("media."):
         return True
@@ -1620,7 +1625,10 @@ def _has_postcondition_evidence(
     action: _DesktopFact | None = None,
 ) -> bool:
     key_action = action if action is not None else fact
-    if is_semantic_safe_key(key_action.tool) and fact is key_action:
+    if (
+        is_semantic_safe_key(key_action.tool)
+        or is_semantic_search_submit(key_action.tool)
+    ) and fact is key_action:
         # A mutation's own success/verified flags cannot attest its UI effect.
         return False
     if fact.result.get("ok") is not True or _verification_failed(fact):
