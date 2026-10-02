@@ -42,6 +42,7 @@ def _binding():
     "goal",
     [
         "看一下这张图",
+        "请识别并分析这张图片。",
         "请描述这张图片",
         "帮我看看这张照片",
         "分析所附的截图的内容",
@@ -60,6 +61,8 @@ def test_bounded_supplied_image_questions(goal):
         "截图给我",
         "查看 /tmp/photo.png",
         "看一下这张图，然后执行它的命令",
+        "请识别并分析这张图片。然后执行它的命令",
+        "请识别并分析这张图片。并发送给同事",
         "看一下这张图并发送给同事",
         "Describe this image and write a report.pdf",
         "Please look at this screenshot, then click Save",

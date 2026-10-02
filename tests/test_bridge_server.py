@@ -2175,12 +2175,12 @@ def test_chat_delegated_summary_bridge_route_runs_native_followup(tmp_path, monk
             summary_task = state.get_task(summary["task_id"])
             assert summary_task is not None
             assert summary_task.chat_session_id == session.session_id
-            assert "[Oha-Yachiyo 自动委派 Run 汇总]" in summary_task.description
-            assert "用户原始请求：请自动委派一个 Agent 整理 Bridge summary evidence" in summary_task.description
-            assert "run_oha_agent" not in summary_task.description
-            assert "agent_bridge_summary：已完成" in summary_task.description
-            assert "reports/bridge-summary.md" in summary_task.description
-            assert "agent-context.md" not in summary_task.description
+            assert "[Oha-Yachiyo 自动委派 Run 汇总]" in summary_task.response_context
+            assert "用户原始请求：请自动委派一个 Agent 整理 Bridge summary evidence" in summary_task.response_context
+            assert "run_oha_agent" not in summary_task.response_context
+            assert "agent_bridge_summary：已完成" in summary_task.response_context
+            assert "reports/bridge-summary.md" in summary_task.response_context
+            assert "agent-context.md" not in summary_task.response_context
 
             await runner._execute_with_state(summary_task.task_id)
 
@@ -2507,7 +2507,7 @@ def test_chat_direct_group_agent_bridge_route_runs_native_summary(tmp_path, monk
             assert "不要再派发新的 Agent 任务" in last_content
             return {"role": "assistant", "content": "主模型整理：Design 的 Bridge 直接结果已归档。"}
         assert "# Agent\nName: Design Agent" in last_content
-        assert "# User Goal\n做 Bridge route Native 直接点名验证" in last_content
+        assert "# User Goal\nReply with exactly 'Design bridge direct result'" in last_content
         assert "[Oha-Yachiyo 群组执行约定]" in last_content
         assert "你在群内身份是：Design" in last_content
         return {"role": "assistant", "content": "Design bridge direct result"}
@@ -2579,7 +2579,7 @@ def test_chat_direct_group_agent_bridge_route_runs_native_summary(tmp_path, monk
 
         sent = await ui_routes.send_chat_message(
             ui_routes.SendChatMessageRequest(
-                text="做 Bridge route Native 直接点名验证",
+                text="Reply with exactly 'Design bridge direct result'",
                 runnable_id=design["agent_id"],
                 client_message_id="bridge-direct-group-agent-client-1",
             )
@@ -2645,9 +2645,9 @@ def test_chat_direct_group_agent_bridge_route_runs_native_summary(tmp_path, monk
         assert summary_message["status"] == "processing"
         assert summary_task is not None
         assert summary_task.chat_session_id == runtime.chat_session.session_id
-        assert "[Oha-Yachiyo 群组直接 Agent 汇总]" in summary_task.description
-        assert "Design：已完成" in summary_task.description
-        assert "汇报：Design bridge direct result" in summary_task.description
+        assert "[Oha-Yachiyo 群组直接 Agent 汇总]" in summary_task.response_context
+        assert "Design：已完成" in summary_task.response_context
+        assert "汇报：Design bridge direct result" in summary_task.response_context
 
         await runner._execute_with_state(summary_task.task_id)
 
@@ -2736,29 +2736,7 @@ def test_chat_direct_group_agent_bridge_route_runs_rejected_summary(tmp_path, mo
             assert "汇报：工具审批已拒绝：Rejected from Bridge direct group" in last_content
             assert "不要再派发新的 Agent 任务" in last_content
             return {"role": "assistant", "content": "主模型整理：Design 的 Bridge 审批拒绝已告知用户。"}
-        assert "# Agent\nName: Design Agent" in last_content
-        assert "# User Goal\n运行 Bridge route 需要审批的终端命令" in last_content
-        assert any((tool.get("function") or {}).get("name") == "terminal_run" for tool in tools or [])
-        return {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {
-                    "id": "call_bridge_direct_terminal",
-                    "type": "function",
-                    "function": {
-                        "name": "terminal_run",
-                        "arguments": json.dumps(
-                            {
-                                "command": "printf should-not-run",
-                                "timeout_seconds": 30,
-                            },
-                            ensure_ascii=False,
-                        ),
-                    },
-                }
-            ],
-        }
+        raise AssertionError("Rejected native command must not execute or call the child model")
 
     monkeypatch.setattr(chat_store_mod, "get_chat_store", lambda: store)
     monkeypatch.setattr(activity_store_mod, "get_activity_store", lambda: activity_store)
@@ -2835,7 +2813,7 @@ def test_chat_direct_group_agent_bridge_route_runs_rejected_summary(tmp_path, mo
 
         sent = await ui_routes.send_chat_message(
             ui_routes.SendChatMessageRequest(
-                text="运行 Bridge route 需要审批的终端命令",
+                text="Run printf should-not-run",
                 runnable_id=design["agent_id"],
                 client_message_id="bridge-direct-group-agent-rejected-client-1",
             )
@@ -2867,6 +2845,8 @@ def test_chat_direct_group_agent_bridge_route_runs_rejected_summary(tmp_path, mo
         assert "agent.tool.approval_required" in rejected_event_types
         assert "agent.tool.approval_rejected" in rejected_event_types
         assert "agent.run.cancelled" in rejected_event_types
+        assert not any(event["event_type"] == "agent.tool.call" for event in service.list_run_events(
+            waiting["run_id"], include_internal=True, limit=200)["events"])
 
         rejected_agent = None
         for _ in range(150):
@@ -2900,9 +2880,9 @@ def test_chat_direct_group_agent_bridge_route_runs_rejected_summary(tmp_path, mo
         assert summary_message["status"] == "processing"
         assert summary_task is not None
         assert summary_task.chat_session_id == runtime.chat_session.session_id
-        assert "[Oha-Yachiyo 群组直接 Agent 汇总]" in summary_task.description
-        assert "Design：已取消" in summary_task.description
-        assert "汇报：工具审批已拒绝：Rejected from Bridge direct group" in summary_task.description
+        assert "[Oha-Yachiyo 群组直接 Agent 汇总]" in summary_task.response_context
+        assert "Design：已取消" in summary_task.response_context
+        assert "汇报：工具审批已拒绝：Rejected from Bridge direct group" in summary_task.response_context
 
         await runner._execute_with_state(summary_task.task_id)
 
@@ -2961,7 +2941,7 @@ def test_chat_direct_group_agent_bridge_route_runs_rejected_summary(tmp_path, mo
 
     try:
         asyncio.run(scenario())
-        assert len(model_calls) == 2
+        assert len(model_calls) == 1
     finally:
         service.close()
         activity_store.close()
@@ -2988,37 +2968,10 @@ def test_chat_direct_group_agent_bridge_route_runs_approved_summary(tmp_path, mo
         last_content = str(messages[-1]["content"])
         if "[Oha-Yachiyo 群组直接 Agent 汇总]" in last_content:
             assert "Design：已完成" in last_content
-            assert "汇报：Design bridge approved result" in last_content
+            assert "bridge-approved" in last_content
             assert "不要再派发新的 Agent 任务" in last_content
             return {"role": "assistant", "content": "主模型整理：Design 的 Bridge 审批通过结果已归档。"}
-        tool_messages = [message for message in messages if message.get("role") == "tool"]
-        if tool_messages:
-            assert tool_messages[-1]["tool_call_id"] == "call_bridge_direct_terminal_approve"
-            assert "bridge-approved" in str(tool_messages[-1]["content"])
-            return {"role": "assistant", "content": "Design bridge approved result"}
-        assert "# Agent\nName: Design Agent" in last_content
-        assert "# User Goal\n运行 Bridge route 需要批准的终端命令" in last_content
-        assert any((tool.get("function") or {}).get("name") == "terminal_run" for tool in tools or [])
-        return {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {
-                    "id": "call_bridge_direct_terminal_approve",
-                    "type": "function",
-                    "function": {
-                        "name": "terminal_run",
-                        "arguments": json.dumps(
-                            {
-                                "command": "printf bridge-approved",
-                                "timeout_seconds": 30,
-                            },
-                            ensure_ascii=False,
-                        ),
-                    },
-                }
-            ],
-        }
+        raise AssertionError("Verified native process receipt must not need a child-model success claim")
 
     monkeypatch.setattr(chat_store_mod, "get_chat_store", lambda: store)
     monkeypatch.setattr(activity_store_mod, "get_activity_store", lambda: activity_store)
@@ -3095,7 +3048,7 @@ def test_chat_direct_group_agent_bridge_route_runs_approved_summary(tmp_path, mo
 
         sent = await ui_routes.send_chat_message(
             ui_routes.SendChatMessageRequest(
-                text="运行 Bridge route 需要批准的终端命令",
+                text="Run printf bridge-approved",
                 runnable_id=design["agent_id"],
                 client_message_id="bridge-direct-group-agent-approved-client-1",
             )
@@ -3121,16 +3074,16 @@ def test_chat_direct_group_agent_bridge_route_runs_approved_summary(tmp_path, mo
             ),
         )
         assert approved["status"] == "completed"
-        assert approved["result"] == "Design bridge approved result"
+        assert "bridge-approved" in approved["result"]
         approved_replay = await run_routes.list_run_events(waiting["run_id"], after_sequence=0, limit=200)
         approved_event_types = [event["event_type"] for event in approved_replay["events"]]
         assert "agent.tool.approval_required" in approved_event_types
         assert "agent.tool.approval_approved" in approved_event_types
-        assert "agent.tool.call" in approved_event_types
+        assert "agent.tool.call" not in approved_event_types
         assert "agent.run.completed" in approved_event_types
         tool_fact = next(
             event
-            for event in approved_replay["events"]
+            for event in service.list_run_events(waiting["run_id"], include_internal=True, limit=200)["events"]
             if event["event_type"] == "agent.tool.call" and event["payload"].get("approved") is True
         )
         assert tool_fact["payload"]["tool"] == "terminal.run"
@@ -3155,7 +3108,7 @@ def test_chat_direct_group_agent_bridge_route_runs_approved_summary(tmp_path, mo
         assert approved_agent is not None
         assert approved_agent["status"] == "completed"
         assert approved_agent["metadata"]["run_id"] == sent["agent_run_id"]
-        assert approved_agent["metadata"]["agent_report"] == "Design bridge approved result"
+        assert approved_agent["metadata"]["agent_report"] == approved["result"]
         assert approved_agent["metadata"]["group_agent_summary_pending"] is True
 
         summary_payload = await ui_routes.get_chat_messages()
@@ -3168,9 +3121,9 @@ def test_chat_direct_group_agent_bridge_route_runs_approved_summary(tmp_path, mo
         assert summary_message["status"] == "processing"
         assert summary_task is not None
         assert summary_task.chat_session_id == runtime.chat_session.session_id
-        assert "[Oha-Yachiyo 群组直接 Agent 汇总]" in summary_task.description
-        assert "Design：已完成" in summary_task.description
-        assert "汇报：Design bridge approved result" in summary_task.description
+        assert "[Oha-Yachiyo 群组直接 Agent 汇总]" in summary_task.response_context
+        assert "Design：已完成" in summary_task.response_context
+        assert "bridge-approved" in summary_task.response_context
 
         await runner._execute_with_state(summary_task.task_id)
 
@@ -3229,7 +3182,7 @@ def test_chat_direct_group_agent_bridge_route_runs_approved_summary(tmp_path, mo
 
     try:
         asyncio.run(scenario())
-        assert len(model_calls) == 3
+        assert len(model_calls) == 1
     finally:
         service.close()
         activity_store.close()

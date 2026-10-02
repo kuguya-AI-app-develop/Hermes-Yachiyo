@@ -25,6 +25,9 @@ def is_supplied_image_question(original_goal: str) -> bool:
     text = " ".join(str(original_goal or "").strip().split())
     if not text or len(text) > 120:
         return False
+    # ChatAPI uses this exact bounded goal when an image has no caption.
+    if text == "请识别并分析这张图片。":
+        return True
     return bool(
         re.fullmatch(
             r"(?:(?:请|帮我)\s*)?(?:看一下|看一眼|看看|查看|描述|说明|分析)"
