@@ -4761,6 +4761,7 @@ class RuntimePlanner:
                 (_explicit_typed_target_steps(intent, desktop_steps, allowed)
                  if explicit_native_typed_binding else desktop_steps),
                 allowed,
+                explicit_native_binding=explicit_native_typed_binding,
             )
         if intent.kind == "media_playback":
             return self._media_playback_steps(intent, allowed)
@@ -4783,6 +4784,7 @@ class RuntimePlanner:
                 intent, self._communication_steps(
                     intent, allowed, explicit_native_typed_binding=explicit_native_typed_binding,
                 ), allowed,
+                explicit_native_binding=explicit_native_typed_binding,
             )
         if intent.kind == "information_capture":
             return self._information_capture_steps(intent, allowed)
@@ -12843,10 +12845,23 @@ def _explicit_clipboard_paste_readback_steps(
     intent: TaskIntentSnapshot,
     steps: list[ToolPlanStepSnapshot],
     allowed: set[str] | None,
+    *,
+    explicit_native_binding: bool = True,
 ) -> list[ToolPlanStepSnapshot]:
-    """Read explicit clipboard bytes and bind the focused editable paste target."""
+    """Bind native clipboard drafts before their composer/send continuation."""
     hint = intent.inputs.get("direct_message_hint")
     body_source = str(hint.get("body_source") or "") if isinstance(hint, Mapping) else ""
+    native_clipboard_draft = intent.kind == "communication" and body_source == "clipboard"
+    foreground_submit = any(
+        step.tool_name == "desktop.submit_foreground"
+        and step.input_preview.get("action") in {"send", "submit"}
+        for step in steps
+    )
+    if not explicit_native_binding or not (native_clipboard_draft or foreground_submit):
+        # Ordinary paste retains its app-scoped dispatch and verification.
+        # Model-compiled plans retain their existing materialization path;
+        # they cannot acquire the original-goal native draft capability.
+        return steps
     if body_source in {"selection", "current_page_link", "app_search_result"}:
         return steps
     if body_source != "clipboard" and not re.search(r"粘贴|\bpaste\b", intent.user_goal, re.I):
