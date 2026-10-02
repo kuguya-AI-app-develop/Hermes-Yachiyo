@@ -5246,9 +5246,11 @@ def test_chat_bridge_quick_message_executes_foreground_search_type_submit_withou
     monkeypatch,
 ):
     calls: list[tuple[str, str]] = []
+    state = {"query": "", "submitted": False, "focused": False}
 
     def fake_safe_shortcut(action: str) -> dict:
         calls.append(("shortcut", action))
+        state["focused"] = True
         return {
             "ok": True,
             "action": "desktop.safe_shortcut",
@@ -5258,6 +5260,7 @@ def test_chat_bridge_quick_message_executes_foreground_search_type_submit_withou
 
     def fake_safe_type_text(text: str) -> dict:
         calls.append(("type", text))
+        state["query"] = text
         return {
             "ok": True,
             "action": "desktop.safe_type_text",
@@ -5267,6 +5270,7 @@ def test_chat_bridge_quick_message_executes_foreground_search_type_submit_withou
 
     def fake_search_submit() -> dict:
         calls.append(("search_submit", ""))
+        state["submitted"] = True
         return {
             "ok": True,
             "action": "desktop.search_submit",
@@ -5279,14 +5283,47 @@ def test_chat_bridge_quick_message_executes_foreground_search_type_submit_withou
         limit: int = 80,
         app_name: str = "",
     ) -> dict:
-        result = _fake_ui_elements_result(app_name or "Google Chrome", "Search Results")
-        result["data"]["elements"][0]["value"] = "yachiyo"
-        return result
+        assert app_name in {"", "Google Chrome"}
+        lines = [
+            "META\tGoogle Chrome\t100\tSearch\t200",
+            f"1\tAXTextField\t\tSearch\t\t{state['query']}\ttrue\t0\t0\t100\t100",
+        ]
+        if state["focused"]:
+            focused = {"app_name": "Google Chrome", "pid": 100, "window_id": 200,
+                       "role": "AXTextField", "name": "Search", "identifier": "search",
+                       "value": state["query"], "focused": True}
+            lines.append("FOCUSED\t" + json.dumps(focused))
+        if state["submitted"]:
+            lines.extend([
+                "1\tAXTable\t\tSearch Results\t\t\ttrue\t0\t0\t100\t100",
+                f"2\tAXRow\t\t{state['query']}\t\t\ttrue\t0\t0\t100\t100",
+            ])
+        return {
+            "ok": True,
+            "action": "desktop.ui_elements",
+            "data": desktop_tools._parse_ui_elements_output(
+                "\n".join(lines), role_filter=role_filter, limit=limit,
+            ),
+        }
+
+    def fake_active_window() -> dict:
+        return {
+            "ok": True, "action": "desktop.active_window",
+            "data": {"app_name": "Google Chrome", "pid": 100, "window_id": 200,
+                     "title": "Search"},
+        }
 
     monkeypatch.setattr("apps.shell.agent.tools.desktop.desktop_safe_shortcut", fake_safe_shortcut)
     monkeypatch.setattr("apps.shell.agent.tools.desktop.desktop_safe_type_text", fake_safe_type_text)
     monkeypatch.setattr("apps.shell.agent.tools.desktop.desktop_search_submit", fake_search_submit)
     monkeypatch.setattr("apps.shell.agent.tools.desktop.ui_elements", fake_ui_elements)
+    monkeypatch.setattr("apps.shell.agent.tools.desktop.active_window", fake_active_window)
+    monkeypatch.setattr(desktop_tools, "running_apps", lambda: {
+        "ok": True, "action": "desktop.running_apps", "data": {
+            "apps": [{"name": "Google Chrome", "pid": 100, "frontmost": True}],
+            "frontmost": "Google Chrome",
+        },
+    })
     result, agent_task, run, event_types = _run_launcher_daily_desktop_quick_message(
         tmp_path,
         monkeypatch,
@@ -5306,7 +5343,30 @@ def test_chat_bridge_quick_message_executes_foreground_search_type_submit_withou
     ]
     assert run["status"] == "completed"
     assert run["pending_approval"] == {}
-    assert event_types.count("agent.desktop.intent_planned") == 3
+    planned_events = [event for event in result["_events"]
+                      if event["event_type"] == "agent.desktop.intent_planned"]
+    planned = [event["payload"] for event in planned_events]
+    assert [(event["step_id"], event["tool"], event["input_preview"])
+            for event in planned] == [
+        ("prepare-foreground-search-field", "desktop.safe_shortcut", {"action": "find"}),
+        ("read-foreground-search-field", "desktop.ui_elements", {"limit": 80}),
+        ("prepare-foreground-search-query", "desktop.safe_type_text", {"text": "yachiyo"}),
+        ("read-foreground-search-ready", "desktop.ui_elements", {"limit": 80}),
+        ("submit-app-search", "desktop.search_submit", {}),
+        ("verify-foreground-search-result", "desktop.ui_elements", {"limit": 80}),
+    ]
+    effect_planned = [event for event in planned if event["tool"] != "desktop.ui_elements"]
+    readonly_planned = [event for event in planned if event["tool"] == "desktop.ui_elements"]
+    assert len(effect_planned) == 3
+    assert len(readonly_planned) == 3
+    assert all(event["run_id"] == run["run_id"] for event in planned_events)
+    for scope_key in ("plan_id", "decision_id", "tool_plan_id"):
+        assert len({event[scope_key] for event in planned}) == 1
+        assert all(event[scope_key] for event in planned)
+    native_plans = [event["payload"]["plan_id"] for event in result["_events"]
+                    if event["event_type"] == "agent.plan.selection"
+                    and event["actor"] == "native_runtime"]
+    assert set(native_plans) == {planned[0]["plan_id"]}
     assert "agent.desktop.intent_completed" in event_types
     assert "agent.desktop.intent_approval_required" not in event_types
     assert "model.request.started" not in event_types
@@ -8594,9 +8654,17 @@ def test_chat_bridge_quick_message_executes_safe_shortcut_without_approval(
 ):
     # Dispatch-only fixture: semantic shortcut effects require independent observation.
     shortcut_calls: list[str] = []
+    key_calls: list[tuple[str, list[str]]] = []
+    native_shortcut = desktop_tools.desktop_safe_shortcut
+    page_url = "https://example.test/path?x=1"
+    state = {"url_case": False, "focused": False}
+    # The URL action is delivered, while its clipboard effect stays unverified.
+    pasteboard = {"text": "old clipboard", "revision": 10}
 
     def fake_safe_shortcut(action: str) -> dict:
         shortcut_calls.append(action)
+        if action == "copy_current_page_link":
+            return native_shortcut(action)
         key, modifiers, label = desktop_tools._SAFE_SHORTCUTS[action]
         return {
             "ok": True,
@@ -8609,6 +8677,52 @@ def test_chat_bridge_quick_message_executes_safe_shortcut_without_approval(
             },
         }
 
+    def fake_key_dispatch(action: str, key: str, modifiers: list[str]) -> dict:
+        key_calls.append((key, list(modifiers)))
+        if key == "l":
+            state["focused"] = True
+        # Cmd+C acknowledges delivery but leaves the pasteboard unchanged.
+        return {"ok": True, "action": action,
+                "data": {"key": key, "modifiers": list(modifiers)},
+                "permission_error": False, "fallback_used": False}
+
+    def fake_clipboard_read(max_chars=2000) -> dict:
+        text = pasteboard["text"]
+        return {"ok": True, "action": "clipboard.read", "data": {
+            "text": text, "text_length": len(text), "max_chars": max_chars,
+            "truncated": False, "pasteboard_revision_stable": True,
+            "pasteboard_revision": pasteboard["revision"],
+        }}
+
+    def fake_address_observation(**kwargs) -> dict:
+        native = "META\tGoogle Chrome\t100\tFixture Page\t200"
+        if state["url_case"]:
+            native += ("\n1\tAXTextField\t\tAddress and search bar\tURL bar\t"
+                       + page_url + "\ttrue\t0\t0\t100\t100")
+            if state["focused"]:
+                native += "\nFOCUSED\t" + json.dumps({
+                    "app_name": "Google Chrome", "pid": 100, "window_id": 200,
+                    "role": "AXTextField", "name": "Address and search bar",
+                    "description": "URL bar", "value": page_url, "focused": True,
+                })
+        return {"ok": True, "action": "desktop.ui_elements",
+                "data": desktop_tools._parse_ui_elements_output(native)}
+
+    monkeypatch.setattr(desktop_tools, "_desktop_platform", lambda: "macos")
+    monkeypatch.setattr(desktop_tools, "_send_desktop_keystroke", fake_key_dispatch)
+    monkeypatch.setattr(desktop_tools, "clipboard_read", fake_clipboard_read)
+    monkeypatch.setattr(desktop_tools, "ui_elements", fake_address_observation)
+    monkeypatch.setattr(desktop_tools, "running_apps", lambda: {
+        "ok": True, "action": "desktop.running_apps", "data": {
+            "apps": [{"name": "Google Chrome", "pid": 100, "frontmost": True}],
+            "frontmost": "Google Chrome",
+        },
+    })
+    monkeypatch.setattr(desktop_tools, "active_window", lambda: {
+        "ok": True, "action": "desktop.active_window", "data": {
+            "app_name": "Google Chrome", "pid": 100, "window_id": 200, "title": "Fixture Page",
+        },
+    })
     monkeypatch.setattr("apps.shell.agent.tools.desktop.desktop_safe_shortcut", fake_safe_shortcut)
     cases = (
         ("复制一下选中的内容", "live2d", "copy", "已复制选中内容。"),
@@ -8675,6 +8789,7 @@ def test_chat_bridge_quick_message_executes_safe_shortcut_without_approval(
         ),
     )
     for text, launcher_mode, action, summary in cases:
+        state.update(url_case=action == "copy_current_page_link", focused=False)
         _result, agent_task, run, event_types = _run_launcher_daily_desktop_quick_message(
             tmp_path,
             monkeypatch,
@@ -8683,6 +8798,9 @@ def test_chat_bridge_quick_message_executes_safe_shortcut_without_approval(
         )
 
         assert shortcut_calls[-1] == action
+        if action == "copy_current_page_link":
+            assert key_calls[-2:] == [("l", ["command"]), ("c", ["command"])]
+            assert pasteboard == {"text": "old clipboard", "revision": 10}
         assert agent_task["status"] == "failed"
         assert agent_task["needs_user_action"] is False
         assert agent_task["pending_approvals"] == []
@@ -8705,6 +8823,7 @@ def test_chat_bridge_quick_message_executes_app_scoped_safe_shortcut_without_app
 ):
     # Dispatch-only fixture: semantic shortcut effects require independent observation.
     calls: list[tuple[str, str]] = []
+    native_shortcut = desktop_tools.desktop_safe_shortcut
 
     def fake_app_focus(app_name: str) -> dict:
         calls.append(("focus", app_name))
@@ -8712,16 +8831,24 @@ def test_chat_bridge_quick_message_executes_app_scoped_safe_shortcut_without_app
 
     def fake_safe_shortcut(action: str) -> dict:
         calls.append(("shortcut", action))
-        return {
-            "ok": True,
-            "action": "desktop.safe_shortcut",
-            "summary": "Executed safe shortcut: new tab",
-            "data": {"shortcut_action": action, "key": "t", "modifiers": ["command"]},
-        }
+        return native_shortcut(action)
+
+    def fake_key_dispatch(action_name: str, key: str, modifiers: list[str]) -> dict:
+        return {"ok": True, "action": action_name,
+                "data": {"key": key, "modifiers": list(modifiers)},
+                "permission_error": False, "fallback_used": False}
+
+    def unverified_ui(**kwargs) -> dict:
+        return {"ok": True, "action": "desktop.ui_elements", "data":
+                desktop_tools._parse_ui_elements_output("META\tGoogle Chrome\t100\tFixture\t200")}
 
     def fake_active_window() -> dict:
-        return _fake_active_window_result("Google Chrome")
+        return {"ok": True, "action": "desktop.active_window", "data": {
+            "app_name": "Google Chrome", "pid": 100, "window_id": 200, "title": "Fixture"}}
 
+    monkeypatch.setattr(desktop_tools, "_desktop_platform", lambda: "macos")
+    monkeypatch.setattr(desktop_tools, "_send_desktop_keystroke", fake_key_dispatch)
+    monkeypatch.setattr(desktop_tools, "ui_elements", unverified_ui)
     monkeypatch.setattr("apps.shell.agent.tools.desktop.app_focus", fake_app_focus)
     monkeypatch.setattr("apps.shell.agent.tools.desktop.desktop_safe_shortcut", fake_safe_shortcut)
     monkeypatch.setattr("apps.shell.agent.tools.desktop.active_window", fake_active_window)
@@ -8746,13 +8873,27 @@ def test_chat_bridge_quick_message_executes_app_scoped_safe_shortcut_without_app
         assert agent_task["pending_approvals"] == []
         assert ("未能确认" in agent_task["summary"] or "无法确认" in agent_task["summary"]
                 or "缺少可运行的 Chat Profile" in agent_task["summary"])
-        assert agent_task["tool_calls"][-1]["tool_name"] == "app.focus_and_safe_shortcut"
-        assert agent_task["tool_calls"][-1]["input_preview"] == {
+        dispatched = [call for call in agent_task["tool_calls"]
+                      if call["tool_name"] == "app.focus_and_safe_shortcut"
+                      and call["source"] == "runtime_planner"]
+        assert len(dispatched) == 1
+        shortcut_call = dispatched[0]
+        semantic_failures = [call for call in agent_task["tool_calls"]
+                             if call["tool_name"] == "app.focus_and_safe_shortcut"
+                             and call["output_preview"].get("reason")
+                             == "desktop_dispatch_postcondition_unverified"]
+        assert len(semantic_failures) == 1
+        assert semantic_failures[0]["status"] == "failed"
+        assert semantic_failures[0]["source"] is None
+        assert semantic_failures[0]["input_preview"] == shortcut_call["input_preview"]
+        assert semantic_failures[0]["tool_call_id"] != shortcut_call["tool_call_id"]
+        assert shortcut_call["tool_name"] == "app.focus_and_safe_shortcut"
+        assert shortcut_call["input_preview"] == {
             "app_name": "Google Chrome",
             "action": action,
         }
-        assert agent_task["tool_calls"][-1]["status"] == "completed"
-        assert agent_task["tool_calls"][-1]["output_preview"]["ok"] is True
+        assert shortcut_call["status"] == "completed"
+        assert shortcut_call["output_preview"]["ok"] is True
         assert run["status"] == "failed"
         assert run["pending_approval"] == {}
         assert "agent.desktop.intent_completed" not in event_types
@@ -8767,6 +8908,7 @@ def test_chat_bridge_quick_message_executes_app_scoped_browser_back_without_fake
 ):
     # Dispatch-only fixture: semantic shortcut effects require independent observation.
     calls: list[tuple[str, str]] = []
+    native_shortcut = desktop_tools.desktop_safe_shortcut
 
     def fake_app_focus(app_name: str) -> dict:
         calls.append(("focus", app_name))
@@ -8774,19 +8916,24 @@ def test_chat_bridge_quick_message_executes_app_scoped_browser_back_without_fake
 
     def fake_safe_shortcut(action: str) -> dict:
         calls.append(("shortcut", action))
-        return {
-            "ok": True,
-            "action": "desktop.safe_shortcut",
-            "summary": "Executed safe shortcut: browser back",
-            "data": {
-                "shortcut_action": action,
-                "shortcut_label": "browser back",
-            },
-        }
+        return native_shortcut(action)
+
+    def fake_key_dispatch(action_name: str, key: str, modifiers: list[str]) -> dict:
+        return {"ok": True, "action": action_name,
+                "data": {"key": key, "modifiers": list(modifiers)},
+                "permission_error": False, "fallback_used": False}
+
+    def unverified_ui(**kwargs) -> dict:
+        return {"ok": True, "action": "desktop.ui_elements", "data":
+                desktop_tools._parse_ui_elements_output("META\tGoogle Chrome\t100\tFixture\t200")}
 
     def fake_active_window() -> dict:
-        return _fake_active_window_result("Google Chrome")
+        return {"ok": True, "action": "desktop.active_window", "data": {
+            "app_name": "Google Chrome", "pid": 100, "window_id": 200, "title": "Fixture"}}
 
+    monkeypatch.setattr(desktop_tools, "_desktop_platform", lambda: "macos")
+    monkeypatch.setattr(desktop_tools, "_send_desktop_keystroke", fake_key_dispatch)
+    monkeypatch.setattr(desktop_tools, "ui_elements", unverified_ui)
     monkeypatch.setattr("apps.shell.agent.tools.desktop.app_focus", fake_app_focus)
     monkeypatch.setattr("apps.shell.agent.tools.desktop.desktop_safe_shortcut", fake_safe_shortcut)
     monkeypatch.setattr("apps.shell.agent.tools.desktop.active_window", fake_active_window)
@@ -8803,13 +8950,27 @@ def test_chat_bridge_quick_message_executes_app_scoped_browser_back_without_fake
         assert agent_task["pending_approvals"] == []
         assert ("未能确认" in agent_task["summary"] or "无法确认" in agent_task["summary"]
                 or "缺少可运行的 Chat Profile" in agent_task["summary"])
-        assert agent_task["tool_calls"][-1]["tool_name"] == "app.focus_and_safe_shortcut"
-        assert agent_task["tool_calls"][-1]["input_preview"] == {
+        dispatched = [call for call in agent_task["tool_calls"]
+                      if call["tool_name"] == "app.focus_and_safe_shortcut"
+                      and call["source"] == "runtime_planner"]
+        assert len(dispatched) == 1
+        shortcut_call = dispatched[0]
+        semantic_failures = [call for call in agent_task["tool_calls"]
+                             if call["tool_name"] == "app.focus_and_safe_shortcut"
+                             and call["output_preview"].get("reason")
+                             == "desktop_dispatch_postcondition_unverified"]
+        assert len(semantic_failures) == 1
+        assert semantic_failures[0]["status"] == "failed"
+        assert semantic_failures[0]["source"] is None
+        assert semantic_failures[0]["input_preview"] == shortcut_call["input_preview"]
+        assert semantic_failures[0]["tool_call_id"] != shortcut_call["tool_call_id"]
+        assert shortcut_call["tool_name"] == "app.focus_and_safe_shortcut"
+        assert shortcut_call["input_preview"] == {
             "app_name": "Google Chrome",
             "action": "browser_back",
         }
-        assert agent_task["tool_calls"][-1]["status"] == "completed"
-        assert agent_task["tool_calls"][-1]["output_preview"]["ok"] is True
+        assert shortcut_call["status"] == "completed"
+        assert shortcut_call["output_preview"]["ok"] is True
         assert run["status"] == "failed"
         assert "agent.desktop.intent_completed" not in event_types
         assert "run.failed" in event_types
@@ -8829,6 +8990,7 @@ def test_chat_bridge_quick_message_executes_app_prefix_find_shortcut_without_mod
 ):
     # Dispatch-only fixture: semantic shortcut effects require independent observation.
     calls: list[tuple[str, str]] = []
+    native_shortcut = desktop_tools.desktop_safe_shortcut
 
     def fake_app_focus(app_name: str) -> dict:
         calls.append(("focus", app_name))
@@ -8836,24 +8998,30 @@ def test_chat_bridge_quick_message_executes_app_prefix_find_shortcut_without_mod
 
     def fake_safe_shortcut(action: str) -> dict:
         calls.append(("shortcut", action))
-        return {
-            "ok": True,
-            "action": "desktop.safe_shortcut",
-            "summary": "Executed safe shortcut: find",
-            "data": {
-                "shortcut_action": action,
-                "shortcut_label": "find",
-            },
-        }
+        return native_shortcut(action)
+
+    def fake_key_dispatch(action_name: str, key: str, modifiers: list[str]) -> dict:
+        return {"ok": True, "action": action_name,
+                "data": {"key": key, "modifiers": list(modifiers)},
+                "permission_error": False, "fallback_used": False}
+
+    def unverified_ui(**kwargs) -> dict:
+        return {"ok": True, "action": "desktop.ui_elements", "data":
+                desktop_tools._parse_ui_elements_output("META\tGoogle Chrome\t100\tFixture\t200")}
 
     def fake_active_window() -> dict:
         for action, app_name in reversed(calls):
             if action == "focus":
                 calls.append(("active", app_name))
-                return _fake_active_window_result(app_name)
+                return {"ok": True, "action": "desktop.active_window", "data": {
+                    "app_name": app_name, "pid": 100, "window_id": 200, "title": "Fixture"}}
         calls.append(("active", "Google Chrome"))
-        return _fake_active_window_result("Google Chrome")
+        return {"ok": True, "action": "desktop.active_window", "data": {
+            "app_name": "Google Chrome", "pid": 100, "window_id": 200, "title": "Fixture"}}
 
+    monkeypatch.setattr(desktop_tools, "_desktop_platform", lambda: "macos")
+    monkeypatch.setattr(desktop_tools, "_send_desktop_keystroke", fake_key_dispatch)
+    monkeypatch.setattr(desktop_tools, "ui_elements", unverified_ui)
     monkeypatch.setattr("apps.shell.agent.tools.desktop.app_focus", fake_app_focus)
     monkeypatch.setattr("apps.shell.agent.tools.desktop.active_window", fake_active_window)
     monkeypatch.setattr("apps.shell.agent.tools.desktop.desktop_safe_shortcut", fake_safe_shortcut)
@@ -8870,13 +9038,27 @@ def test_chat_bridge_quick_message_executes_app_prefix_find_shortcut_without_mod
         assert agent_task["pending_approvals"] == []
         assert ("未能确认" in agent_task["summary"] or "无法确认" in agent_task["summary"]
                 or "缺少可运行的 Chat Profile" in agent_task["summary"])
-        assert agent_task["tool_calls"][-1]["tool_name"] == "app.focus_and_safe_shortcut"
-        assert agent_task["tool_calls"][-1]["input_preview"] == {
+        dispatched = [call for call in agent_task["tool_calls"]
+                      if call["tool_name"] == "app.focus_and_safe_shortcut"
+                      and call["source"] == "runtime_planner"]
+        assert len(dispatched) == 1
+        shortcut_call = dispatched[0]
+        semantic_failures = [call for call in agent_task["tool_calls"]
+                             if call["tool_name"] == "app.focus_and_safe_shortcut"
+                             and call["output_preview"].get("reason")
+                             == "desktop_dispatch_postcondition_unverified"]
+        assert len(semantic_failures) == 1
+        assert semantic_failures[0]["status"] == "failed"
+        assert semantic_failures[0]["source"] is None
+        assert semantic_failures[0]["input_preview"] == shortcut_call["input_preview"]
+        assert semantic_failures[0]["tool_call_id"] != shortcut_call["tool_call_id"]
+        assert shortcut_call["tool_name"] == "app.focus_and_safe_shortcut"
+        assert shortcut_call["input_preview"] == {
             "app_name": "Google Chrome",
             "action": "find",
         }
-        assert agent_task["tool_calls"][-1]["status"] == "completed"
-        assert agent_task["tool_calls"][-1]["output_preview"]["ok"] is True
+        assert shortcut_call["status"] == "completed"
+        assert shortcut_call["output_preview"]["ok"] is True
         assert run["status"] == "failed"
         assert "agent.desktop.intent_completed" not in event_types
         assert "run.failed" in event_types
@@ -9049,25 +9231,57 @@ def test_chat_bridge_quick_message_executes_search_submit_without_approval(
     monkeypatch,
 ):
     submit_calls: list[str] = []
+    state = {"query": "yachiyo", "submitted": False}
+    native_submit = desktop_tools.desktop_search_submit
 
     def fake_search_submit() -> dict:
         submit_calls.append("search_submit")
-        return {
-            "ok": True,
-            "action": "desktop.search_submit",
-            "summary": "Submitted foreground search query",
-            "data": {"key": "return", "modifiers": []},
-        }
+        state["submitted"] = True
+        return native_submit()
+
+    def fake_key_dispatch(action: str, key: str, modifiers: list[str]) -> dict:
+        return {"ok": True, "action": action,
+                "data": {"key": key, "modifiers": list(modifiers)},
+                "permission_error": False, "fallback_used": False}
 
     def fake_ui_elements(
         role_filter: str = "",
         limit: int = 80,
         app_name: str = "",
     ) -> dict:
-        return _fake_ui_elements_result(
-            app_name or "Google Chrome",
-            "Search Results",
-        )
+        assert app_name in {"", "Google Chrome"}
+        lines = [
+            "META\tGoogle Chrome\t100\tSearch\t200",
+            f"1\tAXTextField\t\tSearch\t\t{state['query']}\ttrue\t0\t0\t100\t100",
+            "FOCUSED\t" + json.dumps({
+                "app_name": "Google Chrome", "pid": 100, "window_id": 200,
+                "role": "AXTextField", "name": "Search", "identifier": "search",
+                "value": state["query"], "focused": True,
+            }),
+        ]
+        if state["submitted"]:
+            lines.extend([
+                "1\tAXTable\t\tSearch Results\t\t\ttrue\t0\t0\t100\t100",
+                f"2\tAXRow\t\t{state['query']}\t\t\ttrue\t0\t0\t100\t100",
+            ])
+        return {"ok": True, "action": "desktop.ui_elements", "data":
+                desktop_tools._parse_ui_elements_output(
+                "\n".join(lines), role_filter=role_filter, limit=limit,
+            )}
+
+    monkeypatch.setattr(desktop_tools, "_desktop_platform", lambda: "macos")
+    monkeypatch.setattr(desktop_tools, "_send_desktop_keystroke", fake_key_dispatch)
+    monkeypatch.setattr(desktop_tools, "active_window", lambda: {
+        "ok": True, "action": "desktop.active_window", "data": {
+            "app_name": "Google Chrome", "pid": 100, "window_id": 200, "title": "Search",
+        },
+    })
+    monkeypatch.setattr(desktop_tools, "running_apps", lambda: {
+        "ok": True, "action": "desktop.running_apps", "data": {
+            "apps": [{"name": "Google Chrome", "pid": 100, "frontmost": True}],
+            "frontmost": "Google Chrome",
+        },
+    })
 
     monkeypatch.setattr("apps.shell.agent.tools.desktop.desktop_search_submit", fake_search_submit)
     monkeypatch.setattr("apps.shell.agent.tools.desktop.ui_elements", fake_ui_elements)
@@ -9076,6 +9290,7 @@ def test_chat_bridge_quick_message_executes_search_submit_without_approval(
         ("press enter to search", "live2d"),
     )
     for prompt, launcher_mode in cases:
+        state["submitted"] = False
         _result, agent_task, run, event_types = _run_launcher_daily_desktop_quick_message(
             tmp_path,
             monkeypatch,
