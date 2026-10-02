@@ -16,6 +16,9 @@ SEMANTIC_SAFE_SHORTCUT_TOOLS = frozenset(
         "app.focus_and_safe_shortcut",
     }
 )
+SEMANTIC_SAFE_KEY_TOOLS = frozenset(
+    {"desktop.safe_key", "app.open_and_safe_key", "app.focus_and_safe_key"}
+)
 _APP_LIFECYCLE_INTRINSIC_RULES: dict[str, dict[str, Any]] = {
     "app.open": {
         "status_key": "launch_status",
@@ -93,6 +96,12 @@ def is_semantic_safe_shortcut(
     return str(tool_name or "").strip() in SEMANTIC_SAFE_SHORTCUT_TOOLS
 
 
+def is_semantic_safe_key(tool_name: str | None) -> bool:
+    """Require independent UI evidence after a foreground key is delivered."""
+
+    return str(tool_name or "").strip() in SEMANTIC_SAFE_KEY_TOOLS
+
+
 def semantic_safe_shortcut_effect(
     tool_name: str | None,
     result: Any,
@@ -134,7 +143,7 @@ def intrinsic_native_postcondition_state(
         return ""
     request = input_payload if isinstance(input_payload, Mapping) else {}
     data = result.get("data") if isinstance(result.get("data"), Mapping) else {}
-    if is_semantic_safe_shortcut(clean_tool, request):
+    if is_semantic_safe_shortcut(clean_tool, request) or is_semantic_safe_key(clean_tool):
         # A shortcut provider owns the mutation and cannot independently
         # attest the UI effect it claims to have caused.  Completion requires
         # a separately trusted, action-specific observation receipt.
@@ -211,6 +220,7 @@ def has_intrinsic_native_postcondition_contract(tool_name: str | None) -> bool:
     return bool(
         clean_tool in _APP_LIFECYCLE_INTRINSIC_RULES
         or is_semantic_safe_shortcut(clean_tool)
+        or is_semantic_safe_key(clean_tool)
     )
 
 
