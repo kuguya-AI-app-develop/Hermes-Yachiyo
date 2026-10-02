@@ -154,7 +154,12 @@ class AgentContextBuilder:
             "Runtime: Oha Agent Runtime\n"
             f"Allowed tools: {', '.join(tool_policy.get('allowed_tools') or [])}\n"
             f"Approval required: {json.dumps(tool_policy.get('approval_required') or {}, ensure_ascii=False)}\n"
-            f"Workspace: {json.dumps(workspace_policy, ensure_ascii=False)}",
+            f"Workspace: {json.dumps(workspace_policy, ensure_ascii=False)}\n"
+            "For shell, git, tests, builds, package managers, or command-line searches, "
+            "prefer terminal.run when allowed. Combine related read-only commands when helpful. "
+            "Use workspace tools only within configured scopes. If no trusted working directory "
+            "is available, ask the user to configure one instead of repeating failed workspace calls. "
+            "Respect approvals and workspace scopes for every tool.",
         ]
         if self._agent_desk_context is not None:
             desk_context = self._agent_desk_context(agent).strip()

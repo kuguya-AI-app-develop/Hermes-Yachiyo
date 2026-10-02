@@ -5,7 +5,6 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from apps.shell.agent.repositories.sqlite import (
     LockedConnection,
@@ -61,7 +60,7 @@ def build_runtime_engine_state(
         agent_workspaces_dir=layout.agent_workspaces_dir,
         accepting_runs=True,
         closed=False,
-        runtime_limits=RunBudgetLimits(),
+        runtime_limits=RunBudgetLimits.from_environment(),
         db_lock=db_lock,
         approval_execution_lock=threading.RLock(),
         approval_execution_in_progress=set(),
