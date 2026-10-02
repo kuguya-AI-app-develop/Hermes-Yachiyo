@@ -1118,7 +1118,87 @@ def ui_elements(
         clean_limit = max(1, min(200, int(limit or 80)))
     except (TypeError, ValueError):
         clean_limit = 80
-    script = """
+    script = r"""
+    use framework "Foundation"
+    use scripting additions
+
+    on jsonString(rawText)
+        set rawString to current application's NSString's stringWithString:rawText
+        set encoded to current application's NSJSONSerialization's ¬
+            dataWithJSONObject:{rawString} options:0 |error|:(missing value)
+        set arrayText to (current application's NSString's alloc()'s ¬
+            initWithData:encoded encoding:(current application's NSUTF8StringEncoding)) as text
+        return text 2 thru -2 of arrayText
+    end jsonString
+
+    on observedWindowID(targetWindow)
+        tell application "System Events"
+            try
+                return value of attribute "AXWindowNumber" of targetWindow as text
+            on error
+                try
+                    return id of targetWindow as text
+                on error
+                    return ""
+                end try
+            end try
+        end tell
+    end observedWindowID
+
+    on focusedElementRow(targetApp, targetWindow, appName, appPID, windowID)
+        tell application "System Events"
+            try
+                if frontmost of targetApp is not true then return ""
+                set focusedElement to value of attribute "AXFocusedUIElement" of targetApp
+                if value of attribute "AXFocused" of focusedElement is not true then return ""
+                set roleName to value of attribute "AXRole" of focusedElement as text
+                if roleName is not in {"AXTextField", "AXTextArea", "AXComboBox"} then return ""
+                try
+                    if value of attribute "AXSubrole" of focusedElement is "AXSecureTextField" then
+                        return ""
+                    end if
+                end try
+                set focusedWindow to value of attribute "AXWindow" of focusedElement
+                if my observedWindowID(focusedWindow) is not windowID then return ""
+                set rawValue to value of attribute "AXValue" of focusedElement
+                if class of rawValue is not text then return ""
+                set identityJSON to ""
+                try
+                    set rawIdentifier to value of attribute "AXIdentifier" of focusedElement
+                    if class of rawIdentifier is text and rawIdentifier is not "" then
+                        set identityJSON to identityJSON & ",\"identifier\":" & ¬
+                            my jsonString(rawIdentifier)
+                    end if
+                end try
+                try
+                    set rawName to name of focusedElement
+                    if class of rawName is text and rawName is not "" then
+                        set identityJSON to identityJSON & ",\"name\":" & my jsonString(rawName)
+                    end if
+                end try
+                try
+                    set rawDescription to value of attribute "AXDescription" of focusedElement
+                    if class of rawDescription is text and rawDescription is not "" then
+                        set identityJSON to identityJSON & ",\"description\":" & ¬
+                            my jsonString(rawDescription)
+                    end if
+                end try
+                if value of attribute "AXFocusedUIElement" of targetApp is not focusedElement then
+                    return ""
+                end if
+                if my observedWindowID(front window of targetApp) is not windowID then return ""
+                if frontmost of targetApp is not true then return ""
+                if unix id of targetApp is not appPID then return ""
+                return "FOCUSED" & tab & "{\"app_name\":" & my jsonString(appName) & ¬
+                    ",\"pid\":" & (appPID as text) & ",\"window_id\":" & windowID & ¬
+                    ",\"role\":" & my jsonString(roleName) & ",\"value\":" & ¬
+                    my jsonString(rawValue) & identityJSON & ",\"focused\":true}"
+            on error
+                return ""
+            end try
+        end tell
+    end focusedElementRow
+
     on replaceText(findText, replaceTextValue, sourceText)
         set oldDelimiters to AppleScript's text item delimiters
         set AppleScript's text item delimiters to findText
@@ -1240,6 +1320,11 @@ def ui_elements(
                 set elementRows to my collectElements(targetApp, 0, maxDepth, maxItems)
             end try
             set header to "META" & tab & appName & tab & (appPID as text) & tab & windowTitle & tab & windowID
+            if windowID is not "" then
+                set focusedRow to my focusedElementRow(¬
+                    targetApp, targetWindow, appName, appPID, windowID)
+                if focusedRow is not "" then set header to header & linefeed & focusedRow
+            end if
             if (count of elementRows) is 0 then return header
             return header & linefeed & my joinRows(elementRows)
         end tell
@@ -7594,19 +7679,31 @@ def clipboard_read(max_chars: Any = 2000) -> dict[str, Any]:
         clean_max_chars = _clean_clipboard_read_limit(max_chars)
     except ValueError as exc:
         return _error("clipboard.read", exc)
-    try:
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except Exception as exc:
-        return _error("clipboard.read", exc)
-    if result.returncode != 0:
-        return _failed("clipboard.read", result)
-    text = str(result.stdout or "")
+    native = _mac_clipboard_read_observation() if _desktop_platform() == "macos" else None
+    revision: dict[str, Any] = {}
+    if native is not None:
+        text = native["text"]
+        before = native.get("revision_before")
+        after = native.get("revision_after")
+        if type(before) is int and before >= 0 and type(after) is int and after >= 0:
+            if before == after:
+                revision = {"pasteboard_revision": before, "pasteboard_revision_stable": True}
+            else:
+                revision = {"pasteboard_revision_stable": False}
+    else:
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except Exception as exc:
+            return _error("clipboard.read", exc)
+        if result.returncode != 0:
+            return _failed("clipboard.read", result)
+        text = str(result.stdout or "")
     preview = text[:clean_max_chars]
     return {
         "ok": True,
@@ -7618,10 +7715,34 @@ def clipboard_read(max_chars: Any = 2000) -> dict[str, Any]:
             "truncated": len(text) > clean_max_chars,
             "max_chars": clean_max_chars,
             "platform": _desktop_platform(),
+            **revision,
         },
         "permission_error": False,
         "fallback_used": False,
     }
+
+
+def _mac_clipboard_read_observation() -> dict[str, Any] | None:
+    """Read original NSPasteboard text between two native changeCount reads."""
+
+    result = _run_jxa("""
+        ObjC.import("AppKit");
+        const pasteboard = $.NSPasteboard.generalPasteboard;
+        const before = Number(pasteboard.changeCount);
+        const value = pasteboard.stringForType($.NSPasteboardTypeString);
+        const rawText = value ? ObjC.unwrap(value) : null;
+        const after = Number(pasteboard.changeCount);
+        JSON.stringify({text: rawText, revision_before: before, revision_after: after});
+    """)
+    if result.get("ok") is not True:
+        return None
+    try:
+        observed = json.loads(str(result.get("stdout") or ""))
+    except (TypeError, ValueError):
+        return None
+    if isinstance(observed, dict) and isinstance(observed.get("text"), str):
+        return observed
+    return None
 
 
 def notes_create(body: str, *, title: str = "", folder_name: str = "") -> dict[str, Any]:
@@ -9513,12 +9634,23 @@ def _parse_ui_elements_output(
     title = ""
     window_id: int | None = None
     elements: list[dict[str, Any]] = []
+    focused_candidates: list[dict[str, Any]] = []
+    focused_row_count = 0
     normalized_filter = str(role_filter or "").strip().lower()
     for raw_line in str(value or "").splitlines():
         line = raw_line.strip()
         if not line:
             continue
         parts = line.split("\t")
+        if parts[0] == "FOCUSED":
+            focused_row_count += 1
+            try:
+                focused = json.loads(line.partition("\t")[2])
+            except (TypeError, ValueError):
+                continue
+            if isinstance(focused, dict):
+                focused_candidates.append(focused)
+            continue
         if parts[0] == "META":
             while len(parts) < 5:
                 parts.append("")
@@ -9526,6 +9658,8 @@ def _parse_ui_elements_output(
             pid = int(parts[2]) if parts[2].strip().isdigit() else None
             title = parts[3].strip()
             window_id = int(parts[4]) if parts[4].strip().isdigit() else None
+            continue
+        if len(elements) >= limit:
             continue
         while len(parts) < 11:
             parts.append("")
@@ -9550,8 +9684,27 @@ def _parse_ui_elements_output(
                 "y": int(round(frame["y"] + frame["height"] / 2)),
             }
         elements.append(element)
-        if len(elements) >= limit:
-            break
+    focused_element: dict[str, Any] = {}
+    if (
+        focused_row_count == 1 and len(focused_candidates) == 1
+        and pid and pid > 0 and window_id and window_id > 0
+    ):
+        focused = focused_candidates[0]
+        if (
+            focused.get("app_name") == app_name
+            and type(focused.get("pid")) is int and focused["pid"] == pid
+            and type(focused.get("window_id")) is int and focused["window_id"] == window_id
+            and focused.get("role") in {"AXTextField", "AXTextArea", "AXComboBox"}
+            and focused.get("focused") is True and isinstance(focused.get("value"), str)
+        ):
+            focused_element = {
+                "role": focused["role"], "value": focused["value"],
+                "focused": True, "editable": True,
+            }
+            for identity_key in ("identifier", "name", "description"):
+                identity_value = focused.get(identity_key)
+                if isinstance(identity_value, str) and identity_value:
+                    focused_element[identity_key] = identity_value
     return {
         "app_name": app_name,
         "pid": pid,
@@ -9560,6 +9713,7 @@ def _parse_ui_elements_output(
         "elements": elements,
         "count": len(elements),
         "truncated": len(elements) >= limit,
+        **({"focused_element": focused_element} if focused_element else {}),
     }
 
 

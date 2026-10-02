@@ -10992,6 +10992,9 @@ def test_clipboard_read_uses_system_clipboard_with_bounded_preview(monkeypatch) 
         return subprocess.CompletedProcess(command, 0, "hello world", "")
 
     monkeypatch.setattr(desktop_mod, "_desktop_platform", lambda: "macos")
+    # Keep the established pbpaste fallback contract when native observation
+    # is unavailable; stable native revision/text are covered separately.
+    monkeypatch.setattr(desktop_mod, "_run_jxa", lambda *_a, **_kw: {"ok": False})
     monkeypatch.setattr(desktop_mod.subprocess, "run", fake_run)
 
     result = desktop_mod.clipboard_read(max_chars=5)
