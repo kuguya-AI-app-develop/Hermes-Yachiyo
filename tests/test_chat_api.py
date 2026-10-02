@@ -9876,10 +9876,8 @@ def test_send_message_executes_direct_safe_shortcut_task(tmp_path, monkeypatch):
             task = runtime.state.get_task(result["task_id"])
             link = service.get_task_run_link(result["task_id"])
             run = service.get_run(link["run_id"])
-            event_types = [
-                event["event_type"]
-                for event in service.list_run_events(run["run_id"], include_internal=True)["events"]
-            ]
+            events = service.list_run_events(run["run_id"], include_internal=True)["events"]
+            event_types = [event["event_type"] for event in events]
             assistant = runtime.chat_session.get_assistant_message_for_task(result["task_id"])
 
             assert result["ok"] is True
@@ -9890,8 +9888,38 @@ def test_send_message_executes_direct_safe_shortcut_task(tmp_path, monkeypatch):
                 assert result["agent_task"]["summary"]
             assert result["agent_task"]["needs_user_action"] is False
             assert result["agent_task"]["pending_approvals"] == []
-            assert any(call["tool_name"] == "desktop.safe_shortcut"
-                       for call in result["agent_task"]["tool_calls"])
+            source_rows = [
+                call for call in result["agent_task"]["tool_calls"]
+                if call["tool_name"] == "desktop.safe_shortcut"
+                and call["source"] == "runtime_planner"
+                and call["input_preview"] == {"action": action}
+            ]
+            assert len(source_rows) == 1
+            source_row = source_rows[0]
+            source_calls = [
+                event["payload"] for event in events
+                if event["event_type"] == "agent.tool.call"
+                and event["payload"].get("tool") == "desktop.safe_shortcut"
+                and event["payload"].get("source") == "runtime_planner"
+                and event["payload"].get("input_preview") == {"action": action}
+            ]
+            assert len(source_calls) == 1
+            source_call = source_calls[0]
+            assert source_call["actor"] == "native_runtime"
+            assert source_call["execution_authority"] == "runtime_tool_executor"
+            assert source_call["run_id"] == run["run_id"]
+            assert source_row["tool_call_id"] == source_call["tool_call_id"]
+            for key in ("plan_id", "decision_id", "tool_plan_id", "step_id"):
+                assert source_call[key] and source_row[key] == source_call[key]
+            assert source_call["request_id"]
+            assert source_call["result"]["ok"] is True
+            assert source_call["result"]["action"] == "desktop.safe_shortcut"
+            assert source_call["result"]["data"]["shortcut_action"] == action
+            # A successful URL-copy dispatch remains separately visible even
+            # though its independent clipboard verification must reject it.
+            assert source_row["status"] == (
+                "completed" if action == "copy_current_page_link" else "failed"
+            )
             assert task is not None
             assert assistant is not None
             assert assistant.content == result["agent_task"]["summary"]
@@ -9905,12 +9933,49 @@ def test_send_message_executes_direct_safe_shortcut_task(tmp_path, monkeypatch):
             assert result["agent_task"]["status"] == run["status"] == expected_status
             assert task.status == TaskStatus.FAILED
             assert assistant.status == MessageStatus.FAILED
-            if action == "copy":
-                assert "agent.desktop.intent_unverified" in event_types
+            unverified = [
+                event["payload"] for event in events
+                if event["event_type"] == "agent.desktop.intent_unverified"
+            ]
+            assert len(unverified) == 1
+            failure = unverified[0]
+            assert failure["status"] == "failed"
             assert "agent.desktop.intent_completed" not in event_types
             if action == "copy_current_page_link":
+                verifier_calls = [
+                    event["payload"] for event in events
+                    if event["event_type"] == "agent.tool.call"
+                    and event["payload"].get("step_id") == "verify-copied-page-link"
+                ]
+                assert len(verifier_calls) == 1
+                verifier = verifier_calls[0]
+                assert verifier["actor"] == "native_runtime"
+                assert verifier["execution_authority"] == "runtime_tool_executor"
+                assert verifier["source"] == "runtime_verification"
+                assert verifier["tool"] == "clipboard.read"
+                assert verifier["input_preview"] == {"max_chars": 12000}
+                assert verifier["source_step_id"] == source_call["step_id"]
+                assert verifier["source_tool_call_id"] == source_call["tool_call_id"]
+                assert verifier["source_request_id"] == source_call["request_id"]
+                for key in ("run_id", "plan_id", "decision_id", "tool_plan_id"):
+                    assert verifier[key] == source_call[key]
+                assert verifier["result"]["ok"] is True
+                assert verifier["result"]["data"]["text"] == "old clipboard"
+                assert verifier["result"]["data"]["pasteboard_revision"] == 100
+                assert failure["tool"] == verifier["tool"]
+                assert failure["tool_call_id"] == verifier["tool_call_id"]
+                assert failure["input_preview"] == verifier["input_preview"]
+                assert failure["reason"] == "current_page_link_copy_unverified"
                 assert clipboard_read()["data"]["text"] == "old clipboard"
                 assert clipboard_read()["data"]["pasteboard_revision"] == 100
+            else:
+                assert failure["tool"] == source_call["tool"]
+                assert failure["tool_call_id"] == source_call["tool_call_id"]
+                assert failure["input_preview"] == source_call["input_preview"]
+                assert failure["reason"] == (
+                    "desktop_verification_failed" if action == "copy"
+                    else "desktop_verification_missing"
+                )
 
         assert shortcut_calls == [action for _text, action, _summary in cases]
     finally:
@@ -11551,10 +11616,8 @@ def test_send_message_prepares_comm_find_message_then_waits_for_send_approval(
     try:
         result = _send_foreground_message(api, "打开微信发消息给张三你好")
         run = service.get_run(result["run_id"])
-        event_types = [
-            event["event_type"]
-            for event in service.list_run_events(run["run_id"], include_internal=True)["events"]
-        ]
+        events = service.list_run_events(run["run_id"], include_internal=True)["events"]
+        event_types = [event["event_type"] for event in events]
 
         assert result["ok"] is True
         assert result["status"] == "waiting_approval"
@@ -11567,7 +11630,13 @@ def test_send_message_prepares_comm_find_message_then_waits_for_send_approval(
         ]
         assert result["agent_task"]["status"] == "waiting_approval"
         assert result["agent_task"]["needs_user_action"] is True
-        assert result["agent_task"]["pending_approvals"][0]["tool_name"] == "desktop.submit_foreground"
+        assert len(result["agent_task"]["pending_approvals"]) == 1
+        pending = result["agent_task"]["pending_approvals"][0]
+        assert pending["tool_name"] == "desktop.submit_foreground"
+        assert pending["status"] == "pending"
+        assert pending["approval_id"]
+        assert pending["risk_level"] == "high"
+        assert pending["step_id"] == "send-communication-message"
         _assert_dict_contains(
             result["agent_task"]["pending_approvals"][0]["input_preview"],
             {"action": "send"},
@@ -11580,11 +11649,41 @@ def test_send_message_prepares_comm_find_message_then_waits_for_send_approval(
         )
         assert "agent.desktop.intent_planned" in event_types
         assert "tool.requested" in event_types
-        assert any(event["event_type"] == "tool.requested" and
-                   event["payload"]["tool"] == "desktop.submit_foreground"
-                   for event in service.list_run_events(
-                       run["run_id"], include_internal=True
-                   )["events"])
+        send_rows = [
+            call for call in result["agent_task"]["tool_calls"]
+            if call["tool_name"] == "desktop.submit_foreground"
+            and call["source"] == "runtime_planner"
+            and call["input_preview"] == {"action": "send"}
+        ]
+        assert len(send_rows) == 1
+        send_row = send_rows[0]
+        assert send_row["status"] == "waiting_approval"
+        _assert_dict_contains(send_row["output_preview"], {
+            "ok": False,
+            "status": "approval_required",
+            "approval_required": True,
+            "tool": "desktop.submit_foreground",
+            "step_id": "send-communication-message",
+            "risk_level": "high",
+        })
+        assert send_row["output_preview"]["policy_reason"]
+        requested = [
+            event["payload"] for event in events
+            if event["event_type"] == "tool.requested"
+            and event["payload"].get("tool") == "desktop.submit_foreground"
+        ]
+        assert len(requested) == 1
+        assert requested[0]["actor"] == "native_runtime"
+        assert requested[0]["execution_authority"] == "runtime_tool_executor"
+        assert requested[0]["run_id"] == run["run_id"]
+        assert requested[0]["tool_call_id"] == send_row["tool_call_id"]
+        assert requested[0]["step_id"] == pending["step_id"]
+        assert requested[0]["input_preview"] == {"action": "send"}
+        assert not any(
+            event["event_type"] == "agent.tool.call"
+            and event["payload"].get("tool") == "desktop.submit_foreground"
+            for event in events
+        )
         assert "model.request.started" not in event_types
         assert "model.requested" not in event_types
     finally:
