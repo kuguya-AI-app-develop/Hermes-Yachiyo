@@ -69,6 +69,12 @@ def native_music_search_receipt(
     if tuple(request.get("step_id") for request in requests) != _STEPS:
         return {}
     specs = {request["step_id"]: request for request in requests}
+    catalog_query = specs[_STEPS[0]]["input"].get("query")
+    if (
+        not isinstance(catalog_query, str)
+        or catalog_query.strip().casefold() not in {"music", "apple music"}
+    ):
+        return {}
     source_spec, verify_spec = specs[_STEPS[-2]], specs[_STEPS[-1]]
     if not isinstance(verifier.get("input"), Mapping):
         return {}

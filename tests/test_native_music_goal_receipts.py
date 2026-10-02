@@ -22,8 +22,7 @@ from apps.shell.yachiyo_agent.runtime_execution import (
 )
 
 
-def _case(tmp_path, monkeypatch):
-    goal = "我想听超时空辉夜姬吧"
+def _case(tmp_path, monkeypatch, goal="我想听超时空辉夜姬吧"):
     selection = planner_first_direct_tool_selection(goal, ALLOWED)
     payload = runtime_execution_envelope_payload(
         selection.decision, allowed_tools=ALLOWED, full_plan=True
@@ -96,7 +95,7 @@ def _case(tmp_path, monkeypatch):
                 "path": "/System/Applications/Music.app",
                 "match_confidence": "high",
             }
-            data = {"query": "music", "best_match": chosen, "apps": [chosen]}
+            data = {"query": request["input"]["query"], "best_match": chosen, "apps": [chosen]}
         result = {"ok": True, "action": request["tool"], "data": data}
         if index == 4:
             result = broker_result
@@ -140,6 +139,28 @@ def test_real_broker_music_readback_finishes_exact_declared_goal(tmp_path, monke
     assert receipt["verified_observed_state"] == "playing"
     assert runtime_goal_assessment(contract, [*timeline, _projection(verifier, receipt)]).completed
     assert not runtime_goal_assessment(contract, timeline).completed
+
+
+@pytest.mark.parametrize(
+    "goal, completed",
+    [
+        ("我想听超时空辉夜姬吧", True),
+        ("用 Music 播放超时空辉夜姬", True),
+        ("打开 Music 播放超时空辉夜姬", True),
+        ("打开 Spotify 播放超时空辉夜姬", False),
+    ],
+)
+def test_native_music_cannot_replace_a_different_named_application(
+    tmp_path, monkeypatch, goal, completed
+):
+    contract, timeline, verifier = _case(tmp_path, monkeypatch, goal)
+    # The observed catalog deliberately claims Music as a high-confidence match,
+    # even for Spotify. The frozen requested app must still win.
+    assert timeline[1]["result"]["data"]["best_match"]["name"] == "Music"
+    receipt = native_music_search_receipt(timeline[-1], verifier, timeline)
+    assert bool(receipt) is completed
+    assessment = runtime_goal_assessment(contract, [*timeline, _projection(verifier, receipt)])
+    assert assessment.completed is completed
 
 
 @pytest.mark.parametrize("event_index", [1, 5], ids=["catalog", "playback"])
