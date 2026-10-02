@@ -685,7 +685,7 @@ async def start_studio_group_run_tool_recovery_action(
     request: RunToolRecoveryActionBody,
     http_request: Request = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
-    return await yachiyo_studio_group_handlers.start_group_tool_recovery_action(
+    return await yachiyo_studio_handlers.start_group_tool_recovery_action(
         group_run_id,
         request,
         http_request,
