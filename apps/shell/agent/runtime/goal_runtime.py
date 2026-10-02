@@ -18,6 +18,7 @@ from apps.shell.agent.runtime.dispatch_semantics import (
     intrinsic_native_postcondition_state,
     intrinsic_native_postcondition_target_matches,
     is_semantic_safe_key,
+    is_semantic_search_submit,
 )
 from apps.shell.agent.runtime.events import (
     RUNTIME_EXECUTION_PROVENANCE_KEY,
@@ -1644,6 +1645,8 @@ def _trusted_verifier_link(
         "exact_submit_dispatch_receipt",
         "exact_app_search_result_present",
         "exact_selected_full_text_copied",
+        "exact_current_page_link_copied",
+        "exact_search_link_navigation",
         EXACT_FILE_CONTENT_PRESENT_PREDICATE,
     }:
         return None
@@ -1773,7 +1776,31 @@ def _verifier_matches_source_attempt(
             != "copy-selected-full-text"
         ):
             return False
+    if predicate_kind == "exact_current_page_link_copied":
+        source_input = event.get("input_preview") or {}
+        if (
+            source_tool != "desktop.safe_shortcut"
+            or source_input.get("action") != "copy_current_page_link"
+            or str(event.get("step_id") or event.get("planner_step_id") or "")
+            != "copy-current-page-link"
+        ):
+            return False
     verifier_tool = str(verifier_link.get("verifier_tool") or "").strip()
+    if predicate_kind == "exact_search_link_navigation":
+        source_input = (
+            event.get("input_preview")
+            if isinstance(event.get("input_preview"), Mapping) else {}
+        )
+        selector = source_input.get("selector")
+        if (
+            source_tool != "browser.click"
+            or verifier_tool != "browser.current_page"
+            or not isinstance(selector, str)
+            or not re.fullmatch(r"search-result=[1-9][0-9]*", selector)
+            or type(source_input.get("click_count")) is not int
+            or dict(source_input) != {"selector": selector, "click_count": 1}
+        ):
+            return False
     if (
         source_tool in {"terminal.run", "python.run"}
         and verifier_tool in EXACT_FILE_READBACK_VERIFIER_TOOLS
@@ -2137,7 +2164,7 @@ def _exact_dispatch_only_source_receipt(
     tool_name = str(source_attempt.get("tool") or "").strip()
     # An exact key receipt proves delivery, not a changed selection/focus/UI.
     # Keep the dispatch audit but require a separate observation for completion.
-    if is_semantic_safe_key(tool_name):
+    if is_semantic_safe_key(tool_name) or is_semantic_search_submit(tool_name):
         return False
     event_tool = str(
         source_event.get("tool") or source_event.get("detail") or ""
@@ -2869,7 +2896,7 @@ def _canonical_observed_payload(
     else:
         state = _canonical_observed_state(observed)
     source_tool = str(event.get("tool") or event.get("detail") or "").strip()
-    if is_semantic_safe_key(source_tool):
+    if is_semantic_safe_key(source_tool) or is_semantic_search_submit(source_tool):
         # Even legacy rows with effectful=False cannot reinterpret a key's
         # own acknowledgement (or self-reported flags) as an observed UI goal.
         verification_passed = False

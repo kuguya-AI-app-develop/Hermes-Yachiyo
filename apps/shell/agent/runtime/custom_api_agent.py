@@ -93,6 +93,7 @@ from apps.shell.agent.runtime.model_messages import messages_require_model_first
 from apps.shell.agent.runtime.model_intent_planning import (
     ModelIntentClarificationResolution,
     ModelIntentPlanningError,
+    capture_only_content_read_requires_model,
     direct_tool_selection_from_user_clarification,
     model_intent_planning_tool_schema,
     model_intent_proposal_from_tool_requests,
@@ -2946,6 +2947,11 @@ class RuntimeCustomApiAgentLoop:
                     )
                     if direct_result:
                         return direct_result
+                explicit_model_followup = explicit_model_followup or (
+                    capture_only_content_read_requires_model(
+                        immutable_original_goal, execution_tool_requests,
+                    )
+                )
                 continue_to_model = bool(replan_payloads) or explicit_model_followup
                 if continue_to_model:
                     followup_selection_payload = _selection_payload_with_timeline_fallback(
@@ -8873,6 +8879,14 @@ class RuntimeCustomApiAgentLoop:
         run_id: str = "",
         allow_honest_partial: bool = False,
     ) -> str:
+        contract = runtime_goal_contract(
+            run_id=run_id, runtime_execution_envelope=None,
+            runtime_execution_metadata=None, messages=[], timeline=timeline,
+        ) if any(e.get("event") == "agent.goal.contract" for e in timeline) else None
+        if contract and capture_only_content_read_requires_model(
+            contract.original_goal, planned_tool_requests,
+        ):
+            return ""
         tool_events = [
             event
             for event in timeline[tool_timeline_start:]
@@ -9002,11 +9016,20 @@ class RuntimeCustomApiAgentLoop:
             ):
                 return ""
             presentation = str(planned_tool_request.get("presentation") or "").strip()
+            from .current_page_link_copy import bounded_page_link_copy_goal
+            page_link_preparation = bool(
+                contract
+                and bounded_page_link_copy_goal(contract.original_goal)
+                and planned_tool == "clipboard.read"
+                and str(planned_tool_request.get("step_id") or "")
+                == "read-page-link-pasteboard-before"
+            )
             summary = (
                 ""
                 if (
                     planned_tool in _DIRECT_DAILY_SEQUENCE_CONTEXT_TOOLS
                     or direct_runtime_verification
+                    or page_link_preparation
                 )
                 else self._daily_desktop_summary(
                     planned_tool,
@@ -9019,6 +9042,7 @@ class RuntimeCustomApiAgentLoop:
                 not summary
                 and planned_tool not in _DIRECT_DAILY_SEQUENCE_CONTEXT_TOOLS
                 and not direct_runtime_verification
+                and not page_link_preparation
             ):
                 return ""
             completed_step = {

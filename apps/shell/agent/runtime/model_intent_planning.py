@@ -304,6 +304,11 @@ def planner_selection_needs_model_assistance(
     steps = list(getattr(tool_plan, "steps", []) or [])
     if plan is None or tool_plan is None or not steps:
         return True
+    if (
+        str(getattr(selected_intent, "kind", "") or "") == "desktop_operation"
+        and capture_only_content_read_requires_model(clean_goal, steps)
+    ):
+        return True
     if _compound_action_clauses_underplanned(clean_goal, steps):
         return True
     selected_requests = list(getattr(selection, "requests", []) or [])
@@ -344,6 +349,34 @@ def planner_selection_needs_model_assistance(
     return False
 
 
+
+_CAPTURE_CONTENT_READ_RE = re.compile(
+    r"(?:读(?:取)?|阅读|看(?:看)?|查看|检查|解释|分析|总结)\s*"
+    r"(?:一下|一眼|当前|的|新|未读|未读的|一下当前)*\s*(?:聊天|对话|消息|cpu)"
+    r"|\b(?:read|review|check|summari[sz]e|explain|analy[sz]e)\s+"
+    r"(?:(?:the|current|new|unread)\s+)*(?:messages?|chats?|conversation|cpu)\b",
+    flags=re.IGNORECASE,
+)
+
+
+def capture_only_content_read_requires_model(original_goal: str, steps: Iterable[Any]) -> bool:
+    """A picture does not fulfill a request to read or explain its contents."""
+    tools = {
+        str((step.get("tool") or step.get("tool_name") or "")
+            if isinstance(step, Mapping) else getattr(step, "tool_name", "") or "")
+        for step in steps
+    }
+    if "screen.capture" not in tools or not tools.issubset({
+        "screen.capture", "app.open", "app.focus", "app.status", "desktop.open_app",
+        "desktop.focus_app", "desktop.list_apps", "desktop.running_apps", "desktop.active_window",
+    }):
+        return False
+    normalized = _normalized_speech_act_text(original_goal)
+    return any(
+        _speech_act_action_occurrence_is_authorized(normalized, match.start(), match.end())
+        for match in _CAPTURE_CONTENT_READ_RE.finditer(normalized)
+    )
+
 def _compound_action_clauses_underplanned(
     original_goal: str,
     steps: Iterable[Any],
@@ -367,6 +400,16 @@ def _compound_action_clauses_underplanned(
     ]
     if not connected_pairs:
         return False
+    if (
+        any(re.fullmatch(r"(?:放|播)点", match.group(0)) for match in matches)
+        and any(
+            _semantic_action_family(match.group(0)) not in {"play", "search", "open"}
+            for match in matches
+        )
+    ):
+        # Typing/clicking inside a media search adapter cannot cover a
+        # separately requested UI action following a quantified play request.
+        return True
     requested = Counter(
         _semantic_action_family(match.group(0))
         for match in matches
@@ -473,7 +516,7 @@ def _semantic_action_family(value: Any) -> str:
             ),
         ),
         ("analyze", ("分析", "analyse", "analyze")),
-        ("play", ("播放", "play")),
+        ("play", ("播放", "放点", "播点", "play")),
         ("send", ("发送", "发给", "发", "回复", "send", "reply")),
         ("delete", ("删除", "delete")),
         ("move", ("移动", "move")),
@@ -502,6 +545,15 @@ def _planned_step_action_families(step: Any) -> tuple[str, ...]:
     raw_input = getattr(step, "input_preview", None)
     input_preview = raw_input if isinstance(raw_input, Mapping) else {}
 
+    if (
+        tool_name == "browser.open_url"
+        and getattr(step, "step_id", "") == "open-web-search"
+        and str(input_preview.get("url") or "").startswith(("https://", "http://"))
+    ):
+        # The compiler's search-URL opening performs both requested clauses.
+        return ("open", "search")
+    if tool_name == "desktop.submit_foreground" and input_preview.get("action") in {"send", "confirm"}:
+        return (str(input_preview["action"]),)
     if tool_name == "browser.open_url_and_screenshot":
         return ("open", "capture")
     if tool_name == "browser.open_url_and_extract_text":

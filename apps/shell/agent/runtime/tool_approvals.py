@@ -85,6 +85,16 @@ _APPROVAL_PRIVATE_RUNTIME_KEYS = frozenset(
     {
         RUNTIME_PRIVATE_RECOVERY_CONTEXT_KEY,
         "recovery_context_trusted",
+        "_runtime_private_select_all_copy",
+        "_runtime_private_clipboard_target",
+        "_runtime_private_typed_observation",
+        "_runtime_private_copy_observation",
+        "_runtime_private_clipboard_observation",
+        "_runtime_private_typed_raw_result",
+        "_runtime_private_clipboard_source_request",
+        "_runtime_private_prepared_submit_context",
+        "_runtime_private_exact_submit_receipt",
+        "_runtime_private_exact_file_readback",
     }
 )
 

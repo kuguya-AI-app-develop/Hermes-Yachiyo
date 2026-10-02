@@ -247,11 +247,15 @@ def click(
           ? document.elementFromPoint(point.x, point.y)
         : document.querySelector(selector);
       if (!el) return {{ ok: false, error: 'selector_not_found', selector }};
+      const sourceUrl = window.location.href;
+      const navigationUrl = el.tagName === 'A' ? el.href : '';
+      const linkTarget = el.tagName === 'A' ? (el.getAttribute('target') || '').toLowerCase() : '';
       if (!point) el.scrollIntoView({{ block: 'center', inline: 'center' }});
       const clickCount = Math.max(1, Math.min(3, Number(requestedClickCount) || 1));
       for (let index = 0; index < clickCount; index += 1) el.click();
       const label = labelFor(el);
-      return {{ ok: true, selector, tag: el.tagName, label: label.slice(0, 200), x: point && point.x, y: point && point.y, click_count: clickCount }};
+      return {{ ok: true, selector, tag: el.tagName, label: label.slice(0, 200), x: point && point.x, y: point && point.y, click_count: clickCount,
+        source_url: sourceUrl, navigation_url: navigationUrl, link_target: linkTarget }};
     }})()
     """
     try:

@@ -29,6 +29,7 @@ from apps.shell.agent.runtime.model_less_desktop_outcome import (
 )
 from apps.shell.agent.runtime.model_intent_planning import (
     ModelIntentClarificationResolution,
+    capture_only_content_read_requires_model,
     goal_contract_payload_from_model_selection,
 )
 from apps.shell.agent.runtime.tool_brokers import (
@@ -228,6 +229,7 @@ class MainChatModelLoopRunner:
         authoritative_direct_daily_desktop_intent = (
             self._authoritative_runtime_plan_can_complete_without_model(
                 allowed_tools,
+                original_goal=user_goal,
                 direct_tool_request=direct_tool_request,
                 direct_tool_requests=direct_tool_requests,
                 runtime_execution_envelope=runtime_execution_envelope,
@@ -337,6 +339,7 @@ class MainChatModelLoopRunner:
             or self._will_handle_daily_desktop_intent(
                 messages,
                 allowed_tools,
+                original_goal=user_goal,
                 direct_tool_request=direct_tool_request,
                 direct_tool_requests=direct_tool_requests,
                 runtime_execution_envelope=runtime_execution_envelope,
@@ -757,6 +760,7 @@ class MainChatModelLoopRunner:
     def _authoritative_runtime_plan_can_complete_without_model(
         allowed_tools: list[str],
         *,
+        original_goal: str = "",
         direct_tool_request: dict[str, Any] | None = None,
         direct_tool_requests: list[dict[str, Any]] | None = None,
         runtime_execution_envelope: dict[str, Any] | None = None,
@@ -788,6 +792,8 @@ class MainChatModelLoopRunner:
             bool(request.get("continue_to_model")) for request in requests
         ):
             return False
+        if capture_only_content_read_requires_model(original_goal, requests):
+            return False
         return daily_desktop_requests_can_complete_without_model(requests)
 
     @staticmethod
@@ -795,6 +801,7 @@ class MainChatModelLoopRunner:
         messages: list[dict[str, Any]],
         allowed_tools: list[str],
         *,
+        original_goal: str = "",
         direct_tool_request: dict[str, Any] | None = None,
         direct_tool_requests: list[dict[str, Any]] | None = None,
         runtime_execution_envelope: dict[str, Any] | None = None,
@@ -807,6 +814,8 @@ class MainChatModelLoopRunner:
         explicit_requests: list[Any] = list(direct_tool_requests or [])
         if direct_tool_request is not None:
             explicit_requests.append(direct_tool_request)
+        if capture_only_content_read_requires_model(original_goal, explicit_requests):
+            return False
         if explicit_requests:
             if any(
                 not isinstance(request, dict)
@@ -825,6 +834,8 @@ class MainChatModelLoopRunner:
             runtime_execution_envelope,
             allowed_tools=allowed_tools,
         )
+        if capture_only_content_read_requires_model(original_goal, requests):
+            return False
         if requests and not any(
             bool(request.get("continue_to_model"))
             for request in requests
@@ -844,6 +855,8 @@ class MainChatModelLoopRunner:
                 allowed_tools,
             )
             planned_requests = selection.requests
+            if capture_only_content_read_requires_model(original_goal, planned_requests):
+                return False
             if planned_requests:
                 if not any(
                     bool(request.get("continue_to_model"))

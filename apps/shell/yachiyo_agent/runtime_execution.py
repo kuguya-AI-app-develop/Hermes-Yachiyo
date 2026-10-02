@@ -510,8 +510,14 @@ def _full_plan_tool_requests_from_decision(
                 request["continue_to_model"] = True
         if desktop_observation_followup is True:
             request["continue_to_model"] = True
+        if step_id.startswith("verify-clipboard-paste-"):
+            # Exact private clipboard readback is evaluated by Runtime, before
+            # exposing any subsequent send approval or asking for a model.
+            request["continue_to_model"] = False
         if _request_needs_model_materialization(tool_name, raw_request_input):
             request["continue_to_model"] = True
+        if step_id.startswith(("inspect-typed-draft-", "verify-typed-draft-")):
+            request["continue_to_model"] = False
         requests.append(request)
     return requests
 
@@ -1441,9 +1447,19 @@ def _execution_request_snapshot(
     ):
         goal_action_target = {}
     planned_action_target = goal_action_target or step_action_target
-    if goal_action_target:
+    if goal_action_target or (
+        tool_name == "desktop.search_submit"
+        and planned_action_target
+        and _request_projects_goal_source_action(
+            step=step,
+            tool_name=tool_name,
+            goal_action_target=planned_action_target,
+            projected_action_target=action_target,
+            capability_id=capability_id,
+        )
+    ):
         action_target = bind_planned_action_target(
-            goal_action_target,
+            planned_action_target,
             action_target,
             capability_id=capability_id,
             source_step_id=step_id,

@@ -132,6 +132,11 @@ def semantic_safe_shortcut_effect(
     return f"shortcut_dispatched:{stable_action}" if stable_action else ""
 
 
+
+def is_semantic_search_submit(tool_name: str | None) -> bool:
+    """Search Return delivery requires a separate query/results observation."""
+    return str(tool_name or "").strip() == "desktop.search_submit"
+
 def intrinsic_native_postcondition_state(
     tool_name: str | None,
     input_payload: Mapping[str, Any] | None,
@@ -150,7 +155,21 @@ def intrinsic_native_postcondition_state(
         return ""
     request = input_payload if isinstance(input_payload, Mapping) else {}
     data = result.get("data") if isinstance(result.get("data"), Mapping) else {}
-    if is_semantic_safe_shortcut(clean_tool, request) or is_semantic_safe_key(clean_tool):
+    if clean_tool == "system.settings_open":
+        from apps.shell.agent.runtime.system_settings_receipts import settings_readback_matches
+
+        return "open" if (
+            result.get("ok") is True and result.get("action") == clean_tool
+            and result.get("postcondition_verified") is True
+            and not result.get("permission_error")
+            and data.get("target") == request.get("target")
+            and settings_readback_matches(request.get("target"), data.get("settings_readback"))
+        ) else ""
+    if (
+        is_semantic_safe_shortcut(clean_tool, request)
+        or is_semantic_safe_key(clean_tool)
+        or is_semantic_search_submit(clean_tool)
+    ):
         # A shortcut provider owns the mutation and cannot independently
         # attest the UI effect it claims to have caused.  Completion requires
         # a separately trusted, action-specific observation receipt.
@@ -231,8 +250,10 @@ def has_intrinsic_native_postcondition_contract(tool_name: str | None) -> bool:
     clean_tool = str(tool_name or "").strip()
     return bool(
         clean_tool in _APP_LIFECYCLE_INTRINSIC_RULES
+        or clean_tool == "system.settings_open"
         or is_semantic_safe_shortcut(clean_tool)
         or is_semantic_safe_key(clean_tool)
+        or is_semantic_search_submit(clean_tool)
     )
 
 
@@ -383,6 +404,13 @@ def intrinsic_native_postcondition_target_matches(
     clean_tool = str(tool_name or "").strip()
     request = input_payload if isinstance(input_payload, Mapping) else {}
     action_target = target if isinstance(target, Mapping) else {}
+    if clean_tool == "system.settings_open":
+        return bool(
+            request.get("target")
+            and action_target.get("kind") == "system"
+            and action_target.get("action") == "open_settings"
+            and action_target.get("target") == request.get("target")
+        )
     if is_semantic_safe_shortcut(clean_tool, request):
         return False
     rule = _APP_LIFECYCLE_INTRINSIC_RULES.get(clean_tool)

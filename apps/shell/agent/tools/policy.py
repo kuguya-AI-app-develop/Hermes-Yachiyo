@@ -1255,12 +1255,16 @@ TOOL_DESCRIPTORS: dict[str, ToolDescriptor] = {
             "path": {"type": "string", "description": "Relative file path inside writable scopes."},
             "patch": {
                 "type": "string",
-                "description": "Single-file unified diff whose file headers match path.",
+                "description": (
+                    "Single-file unified diff whose file headers match path. "
+                    "A new file requires a /dev/null old header and one zero-old-line hunk."
+                ),
             },
             "expected_sha256": {
                 "type": "string",
                 "description": (
-                    "Optional current file SHA-256 precondition checked immediately before writing."
+                    "Current file SHA-256 precondition checked immediately before writing. "
+                    "Optional for an existing file; a new file requires the SHA-256 of empty bytes."
                 ),
             },
             "base_sha256": {"type": "string", "description": "Alias for expected_sha256."},

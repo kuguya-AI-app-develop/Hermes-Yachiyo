@@ -293,7 +293,7 @@ def compile_plan(
             directive.runnable_id for directive in directives
         } != set(declared):
             return None
-        for directive in directives:
+        for directive in sorted(directives, key=lambda item: declared.index(item.runnable_id)):
             target = next(
                 (item for item in participants if item["id"] == directive.runnable_id), None
             )
@@ -681,11 +681,11 @@ class MainChatDelegationCoordinator:
     def _direct_child_envelopes(
         self, parent: dict[str, Any], plan: Mapping[str, Any]
     ) -> dict[str, Any]:
-        """Materialize an exact process goal through the existing planner.
+        """Compile unresolved child goals through each saved agent's planner.
 
-        Legacy terminal templates omit the exact process target. Planning
-        happens before the transaction/child execution leases, so cancellation
-        can still fence every deferred child effect.
+        Planning happens before the transaction/child execution leases, so
+        cancellation can still fence every deferred child effect. An unresolved
+        deterministic template cannot replace or discard the original goal.
         """
         from apps.shell.yachiyo_agent.runtime_execution import runtime_execution_envelope_payload
 
@@ -704,11 +704,24 @@ class MainChatDelegationCoordinator:
             }
             runtime = self.service._compile_agent_runtime(agent)
             allowed = runtime["tool_policy"].get("allowed_tools") or []
-            template = planned_goal_contract_payload(target["goal"], allowed_tools=allowed)
-            if not any(
-                set(criterion.get("required_capabilities") or []) == {"terminal.execution"}
-                and (criterion.get("expected", {}).get("target") or {}).get("action")
-                != "run_command"
+            try:
+                template = planned_goal_contract_payload(target["goal"], allowed_tools=allowed)
+            except ValueError as exc:
+                if str(exc) != "goal_contract_compile_failed":
+                    raise
+                template = None
+            if template is not None and not any(
+                (
+                    set(criterion.get("required_capabilities") or []) == {"terminal.execution"}
+                    and (criterion.get("expected", {}).get("target") or {}).get("action")
+                    != "run_command"
+                )
+                or (
+                    set(criterion.get("required_capabilities") or []) == {"file.workspace_write"}
+                    and (criterion.get("expected", {}).get("target") or {}).get("action")
+                    == "apply_patch"
+                    and not (criterion.get("expected", {}).get("target") or {}).get("path")
+                )
                 for criterion in template.get("criteria") or []
             ):
                 continue

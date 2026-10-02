@@ -4,6 +4,8 @@ import hashlib
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from apps.shell.agent.runtime.private_native_observation import PrivateNativeObservationChannel
+
 _COPY_AUTHORITY = object()
 COPY_TRANSACTION_KEY = "_runtime_private_select_all_copy"
 COPY_PREDICATE = "exact_selected_full_text_copied"
@@ -41,6 +43,17 @@ def prepare_copy_transactions(
         request.pop(COPY_TRANSACTION_KEY, None)
         if _step(request) == "prepare-select-all-for-copy":
             request["requires_post_action_verification"] = True
+    from .current_page_link_copy import PAGE_LINK_STEPS, prepare_page_link_copy
+
+    if any(_step(r) in PAGE_LINK_STEPS for r in requests):
+        prepare_page_link_copy(
+            requests,
+            user_goal=user_goal,
+            allowed_tools=allowed_tools,
+            run_id=run_id,
+            timeline=timeline,
+        )
+        return
     if not any(_step(r) in _COPY_STEPS for r in requests):
         return
     from apps.shell.yachiyo_agent.runtime_execution import (
@@ -162,6 +175,17 @@ def exact_copy_observation(
     provider_identity: Callable[[Mapping[str, Any], Mapping[str, Any]], tuple[str, str]],
     private_observations: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    from .current_page_link_copy import PAGE_LINK_VERIFY_STEP, exact_page_link_copy_observation
+
+    if _step(verifier_request) == PAGE_LINK_VERIFY_STEP:
+        return exact_page_link_copy_observation(
+            action_event,
+            verifier_request,
+            verifier_result,
+            timeline,
+            provider_identity=provider_identity,
+            private_observations=private_observations,
+        )
     if not copy_transaction_bound(verifier_request) or _step(verifier_request) != COPY_VERIFY_STEP:
         return {}
     binding = verifier_request[COPY_TRANSACTION_KEY]
@@ -284,25 +308,11 @@ def exact_copy_observation(
     }
 
 
-class _CopyObservationToken:
-    """A live executor capability; JSON-like output cannot reproduce it."""
-
-    def __init__(self, request: Mapping[str, Any], data: Mapping[str, Any]):
-        self.scope = {
-            key: str(request.get(key) or "")
-            for key in (
-                "run_id",
-                "plan_id",
-                "request_id",
-                "tool_call_id",
-                "step_id",
-                "tool",
-            )
-        }
-        self.data = dict(data)
-        self.used = False
-
-
+_COPY_OBSERVATION_CHANNEL = PrivateNativeObservationChannel(
+    copy_transaction_bound,
+    authority=_COPY_AUTHORITY,
+    tools=frozenset({"desktop.ui_elements", "clipboard.read"}),
+)
 COPY_OBSERVATION_RESULT_KEY = "_runtime_private_copy_observation"
 
 
@@ -312,34 +322,17 @@ def capture_copy_observation(
     *,
     local_broker_executed: bool,
 ) -> Any:
-    if not local_broker_executed or not copy_transaction_bound(request):
-        return None
-    if raw_result.get("ok") is not True or raw_result.get("permission_error"):
-        return None
-    tool = request.get("tool")
-    if tool not in {"desktop.ui_elements", "clipboard.read"}:
-        return None
-    data = raw_result.get("data")
-    if not isinstance(data, Mapping):
-        return None
-    if tool == "desktop.ui_elements":
-        focused = data.get("focused_element")
-        if not isinstance(focused, Mapping):
-            return None
-        raw = {key: data.get(key) for key in ("app_name", "pid", "window_id")}
-        raw["focused_element"] = dict(focused)
-    else:
-        raw = {
-            key: data.get(key)
-            for key in (
-                "text",
-                "text_length",
-                "truncated",
-                "pasteboard_revision",
-                "pasteboard_revision_stable",
-            )
-        }
-    return _CopyObservationToken(request, raw)
+    from .current_page_link_copy import capture_page_link_observation, page_link_copy_bound
+
+    if page_link_copy_bound(request):
+        return capture_page_link_observation(
+            request,
+            raw_result,
+            local_broker_executed=local_broker_executed,
+        )
+    return _COPY_OBSERVATION_CHANNEL.capture(
+        request, raw_result, local_broker_executed=local_broker_executed
+    )
 
 
 def consume_copy_observation(
@@ -348,11 +341,8 @@ def consume_copy_observation(
     *,
     run_id: str,
 ) -> dict[str, Any]:
-    if not isinstance(token, _CopyObservationToken) or token.used:
-        return {}
-    token.used = True
-    expected = {key: str(request.get(key) or "") for key in token.scope}
-    expected["run_id"] = run_id
-    if token.scope != expected or not all(expected.values()) or not copy_transaction_bound(request):
-        return {}
-    return {"_authority": _COPY_AUTHORITY, "scope": token.scope, "data": token.data}
+    from .current_page_link_copy import consume_page_link_observation, page_link_copy_bound
+
+    if page_link_copy_bound(request):
+        return consume_page_link_observation(token, request, run_id=run_id)
+    return _COPY_OBSERVATION_CHANNEL.consume(token, request, run_id=run_id)
