@@ -5923,6 +5923,20 @@ class RuntimeToolCallExecutor:
         input_preview = _input_preview_with_app_name_resolution(input_preview, input_resolution)
         input_preview = _input_preview_with_trace_payload(input_preview, trace_payload)
         input_preview = _tool_event_input_preview(tool_name, input_preview)
+        if (
+            tool_name == "desktop.ui_elements"
+            and tool_request.get("source") == "runtime_post_action_auto_verify"
+            and tool_request.get("source_tool") in {
+                "app.open_and_click_ui_element", "app.focus_and_click_ui_element",
+            }
+            and all(tool_request.get(key) for key in (
+                "source_step_id", "source_request_id", "source_tool_call_id",
+                "decision_id", "tool_plan_id", "plan_id", "request_id",
+            ))
+        ):
+            # This internal readback must retain the actual observer operands
+            # so a query receipt can compare them with its frozen click.
+            input_preview = dict(payload)
         budget = budget or self._run_budget(run_id, timeline)
         trusted_control_action = _control_action_allows_tool(tool_name, tool_request)
         if not self._allows_tool(tool_name, allowed_tools) and not trusted_control_action:

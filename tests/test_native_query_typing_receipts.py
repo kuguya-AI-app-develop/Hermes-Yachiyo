@@ -89,6 +89,8 @@ def _case():
         "event": "agent.tool.call",
         "detail": "desktop.ui_elements",
         "tool": "desktop.ui_elements",
+        "decision_id": click["decision_id"],
+        "tool_plan_id": click["tool_plan_id"],
         "plan_id": click["plan_id"],
         "request_id": (
             f"{click['request_id']}:verify:focus-app-search-field:"
@@ -98,7 +100,7 @@ def _case():
         "tool_call_id": "query-before",
         "source_tool_call_id": click["tool_call_id"],
         "source_step_id": click["step_id"],
-        "input_preview": {},
+        "input_preview": {"app_name": "Google Chrome"},
         "result": deepcopy(observation),
     }
     source_request = requests["type-app-search-query"]
@@ -162,6 +164,14 @@ def test_actual_frozen_query_and_search_focus_yield_no_send_context():
         "missing_goal",
         "changed_goal",
         "source_plan",
+        "foreign_decision",
+        "foreign_tool_plan",
+        "extra_source_input",
+        "duplicate_source",
+        "duplicate_source_interleaved",
+        "extra_click_input",
+        "foreign_pre_app",
+        "foreign_pre_limit",
         "source_request",
         "source_run",
         "source_bytes",
@@ -194,6 +204,21 @@ def test_query_readback_rejects_acknowledgements_unbound_scope_and_target_drift(
         timeline.pop(0)
     elif mutation == "changed_goal":
         timeline[0]["goal_contract"]["original_goal"] = "只回复 yachiyo"
+    elif mutation in {"foreign_decision", "foreign_tool_plan"}:
+        key = "decision_id" if mutation == "foreign_decision" else "tool_plan_id"
+        source[key] = verifier[key] = "foreign-canonical-identity"
+    elif mutation in {"duplicate_source", "duplicate_source_interleaved"}:
+        if mutation == "duplicate_source_interleaved":
+            timeline.append({"event": "agent.tool.call", "detail": "app.focus"})
+        timeline.append(deepcopy(source))
+    elif mutation == "extra_source_input":
+        source["input_preview"]["submit"] = True
+    elif mutation == "extra_click_input":
+        timeline[1]["input_preview"]["action"] = "send"
+    elif mutation == "foreign_pre_app":
+        pre["input_preview"] = {"app_name": "Slack"}
+    elif mutation == "foreign_pre_limit":
+        pre["input_preview"] = {"limit": 999}
     elif mutation == "source_plan":
         source["plan_id"] = "other"
     elif mutation == "source_request":

@@ -21,12 +21,12 @@ def _native_event_matches(event, spec, run_id, te):
         and event.get("run_id") == run_id
         and event.get("tool_call_id")
         and event.get("detail", event.get("tool")) == spec.get("tool")
-        and all(event.get(k) == spec.get(k) for k in ("plan_id", "request_id"))
-        and _step(event) == _step(spec)
         and all(
-            (event.get("input_preview") or {}).get(k) == v
-            for k, v in (spec.get("input") or {}).items()
+            event.get(k) == spec.get(k)
+            for k in ("decision_id", "tool_plan_id", "plan_id", "request_id")
         )
+        and _step(event) == _step(spec)
+        and dict(event.get("input_preview") or {}) == dict(spec.get("input") or {})
         and result.get("ok") is True
         and result.get("action") == spec.get("tool")
         and not result.get("verification_failed")
@@ -146,7 +146,7 @@ def trusted_query_typing_receipt(
         or not _native_event_matches(action_event, source, run_id, te)
         or any(
             verifier_request.get(k) != post.get(k)
-            for k in ("tool", "plan_id", "request_id", "depends_on")
+            for k in ("tool", "decision_id", "tool_plan_id", "plan_id", "request_id", "depends_on")
         )
         or dict(verifier_request.get("input") or {}) != dict(post.get("input") or {})
         or verifier_request.get("run_id") != run_id
@@ -170,7 +170,7 @@ def trusted_query_typing_receipt(
         if _native_event_matches(e, source, run_id, te)
         and e.get("tool_call_id") == action_event.get("tool_call_id")
     ]
-    if not source_indices:
+    if len(source_indices) != 1:
         return {}
     source_index = source_indices[0]
     clicks = [e for e in timeline[:source_index] if _native_event_matches(e, click, run_id, te)]
@@ -180,12 +180,14 @@ def trusted_query_typing_receipt(
     click_call = next(iter(click_calls))
     pre_spec = {
         "tool": "desktop.ui_elements",
+        "decision_id": click["decision_id"],
+        "tool_plan_id": click["tool_plan_id"],
         "plan_id": click["plan_id"],
         "request_id": (
             f"{click['request_id']}:verify:{_step(click)}:runtime-verify:desktop.ui_elements"
         ),
         "step_id": f"{_step(click)}:runtime-verify",
-        "input": {},
+        "input": {"app_name": expected_app},
     }
     pre_events = [
         (i, e)
