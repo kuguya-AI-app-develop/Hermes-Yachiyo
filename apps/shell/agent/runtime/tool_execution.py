@@ -9380,7 +9380,13 @@ class RuntimeToolRequestRunner:
             )
             trusted_observation_receipt = (
                 _trusted_postcondition_observation_receipt_for_verifier(
-                    tool_request,
+                    {
+                        **tool_request,
+                        "actor": trace_payload["actor"],
+                        "execution_authority": trace_payload["execution_authority"],
+                    }
+                    if _runtime_request_step_id(tool_request) == "verify-foreground-search-result"
+                    else tool_request,
                     tool_result,
                     timeline,
                     tool_timeline_start=tool_timeline_start,

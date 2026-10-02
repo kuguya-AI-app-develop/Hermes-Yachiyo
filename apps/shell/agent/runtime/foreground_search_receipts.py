@@ -264,7 +264,13 @@ def trusted_foreground_search_receipt(
     *,
     run_id: str,
 ) -> dict[str, Any]:
-    if action_tool != "desktop.search_submit" or _step(verifier_request) != POST:
+    if (
+        action_tool != "desktop.search_submit"
+        or _step(verifier_request) != POST
+        or verifier_request.get("actor") != "native_runtime"
+        or verifier_request.get("execution_authority") != "runtime_tool_executor"
+        or not verifier_request.get("tool_call_id")
+    ):
         return {}
     from . import tool_execution as te
 
@@ -308,6 +314,8 @@ def trusted_foreground_search_receipt(
     if any(not e for e in prefix) or not all(a[0] < b[0] for a, b in zip(prefix, prefix[1:])):
         return {}
     if len({e[1].get("tool_call_id") for e in prefix}) != len(prefix):
+        return {}
+    if verifier_request["tool_call_id"] in {e[1].get("tool_call_id") for e in prefix}:
         return {}
     actual_calls = [
         e

@@ -486,3 +486,37 @@ def test_current_search_never_falls_back_to_unbound_routed_effect(tmp_path, monk
     )
     assert result["ok"] is False
     assert calls == []
+
+
+@pytest.mark.parametrize("change", ["actor", "executor", "empty_call", "source_call", "pre_call"])
+def test_search_verifier_has_independent_runtime_execution_identity(change):
+    case = _case()
+    _, source, verifier, _, timeline = case
+    if change == "actor":
+        verifier["actor"] = "model"
+    elif change == "executor":
+        verifier["execution_authority"] = "provider"
+    elif change == "empty_call":
+        verifier["tool_call_id"] = ""
+    elif change == "source_call":
+        verifier["tool_call_id"] = source["tool_call_id"]
+    elif change == "pre_call":
+        verifier["tool_call_id"] = next(
+            e["tool_call_id"] for e in timeline if e.get("step_id") == PRE
+        )
+    assert _receipt(case) == {}
+
+
+def test_raw_post_event_uses_the_same_independent_verifier_call():
+    case = _case()
+    _, _, verifier, result, timeline = case
+    timeline.append(
+        {
+            **verifier,
+            "event": "agent.tool.call",
+            "detail": "desktop.ui_elements",
+            "input_preview": verifier["input"],
+            "result": result,
+        }
+    )
+    assert _receipt(case)["verification_predicate_kind"] == "exact_app_search_result_present"
