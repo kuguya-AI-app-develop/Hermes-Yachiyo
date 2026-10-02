@@ -79,7 +79,7 @@ if _FASTAPI_AVAILABLE:
     app.add_middleware(
         _CORSMiddlewareClass,
         allow_origins=[],
-        allow_origin_regex=r"^https?://(127\.0\.0\.1|localhost)(:\d+)?$",
+        allow_origin_regex=r"^https?://(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$",
         allow_methods=["*"],
         allow_headers=["*"],
     )
@@ -231,10 +231,15 @@ def _trusted_origin(value: str) -> bool:
         return True
     if origin == "null" or origin.startswith("file://"):
         return True
-    parsed = urlparse(origin)
+    try:
+        parsed = urlparse(origin)
+    except ValueError:
+        return False
     if parsed.scheme not in {"http", "https"}:
         return False
-    return _trusted_loopback_host(parsed.hostname or "")
+    # urlparse.hostname has already removed both brackets and the port. Parsing
+    # it as a Host header again would truncate the IPv6 address ::1 to just :.
+    return parsed.hostname in _LOOPBACK_HOSTS
 
 
 def bridge_request_violation(method: str, headers: Any) -> str:
