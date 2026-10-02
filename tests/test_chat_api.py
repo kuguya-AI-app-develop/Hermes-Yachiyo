@@ -11752,6 +11752,7 @@ def test_send_message_executes_direct_foreground_find_text_task(tmp_path, monkey
 
 
 def test_send_message_executes_direct_safe_arrow_key_task(tmp_path, monkeypatch):
+    # Raw key delivery does not prove changed focus, selection, or desktop state.
     api, runtime, store = _make_api(tmp_path)
     service = _make_agent_runtime_service(tmp_path)
     runtime.agent_runtime_service = service
@@ -11777,7 +11778,7 @@ def test_send_message_executes_direct_safe_arrow_key_task(tmp_path, monkeypatch)
             "escape": "Escape",
             "show_desktop": "Show Desktop",
         }.get(action, action)
-        return _native_postcondition_result({
+        return {
             "ok": True,
             "action": "desktop.safe_key",
             "summary": f"Pressed {key_label}",
@@ -11786,7 +11787,7 @@ def test_send_message_executes_direct_safe_arrow_key_task(tmp_path, monkeypatch)
                 "key_label": key_label,
                 "repeat_count": repeat_count,
             },
-        })
+        }
 
     monkeypatch.setattr("apps.shell.agent.tools.desktop.desktop_safe_key", fake_safe_key)
     try:
@@ -11805,24 +11806,28 @@ def test_send_message_executes_direct_safe_arrow_key_task(tmp_path, monkeypatch)
             assistant = runtime.chat_session.get_assistant_message_for_task(result["task_id"])
 
             assert result["ok"] is True
-            assert result["status"] == "completed"
-            assert result["agent_task"]["status"] == "completed"
+            assert result["status"] == "failed"
+            assert result["agent_task"]["status"] == "failed"
             assert result["agent_task"]["needs_user_action"] is False
             assert result["agent_task"]["pending_approvals"] == []
-            assert result["agent_task"]["summary"] == summary
+            expected_summary = result["agent_task"]["summary"]
+            assert "未能确认" in expected_summary or "无法确认" in expected_summary
+            assert result["agent_task"]["tool_calls"][-1]["output_preview"]["ok"] is True
+            assert result["agent_task"]["tool_calls"][-1]["output_preview"]["data"]["key_action"] == action
+            assert result["agent_task"]["tool_calls"][-1]["output_preview"]["data"]["repeat_count"] == repeat_count
             assert result["agent_task"]["tool_calls"][-1]["tool_name"] == "desktop.safe_key"
             assert result["agent_task"]["tool_calls"][-1]["input_preview"] == {
                 "action": action,
                 "repeat_count": repeat_count,
             }
             assert task is not None
-            assert task.status == TaskStatus.COMPLETED
-            assert task.result == summary
+            assert task.status == TaskStatus.FAILED
+            assert task.error == expected_summary
             assert assistant is not None
-            assert assistant.status == MessageStatus.COMPLETED
-            assert assistant.content == summary
-            assert run["status"] == "completed"
-            assert "agent.desktop.intent_completed" in event_types
+            assert assistant.status == MessageStatus.FAILED
+            assert assistant.content == expected_summary
+            assert run["status"] == "failed"
+            assert "agent.desktop.intent_completed" not in event_types
             assert "model.request.started" not in event_types
             assert pressed[-1] == (action, repeat_count)
 
@@ -11914,6 +11919,7 @@ def test_send_message_executes_next_input_focus_as_safe_tab_key(tmp_path, monkey
 
 
 def test_send_message_executes_app_prefix_safe_tab_key_without_model(tmp_path, monkeypatch):
+    # Raw key delivery does not prove changed focus, selection, or desktop state.
     api, runtime, store = _make_api(tmp_path)
     service = _make_agent_runtime_service(tmp_path)
     runtime.agent_runtime_service = service
@@ -11943,7 +11949,7 @@ def test_send_message_executes_app_prefix_safe_tab_key_without_model(tmp_path, m
 
     def fake_safe_key(action: str, *, repeat_count: int = 1) -> dict:
         calls.append(("key", action, repeat_count))
-        return _native_postcondition_result({
+        return {
             "ok": True,
             "action": "desktop.safe_key",
             "summary": "Pressed Tab",
@@ -11952,7 +11958,7 @@ def test_send_message_executes_app_prefix_safe_tab_key_without_model(tmp_path, m
                 "key_label": "Tab",
                 "repeat_count": repeat_count,
             },
-        })
+        }
 
     def fake_active_window() -> dict:
         return _native_postcondition_result({
@@ -11988,12 +11994,15 @@ def test_send_message_executes_app_prefix_safe_tab_key_without_model(tmp_path, m
         assistant = runtime.chat_session.get_assistant_message_for_task(result["task_id"])
 
         assert result["ok"] is True
-        assert result["status"] == "completed"
+        assert result["status"] == "failed"
         assert calls == [("focus", "Google Chrome"), ("key", "tab", 1)]
-        assert result["agent_task"]["status"] == "completed"
+        assert result["agent_task"]["status"] == "failed"
         assert result["agent_task"]["needs_user_action"] is False
         assert result["agent_task"]["pending_approvals"] == []
-        assert result["agent_task"]["summary"] == "已切到 Google Chrome 并按Tab。"
+        expected_summary = result["agent_task"]["summary"]
+        assert "未能确认" in expected_summary or "无法确认" in expected_summary
+        assert result["agent_task"]["tool_calls"][-1]["output_preview"]["ok"] is True
+        assert result["agent_task"]["tool_calls"][-1]["output_preview"]["data"]["key_action"] == "tab"
         assert result["agent_task"]["tool_calls"][-1]["tool_name"] == "app.focus_and_safe_key"
         assert result["agent_task"]["tool_calls"][-1]["input_preview"] == {
             "app_name": "Google Chrome",
@@ -12001,13 +12010,13 @@ def test_send_message_executes_app_prefix_safe_tab_key_without_model(tmp_path, m
             "repeat_count": 1,
         }
         assert task is not None
-        assert task.status == TaskStatus.COMPLETED
-        assert task.result == "已切到 Google Chrome 并按Tab。"
+        assert task.status == TaskStatus.FAILED
+        assert task.error == expected_summary
         assert assistant is not None
-        assert assistant.status == MessageStatus.COMPLETED
-        assert assistant.content == "已切到 Google Chrome 并按Tab。"
-        assert run["status"] == "completed"
-        assert "agent.desktop.intent_completed" in event_types
+        assert assistant.status == MessageStatus.FAILED
+        assert assistant.content == expected_summary
+        assert run["status"] == "failed"
+        assert "agent.desktop.intent_completed" not in event_types
         assert "model.request.started" not in event_types
         assert "model.requested" not in event_types
     finally:

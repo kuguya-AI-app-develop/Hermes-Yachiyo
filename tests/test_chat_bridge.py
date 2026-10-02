@@ -1902,14 +1902,20 @@ def test_chat_bridge_quick_message_opens_notes_creates_note_and_types_without_mo
 ):
     calls: list[tuple[str, str, str, str]] = []
 
+    real_notes_create = desktop_tools.notes_create
+
+    def fake_run_osascript(script: str, args: list[str] | None = None) -> dict:
+        assert "make new note" in script
+        assert args == ["hello", "hello", ""]
+        return {"ok": True, "stdout": f"x-coredata://test/Note/{len(calls)}"}
+
     def fake_notes_create(body: str, *, title: str = "", folder_name: str = "") -> dict:
         calls.append(("note", body, title, folder_name))
-        return {
-            "ok": True,
-            "action": "notes.create",
-            "summary": "Created note: hello",
-            "data": {"title": "hello", "body_length": len(body), "folder_name": folder_name},
-        }
+        # Let the actual native adapter project its returned Notes object id.
+        return real_notes_create(body, title=title, folder_name=folder_name)
+
+    monkeypatch.setattr(desktop_tools, "_desktop_platform", lambda: "macos")
+    monkeypatch.setattr(desktop_tools, "_run_osascript", fake_run_osascript)
 
     monkeypatch.setattr("apps.shell.agent.tools.desktop.notes_create", fake_notes_create)
     result, agent_task, run, event_types = _run_launcher_daily_desktop_quick_message(
@@ -4114,7 +4120,7 @@ def test_chat_bridge_quick_message_executes_natural_music_request_for_launcher_e
     assert result["_task_timeline"]["tool_calls"][-1]["status"] == "completed"
     assert result["_task_timeline"]["tool_calls"][-1]["output_preview"]["data"]["track"] == "超时空辉夜姬"
     timeline_event_types = [
-        event["event_type"] for event in result["_task_timeline"]["events"]
+        event["event_type"] for event in result["_events"]
     ]
     assert timeline_event_types.index("agent.desktop.intent_planned") < timeline_event_types.index(
         "agent.tool.call"
@@ -12265,6 +12271,7 @@ def test_chat_bridge_quick_message_routes_system_hotkeys_to_approval_and_complet
                 and event["payload"].get("tool") == "desktop.hotkey"
                 and isinstance(event["payload"].get("result"), dict)
                 and event["payload"]["result"].get("ok") is True
+                and event["payload"].get("approval_resume_result_canonical") is not True
             ]
 
             assert hotkey_calls[-1] == expected_call
@@ -12925,9 +12932,9 @@ def test_chat_bridge_quick_message_requires_approval_for_foreground_input_tools(
         assert app_scoped_result["ok"] is True
         assert app_scoped_task["status"] == "waiting_approval"
         assert app_scoped_task["needs_user_action"] is True
-        assert app_scoped_task["tool_calls"][-2]["tool_name"] == "app.focus"
-        assert app_scoped_task["tool_calls"][-2]["input_preview"] == {"app_name": "WeChat"}
-        assert app_scoped_task["tool_calls"][-2]["status"] == "completed"
+        focus_call = _agent_task_tool_call(app_scoped_task, "app.focus")
+        assert focus_call["input_preview"] == {"app_name": "WeChat"}
+        assert focus_call["status"] == "completed"
         assert app_scoped_task["tool_calls"][-1]["tool_name"] == "desktop.close_window"
         assert app_scoped_task["tool_calls"][-1]["status"] == "waiting_approval"
         assert app_scoped_task["pending_approvals"][0]["tool_name"] == "desktop.close_window"
