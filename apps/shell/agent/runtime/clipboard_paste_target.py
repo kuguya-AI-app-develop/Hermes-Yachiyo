@@ -79,6 +79,8 @@ def prepare_clipboard_paste_targets(
         return
     if len({_step(r) for r in requests}) != len(requests):
         return
+    if [_step(r) for r in requests] != [_step(r) for r in canonical]:
+        return
     if any(
         _step(r) not in all_expected
         or any(
@@ -196,7 +198,20 @@ def observed_clipboard_paste_target(
 
         if not conversation_recipient_matches(data, recipient):
             return {}
-    expected_app = te._approval_dependency_request_app_name(request)
+    expected_app = str((expected.get("input") or {}).get("app_name") or "").strip()
+    projected_app = te._approval_dependency_request_app_name(request)
+    if (
+        expected_app
+        and projected_app
+        and not te._app_lookups_same_identity(expected_app, projected_app)
+    ):
+        return {}
+    observed_app, _elements = te._trusted_ui_observation_elements(data)
+    if not observed_app or (
+        expected_app and not te._app_lookups_same_identity(expected_app, observed_app)
+    ):
+        return {}
+    expected_app = expected_app or projected_app
     window = te._trusted_ui_window_identity(observed, expected_app_name=expected_app)
     if not window:
         return {}

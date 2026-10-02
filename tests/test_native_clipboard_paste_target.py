@@ -412,3 +412,25 @@ def test_compiled_submit_covers_send_and_keeps_unplanned_extra_actions_blocked()
         selection = planner_first_direct_tool_selection(goal, DAILY_DESKTOP_TOOL_NAMES)
         assert not planner_selection_needs_model_assistance(selection, goal)
         assert planner_selection_needs_model_assistance(selection, goal + "，然后删除所有文件")
+
+
+@pytest.mark.parametrize(
+    "mutation", ["foreign_app", "empty_app", "tampered_target", "reordered_steps"]
+)
+def test_named_paste_target_comes_from_immutable_goal_and_exact_order(mutation):
+    requests, paste, verifier, events, source = _case("打开微信粘贴后发送")
+    if mutation == "foreign_app":
+        events[0]["result"]["data"]["app_name"] = "Slack"
+    elif mutation == "empty_app":
+        events[0]["result"]["data"]["app_name"] = ""
+    elif mutation == "tampered_target":
+        paste["action_target"] = {"app_name": "Slack"}
+    elif mutation == "reordered_steps":
+        requests[0], requests[1] = requests[1], requests[0]
+        pt.prepare_clipboard_paste_targets(
+            requests, user_goal="打开微信粘贴后发送", allowed_tools=DAILY_DESKTOP_TOOL_NAMES
+        )
+    assert (
+        pt.observed_clipboard_paste_target(paste, events[-1]["result"], events, run_id="run-paste")
+        == {}
+    )
