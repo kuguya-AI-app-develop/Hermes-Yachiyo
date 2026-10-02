@@ -31,6 +31,7 @@ from apps.shell.agent.runtime.dispatch_semantics import (
     has_intrinsic_native_postcondition_contract,
     intrinsic_native_postcondition_state,
     intrinsic_native_postcondition_target_matches,
+    is_semantic_safe_key,
     is_semantic_safe_shortcut,
 )
 from apps.shell.agent.runtime.errors import (
@@ -11326,6 +11327,19 @@ def _tool_result_with_trusted_exact_dispatch(
         )
     ):
         return result
+    if is_semantic_safe_key(tool_name):
+        # Delivery is auditable, but does not prove changed focus/selection/UI.
+        # Never mint a postcondition receipt from the key mutation itself.
+        return {
+            **result,
+            "native_dispatch_verified": True,
+            "verified_observed_state": "dispatched",
+            "data": {
+                **data,
+                "native_dispatch_verified": True,
+                "verified_observed_state": "dispatched",
+            },
+        }
     return {
         **result,
         "postcondition_verified": True,

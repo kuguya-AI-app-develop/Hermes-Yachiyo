@@ -16,6 +16,7 @@ from apps.shell.agent.runtime.dispatch_semantics import (
     exact_native_dispatch_receipt_matches,
     intrinsic_native_postcondition_state,
     intrinsic_native_postcondition_target_matches,
+    is_semantic_safe_key,
 )
 from apps.shell.agent.runtime.events import (
     RUNTIME_EXECUTION_PROVENANCE_KEY,
@@ -2035,6 +2036,10 @@ def _exact_dispatch_only_source_receipt(
         else {}
     )
     tool_name = str(source_attempt.get("tool") or "").strip()
+    # An exact key receipt proves delivery, not a changed selection/focus/UI.
+    # Keep the dispatch audit but require a separate observation for completion.
+    if is_semantic_safe_key(tool_name):
+        return False
     event_tool = str(
         source_event.get("tool") or source_event.get("detail") or ""
     ).strip()
@@ -2764,6 +2769,12 @@ def _canonical_observed_payload(
             observed["track_change_verified"] = True
     else:
         state = _canonical_observed_state(observed)
+    source_tool = str(event.get("tool") or event.get("detail") or "").strip()
+    if is_semantic_safe_key(source_tool):
+        # Even legacy rows with effectful=False cannot reinterpret a key's
+        # own acknowledgement (or self-reported flags) as an observed UI goal.
+        verification_passed = False
+        state = "dispatched"
     if (
         not state
         and len(matching) == 1
