@@ -4742,10 +4742,14 @@ class RuntimePlanner:
         if intent.kind == "data_analysis":
             return self._data_analysis_steps(intent, allowed)
         if intent.kind == "desktop_operation":
-            return self._desktop_operation_steps(
+            return _explicit_clipboard_paste_readback_steps(
                 intent,
+                self._desktop_operation_steps(
+                    intent,
+                    allowed,
+                    prefer_background_desktop=prefer_background_desktop,
+                ),
                 allowed,
-                prefer_background_desktop=prefer_background_desktop,
             )
         if intent.kind == "media_playback":
             return self._media_playback_steps(intent, allowed)
@@ -4764,7 +4768,9 @@ class RuntimePlanner:
         if intent.kind == "schedule":
             return self._schedule_steps(intent, allowed)
         if intent.kind == "communication":
-            return self._communication_steps(intent, allowed)
+            return _explicit_clipboard_paste_readback_steps(
+                intent, self._communication_steps(intent, allowed), allowed,
+            )
         if intent.kind == "information_capture":
             return self._information_capture_steps(intent, allowed)
         if intent.kind == "clipboard_operation":
@@ -12697,6 +12703,100 @@ def _direct_communication_steps(
             )
         )
     return steps
+
+
+def _explicit_clipboard_paste_readback_steps(
+    intent: TaskIntentSnapshot,
+    steps: list[ToolPlanStepSnapshot],
+    allowed: set[str] | None,
+) -> list[ToolPlanStepSnapshot]:
+    """Read explicit clipboard bytes and bind the focused editable paste target."""
+    hint = intent.inputs.get("direct_message_hint")
+    body_source = str(hint.get("body_source") or "") if isinstance(hint, Mapping) else ""
+    if body_source in {"selection", "current_page_link", "app_search_result"}:
+        return steps
+    if body_source != "clipboard" and not re.search(r"粘贴|\bpaste\b", intent.user_goal, re.I):
+        return steps
+    if body_source != "clipboard" and re.search(r"选中|当前网页|网页链接", intent.user_goal):
+        return steps
+    read_tool = _first_allowed(("clipboard.read",), allowed)
+    ui_tool = _first_allowed(("desktop.ui_elements",), allowed)
+    paste_steps = [
+        step for step in steps
+        if step.tool_name in {"desktop.safe_shortcut", "app.open_and_safe_shortcut", "app.focus_and_safe_shortcut"}
+        and step.input_preview.get("action") == "paste"
+    ]
+    if not read_tool or not ui_tool or len(paste_steps) != 1:
+        return steps
+    paste = paste_steps[0]
+    prefix = paste.step_id
+    source_id = f"read-clipboard-before-{prefix}"
+    target_id = f"inspect-clipboard-paste-target-{prefix}"
+    verifier_id = f"verify-clipboard-paste-{prefix}"
+    app_name = str(paste.input_preview.get("app_name") or "").strip()
+    if not app_name:
+        prior_apps = [
+            str(step.input_preview.get("app_name") or "").strip()
+            for step in steps[:steps.index(paste)]
+            if str(step.input_preview.get("app_name") or "").strip()
+        ]
+        app_name = prior_apps[-1] if prior_apps else ""
+    ui_input = {"role_filter": "", "limit": 80}
+    if app_name:
+        ui_input["app_name"] = app_name
+    transformed = []
+    for step in steps:
+        if step is paste:
+            source_dependencies = list(paste.depends_on)
+            if str(paste.tool_name or "").startswith("app."):
+                mode = "open" if str(paste.tool_name).startswith("app.open") else "focus"
+                app_tool = _first_allowed((f"app.{mode}",), allowed)
+                focus_tool = _first_allowed(("app.focus",), allowed)
+                plain_paste = _first_allowed(("desktop.safe_shortcut",), allowed)
+                if not app_tool or not focus_tool or not plain_paste:
+                    return steps
+                prepare_id = f"prepare-clipboard-paste-app-{prefix}"
+                transformed.append(_step(
+                    intent, prepare_id, "Prepare requested paste app", "desktop.app_control", app_tool,
+                    input_preview={"app_name": app_name}, depends_on=source_dependencies,
+                    action="open_app" if mode == "open" else "focus_app",
+                    reason="Prepare the requested app before binding its actual focused paste target.",
+                ))
+                source_dependencies = [prepare_id]
+                if mode == "open":
+                    focus_id = f"focus-clipboard-paste-app-{prefix}"
+                    transformed.append(_step(
+                        intent, focus_id, "Focus requested paste app", "desktop.app_control", focus_tool,
+                        input_preview={"app_name": app_name}, depends_on=source_dependencies,
+                        action="focus_app",
+                        reason="Focus the explicitly opened app before inspecting the paste target.",
+                    ))
+                    source_dependencies = [focus_id]
+                paste = paste.model_copy(update={"tool_name": plain_paste, "input_preview": {"action": "paste"}})
+            transformed.extend([
+                _step(intent, source_id, "Read requested clipboard paste source", "clipboard.read_write", read_tool,
+                      input_preview={"max_chars": 12000}, depends_on=source_dependencies, action="read",
+                      reason="Read exact clipboard bytes only for the user's explicit paste request."),
+                _step(intent, target_id, "Inspect focused editable paste target", "desktop.app_discovery", ui_tool,
+                      input_preview=dict(ui_input), depends_on=[source_id], action="read_ui",
+                      reason="Bind one actual focused editable control and window before pasting."),
+            ])
+            step = paste.model_copy(update={"depends_on": [source_id, target_id]})
+            transformed.append(step)
+            transformed.append(_step(
+                intent, verifier_id, "Verify exact clipboard bytes in the paste target", "desktop.visual_verification", ui_tool,
+                input_preview=dict(ui_input), depends_on=[paste.step_id], action="verify",
+                reason="Require the private clipboard source to appear exactly in the same focused editable control before continuing.",
+            ))
+            continue
+        # A send retains the exact source dependency used by private approval
+        # revalidation, and additionally depends on its independent readback.
+        if step.step_id == "verify-desktop-result" and step.depends_on == [paste.step_id]:
+            continue
+        if paste.step_id in step.depends_on:
+            step = step.model_copy(update={"depends_on": [*step.depends_on, verifier_id]})
+        transformed.append(step)
+    return transformed
 
 
 def _communication_safe_shortcut_operation_tool(allowed: set[str] | None) -> str | None:

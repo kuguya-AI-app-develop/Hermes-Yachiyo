@@ -59,3 +59,17 @@ def conversation_recipient_matches(data: Mapping[str, Any], recipient: str) -> b
             return False
         matched += 1
     return matched == 1 or (matched == 0 and title_matches)
+
+def is_message_composer(element: Mapping[str, Any]) -> bool:
+    """A send draft must occupy an actual message/body slot, never search."""
+    identity = " ".join(
+        value for key in ("name", "label", "title", "identifier", "description")
+        if isinstance(value := element.get(key), str)
+    )
+    if re.search(r"search|find|query|recipient|搜索|查找|收件人|接收人", identity, re.I):
+        return False
+    return bool(re.search(
+        r"\b(?:message|composer|compose|body)\b|message[_-]?(?:input|editor|box)|"
+        r"消息(?:输入|编辑)?(?:框|区域)?|聊天输入框|正文(?:输入框)?",
+        identity, re.I,
+    ))
