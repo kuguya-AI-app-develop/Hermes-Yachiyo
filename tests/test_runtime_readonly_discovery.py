@@ -4,7 +4,6 @@ import pytest
 
 from apps.shell.yachiyo_agent import RuntimePlanner
 
-
 ALL_DESKTOP_TOOLS = [
     "desktop.permissions",
     "desktop.permissions.verify",

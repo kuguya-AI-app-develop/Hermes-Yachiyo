@@ -3360,6 +3360,7 @@ _SPEECH_ACT_DIAGNOSTIC_PREFIX_RE = re.compile(
 )
 _SPEECH_ACT_REPORTED_PREFIX_RE = re.compile(
     r"(?:他说|她说|有人说|文档(?:说|写|写着)|命令是|例如|比如|示例|"
+    r"(?:解释|说明|翻译)(?:这(?:句话|个示例|段话)|以下(?:内容|示例|命令))\s*[:：]|"
     r"(?:消息|内容|正文)(?:(?:是|为)\s*|[:：]\s*)|"
     r"(?:发|发送)(?:消息|邮件).{0,48}(?:说|称|[:：])|翻译)|"
     r"\b(?:he|she|they|the\s+document)\s+(?:said|says)\b|"

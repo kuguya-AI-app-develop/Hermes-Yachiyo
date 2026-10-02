@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Iterable, Mapping
 from typing import Any
@@ -548,6 +549,22 @@ def type_into_ui_hint(text: str, *, app_name: str = "") -> dict[str, Any] | None
     original_text = str(text or "")
     text = _affirmative_action_text(original_text, _TYPE_ACTION_PATTERN)
     removed_negated_clause = clean(text) != clean(original_text)
+    # Recovery controls serialize the exact selected label and payload. Decode
+    # those strings as operands, so punctuation and action words stay data.
+    json_string = r'"(?:[^"\\]|\\.)*"'
+    selected_field = re.search(
+        rf"(?:在|向)前台控件\s*(?P<target>{json_string})\s*"
+        rf"输入\s*(?P<text>{json_string})",
+        text,
+    )
+    if selected_field:
+        try:
+            target = json.loads(selected_field.group("target"))
+            typed_text = json.loads(selected_field.group("text"))
+        except json.JSONDecodeError:
+            return None
+        if target and typed_text:
+            return {"target": target, "text": typed_text, "role_filter": "text"}
     field_cn = (
         r"搜索框|搜索栏|消息框|聊天框|地址栏|输入框|文本框|输入栏|"
         r"收件人|发件人|联系人|主题|标题|姓名|名称|邮箱|邮件地址|电话|"
@@ -2038,6 +2055,8 @@ def media_action_hint(text: str) -> str:
     lowered = str(text or "").lower()
     if media_non_action_reference_hint(text):
         return ""
+    if re.fullmatch(r"(?:apple\s+music|music)\s+播放暂停", lowered.strip()):
+        return "toggle"
     if contains_any(
         lowered,
         [
