@@ -1,4 +1,4 @@
-"""Approval receipts keep literal content byte-for-byte, including its hash."""
+"""Approval receipts keep exact content facts without persisting literal text."""
 
 import hashlib
 
@@ -44,6 +44,8 @@ def test_persisted_prepared_submit_receipt_preserves_literal_content(content):
         }
     )
     receipt = te.persisted_prepared_submit_receipt_from_private_context(context)
-    assert receipt["content"] == content
-    assert receipt["content_sha256"] == hashlib.sha256(receipt["content"].encode()).hexdigest()
+    assert "content" not in receipt
+    assert receipt["version"] == 2
+    assert receipt["content_length"] == len(content)
+    assert receipt["content_sha256"] == hashlib.sha256(content.encode()).hexdigest()
     assert receipt["run_id"] == "identity"

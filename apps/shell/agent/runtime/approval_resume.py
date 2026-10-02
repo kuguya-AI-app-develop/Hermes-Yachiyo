@@ -352,12 +352,28 @@ class ApprovalResumeCoordinator:
                 # fingerprint and the winning approval claim before any
                 # process-private authority is minted.
                 request._assert_active()
+
+                def observe_private_target() -> Any:
+                    from .prepared_submit_resume_observation import (
+                        observe_actual_prepared_submit_target,
+                    )
+
+                    return observe_actual_prepared_submit_target(
+                        context.broker,
+                        request=context.tool_request,
+                        run_id=context.run_id,
+                        allowed_tools=context.allowed_tools,
+                        budget=context.budget,
+                        assert_active=request._assert_active,
+                    )
+
                 prepared_submit_context = (
                     rehydrate_private_prepared_submit_context(
                         context.tool_request,
                         context.timeline,
                         run_id=context.run_id,
                         goal_contract=context.goal_contract,
+                        observe_private_target=observe_private_target,
                     )
                 )
                 if not prepared_submit_context:

@@ -302,7 +302,7 @@ RUNTIME_PRIVATE_EXACT_SUBMIT_RECEIPT_REQUEST_KEY = (
 _RUNTIME_PRIVATE_EXACT_FILE_READBACK_REQUEST_KEY = (
     "_runtime_private_exact_file_readback"
 )
-_RUNTIME_PERSISTED_PREPARED_SUBMIT_RECEIPT_VERSION = 1
+_RUNTIME_PERSISTED_PREPARED_SUBMIT_RECEIPT_VERSION = 2
 _EXACT_SUBMIT_DISPATCH_PREDICATE = EXACT_SUBMIT_DISPATCH_PREDICATE
 _EXACT_SUBMIT_DISPATCH_ACTIONS = frozenset({"send", "confirm"})
 _EXACT_FILE_READBACK_SOURCE_TOOLS = frozenset({"terminal.run", "python.run"})
@@ -7318,6 +7318,13 @@ def persisted_prepared_submit_receipt_from_private_context(
 
     if context.get("_authority") is not _RUNTIME_PRIVATE_PREPARED_SUBMIT_AUTHORITY:
         return {}
+    content = context.get("content")
+    if (
+        not isinstance(content, str) or not content
+        or hashlib.sha256(content.encode("utf-8")).hexdigest()
+        != context.get("content_sha256")
+    ):
+        return {}
     scalar_keys = (
         "run_id",
         "decision_id",
@@ -7334,7 +7341,6 @@ def persisted_prepared_submit_receipt_from_private_context(
         "provider_id",
         "target_app_name",
         "target_recipient",
-        "content",
         "content_sha256",
         "submit_step_id",
         "submit_request_id",
@@ -7344,13 +7350,13 @@ def persisted_prepared_submit_receipt_from_private_context(
         "version": _RUNTIME_PERSISTED_PREPARED_SUBMIT_RECEIPT_VERSION,
         "receipt_kind": "runtime_prepared_submit_receipt",
         **{
-            key: (str(context.get(key) or "") if key == "content"
-                  else str(context.get(key) or "").strip())
+            key: str(context.get(key) or "").strip()
             for key in scalar_keys
         },
         "target_window": dict(context.get("target_window") or {}),
         "target_ui_identity": dict(context.get("target_ui_identity") or {}),
         "composer_required": context.get("composer_required") is True,
+        "content_length": len(content),
     }
     required = (
         "run_id",
@@ -7364,7 +7370,6 @@ def persisted_prepared_submit_receipt_from_private_context(
         "provider_kind",
         "provider_id",
         "target_app_name",
-        "content",
         "content_sha256",
         "submit_step_id",
         "submit_request_id",
@@ -7379,13 +7384,14 @@ def rehydrate_private_prepared_submit_context(
     *,
     run_id: str,
     goal_contract: Any = None,
+    observe_private_target: Any = None,
 ) -> dict[str, Any]:
     """Re-mint opaque submit authority from an exact canonical receipt."""
 
     persisted = tool_request.get(RUNTIME_PERSISTED_PREPARED_SUBMIT_RECEIPT_KEY)
     if not isinstance(persisted, Mapping) or (
-        persisted.get("version")
-        != _RUNTIME_PERSISTED_PREPARED_SUBMIT_RECEIPT_VERSION
+        type(persisted.get("version")) is not int
+        or persisted.get("version") not in {1, _RUNTIME_PERSISTED_PREPARED_SUBMIT_RECEIPT_VERSION}
         or str(persisted.get("receipt_kind") or "").strip()
         != "runtime_prepared_submit_receipt"
         or str(tool_request.get("tool") or "").strip()
@@ -7413,13 +7419,21 @@ def rehydrate_private_prepared_submit_context(
     if source_step_id not in set(_string_list(tool_request.get("depends_on"))):
         return {}
     content = persisted.get("content")
+    version = persisted["version"]
+    content_length = persisted.get("content_length")
     content_sha256 = str(persisted.get("content_sha256") or "").strip()
     target_window = persisted.get("target_window")
     target_ui_identity = persisted.get("target_ui_identity")
     if (
-        not isinstance(content, str)
-        or not content
-        or hashlib.sha256(content.encode("utf-8")).hexdigest() != content_sha256
+        (version == 1 and (
+            not isinstance(content, str) or not content
+            or hashlib.sha256(content.encode("utf-8")).hexdigest() != content_sha256
+        ))
+        or (version == 2 and (
+            "content" in persisted or type(content_length) is not int or content_length <= 0
+        ))
+        or len(content_sha256) != 64
+        or any(char not in "0123456789abcdef" for char in content_sha256)
         or not isinstance(target_window, Mapping)
         or not isinstance(target_ui_identity, Mapping)
         or not str(target_window.get("app_name") or "").strip()
@@ -7489,8 +7503,14 @@ def rehydrate_private_prepared_submit_context(
             and result.get("verification_satisfied_by_native_receipt") is True
             and str(result.get("content_sha256") or "").strip()
             == content_sha256
-            and dict(result.get("target_window") or {}) == dict(target_window)
-            and dict(result.get("target_ui_identity") or {})
+            and (version == 1 or (
+                type(result.get("content_length")) is int
+                and result["content_length"] == content_length
+            ))
+            and isinstance(result.get("target_window"), Mapping)
+            and dict(result["target_window"]) == dict(target_window)
+            and isinstance(result.get("target_ui_identity"), Mapping)
+            and dict(result["target_ui_identity"])
             == dict(target_ui_identity)
             and str(result.get("target_recipient") or "")
             == str(persisted.get("target_recipient") or "")
@@ -7512,6 +7532,36 @@ def rehydrate_private_prepared_submit_context(
         for item in criteria
     ):
         return {}
+    if version == 2:
+        if not callable(observe_private_target):
+            return {}
+        from .prepared_submit_resume_observation import consume_actual_prepared_submit_observation
+        snapshot = consume_actual_prepared_submit_observation(
+            observe_private_target(), request=tool_request, run_id=clean_run_id,
+        )
+        data = snapshot.get("data") if isinstance(snapshot, Mapping) else None
+        if not isinstance(data, Mapping):
+            return {}
+        observed_window = _trusted_ui_window_identity(
+            snapshot, expected_app_name=str(persisted.get("target_app_name") or ""),
+        )
+        focused = focused_editable_target(data)
+        if (
+            not _same_trusted_ui_window_identity(observed_window, target_window)
+            or focused is None or focused.get("enabled") is False
+            or _trusted_editable_ui_target_identity(focused) != dict(target_ui_identity)
+            or not conversation_recipient_matches(
+                data, str(persisted.get("target_recipient") or ""),
+            )
+            or (persisted.get("composer_required") is True and not is_message_composer(focused))
+        ):
+            return {}
+        content = focused.get("value")
+        if (
+            not isinstance(content, str) or len(content) != content_length
+            or hashlib.sha256(content.encode("utf-8")).hexdigest() != content_sha256
+        ):
+            return {}
     return {
         "_authority": _RUNTIME_PRIVATE_PREPARED_SUBMIT_AUTHORITY,
         **{
@@ -7519,6 +7569,7 @@ def rehydrate_private_prepared_submit_context(
             for key, value in dict(persisted).items()
             if key not in {"version", "receipt_kind"}
         },
+        "content": content,
     }
 
 
@@ -7667,7 +7718,12 @@ def _private_prepared_submit_snapshot_revalidation(
             f":{clean_phase}:atomic"
         ),
     }
-    if snapshot.get("ok") is not True:
+    snapshot_data = snapshot.get("data")
+    if (
+        snapshot.get("ok") is not True or snapshot.get("approval_required")
+        or snapshot.get("permission_error") or snapshot.get("verification_failed")
+        or (isinstance(snapshot_data, Mapping) and snapshot_data.get("truncated") is True)
+    ):
         return (
             {**base, "observation_status": "unobservable"}
             if clean_phase == "post"
@@ -8545,6 +8601,7 @@ class RuntimeToolRequestRunner:
                     "status": "satisfied",
                     **trace_payload,
                     "source": "runtime_native_postcondition_receipt",
+                    "visibility": "internal",
                     "reason": "native_postcondition_receipt",
                     "result": satisfied_result,
                 }
@@ -8560,6 +8617,9 @@ class RuntimeToolRequestRunner:
                         run_id,
                         "agent.post_action_verification.satisfied",
                         payload,
+                        **({"visibility": "internal"} if supports_keyword(
+                            self._append_run_event, "visibility",
+                        ) else {}),
                     )
                 projected_call = {
                     "tool": verification_tool,
@@ -8582,6 +8642,9 @@ class RuntimeToolRequestRunner:
                         run_id,
                         "agent.tool.call",
                         projected_call,
+                        **({"visibility": "internal"} if supports_keyword(
+                            self._append_run_event, "visibility",
+                        ) else {}),
                     )
                 self._append_tool_result_progress(
                     tool_request,
@@ -9636,6 +9699,7 @@ class RuntimeToolRequestRunner:
             # as a separate auditable event.
             event["result"] = dict(projected_result)
             event["source"] = "runtime_native_postcondition_receipt"
+            event["visibility"] = "internal"
             event["reason"] = "trusted_postcondition_observation"
             event.update(source_fields)
             break
@@ -9645,6 +9709,7 @@ class RuntimeToolRequestRunner:
             **trace_payload,
             "source": "runtime_native_postcondition_receipt",
             "reason": "trusted_postcondition_observation",
+            "visibility": "internal",
             "result": dict(projected_result),
         }
         timeline.append(
@@ -9695,11 +9760,17 @@ class RuntimeToolRequestRunner:
                 run_id,
                 "agent.post_action_verification.satisfied",
                 payload,
+                **({"visibility": "internal"} if supports_keyword(
+                    self._append_run_event, "visibility",
+                ) else {}),
             )
             self._append_run_event(
                 run_id,
                 "agent.tool.call",
                 projected_call,
+                **({"visibility": "internal"} if supports_keyword(
+                    self._append_run_event, "visibility",
+                ) else {}),
             )
 
     def _append_tool_result_progress(
