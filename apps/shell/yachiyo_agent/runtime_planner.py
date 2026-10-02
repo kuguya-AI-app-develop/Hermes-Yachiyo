@@ -18941,6 +18941,11 @@ def _goal_contract_snapshot(
                 for step in terminal_effect_steps
                 if str(step.capability_id or "").strip()
             ),
+            *(
+                str(step.capability_id or "").strip()
+                for step in steps
+                if step.tool_name == "app.status" and step.action == "status_app"
+            ),
         ]
     )
     criteria: list[GoalCriterionSnapshot] = []
@@ -19515,6 +19520,8 @@ def _goal_step_is_effectful(step: ToolPlanStepSnapshot) -> bool:
     if stage not in {"operate", "produce"}:
         return False
     action = str(step.action or "").strip()
+    if step.tool_name == "app.status" and action == "status_app":
+        return False
     return action not in {
         "",
         "analyze",
