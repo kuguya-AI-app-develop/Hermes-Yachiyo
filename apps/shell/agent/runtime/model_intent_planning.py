@@ -400,6 +400,16 @@ def _compound_action_clauses_underplanned(
     ]
     if not connected_pairs:
         return False
+    if (
+        any(re.fullmatch(r"(?:放|播)点", match.group(0)) for match in matches)
+        and any(
+            _semantic_action_family(match.group(0)) not in {"play", "search", "open"}
+            for match in matches
+        )
+    ):
+        # Typing/clicking inside a media search adapter cannot cover a
+        # separately requested UI action following a quantified play request.
+        return True
     requested = Counter(
         _semantic_action_family(match.group(0))
         for match in matches
@@ -506,7 +516,7 @@ def _semantic_action_family(value: Any) -> str:
             ),
         ),
         ("analyze", ("分析", "analyse", "analyze")),
-        ("play", ("播放", "play")),
+        ("play", ("播放", "放点", "播点", "play")),
         ("send", ("发送", "发给", "发", "回复", "send", "reply")),
         ("delete", ("删除", "delete")),
         ("move", ("移动", "move")),

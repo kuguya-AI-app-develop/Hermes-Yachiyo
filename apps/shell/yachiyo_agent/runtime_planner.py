@@ -546,11 +546,20 @@ class TaskIntentRouter:
             metadata.get("daily_desktop_intent")
             and named_media.get("action") == "play"
             and named_media.get("query")
-            and not _desktop_operation_hint(app_control_text)
+            and (
+                not _desktop_operation_hint(app_control_text)
+                or (
+                    _desktop_operation_hint(app_control_text) == "click"
+                    and re.fullmatch(r"(?:请|帮我)?(?:放|播)点[^，,。.!！?？；;]+", app_control_text)
+                    and _text_has_authorized_family_action(
+                        text, re.compile(r"(?:放|播)点"),
+                    )
+                )
+            )
             and not _app_name_hint(app_control_text)
         ):
-            # Daily metadata cannot add an empty desktop operation as a
-            # competing route to an already concrete media query.
+            # Daily metadata cannot invent a rival desktop action for a
+            # media query. The 点 in 放点/播点 is a quantity, not a click.
             return _empty_intent("desktop_operation", text)
         if (
             _APP_CONTROL_AUTHORITY_ACTION_RE.search(text)
@@ -3364,7 +3373,7 @@ _MODEL_INTENT_AUTHORITY_ACTION_KEYS = frozenset(
 _MODEL_INTENT_ACTION_EVIDENCE_RE = re.compile(
     r"(?:"
     r"打开|启动|运行|执行|读取|提取|查看|看看|看一下|看下|"
-    r"搜索(?!框|栏|按钮)|查找|找到|找出|播放|创建|新建|写入?|"
+    r"搜索(?!框|栏|按钮)|查找|找到|找出|播放|(?:放|播)点|创建|新建|写入?|"
     r"记录|记下|做成|做(?:一个|个)(?:小)?项目|安排|加入|产出|协作|分工|评审|复盘|组建|"
     r"开(?=会|(?:一个|个).{0,16}(?:小组|团队|群组))|保存|发送|发给|"
     r"发(?=消息|邮件|一封)|回复|"
