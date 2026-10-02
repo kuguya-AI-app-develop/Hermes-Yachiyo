@@ -14,6 +14,69 @@ _OBSERVATIONS = frozenset({
 })
 
 
+def _observed_catalog_app_name(
+    request: Mapping[str, Any],
+    actual: Mapping[str, Any],
+    *,
+    planned: list[dict[str, Any]],
+    timeline: list[Mapping[str, Any]],
+    plan_id: str,
+    tool_timeline_start: int,
+) -> str:
+    payload = request.get("input") if isinstance(request.get("input"), Mapping) else {}
+    query = str(payload.get("query") or "").strip()
+    resolved = str(actual.get("app_name") or "").strip()
+    if not (
+        payload.get("selection_source") == "desktop.list_apps"
+        and query and str(payload.get("app_name") or "").strip() == query
+        and actual.get("app_resolution_source") == "desktop.list_apps"
+        and actual.get("requested_app_name") == query
+        and actual.get("resolved_app_name") == resolved and resolved
+        and not resolved.startswith("<")
+    ):
+        return ""
+    for discovery in planned:
+        inputs = discovery.get("input")
+        if not (
+            discovery.get("tool") == "desktop.list_apps"
+            and isinstance(inputs, Mapping) and inputs.get("query") == query
+        ):
+            continue
+        for event in timeline[max(0, tool_timeline_start):]:
+            if not (
+                (event.get("event") or event.get("event_type")) == "agent.tool.call"
+                and (event.get("detail") or event.get("tool")) == "desktop.list_apps"
+                and event.get("plan_id") == plan_id
+                and event.get("request_id") == discovery.get("request_id")
+                and (event.get("step_id") or event.get("planner_step_id"))
+                == (discovery.get("step_id") or discovery.get("planner_step_id"))
+            ):
+                continue
+            result = event.get("result")
+            data = result.get("data") if isinstance(result, Mapping) else None
+            if not (
+                isinstance(result, Mapping) and result.get("ok") is True
+                and isinstance(data, Mapping) and data.get("query") == query
+            ):
+                continue
+            apps = data.get("apps")
+            candidates = [app for app in apps if isinstance(app, Mapping)] if isinstance(apps, list) else []
+            best = data.get("best_match")
+            selected = best if isinstance(best, Mapping) else candidates[0] if len(candidates) == 1 else {}
+            if len(candidates) > 1:
+                score = selected.get("match_score")
+                other_scores = [app.get("match_score") for app in candidates if app.get("name") != resolved]
+                if not (
+                    isinstance(score, (int, float)) and not isinstance(score, bool)
+                    and score > 0 and other_scores
+                    and all(isinstance(value, (int, float)) and not isinstance(value, bool) and value < score for value in other_scores)
+                ):
+                    continue
+            if selected.get("name") == resolved and any(app.get("name") == resolved for app in candidates):
+                return resolved
+    return ""
+
+
 def executed_bounded_desktop_requests(
     requests: Iterable[Mapping[str, Any]],
     timeline: list[Mapping[str, Any]],
@@ -62,6 +125,14 @@ def executed_bounded_desktop_requests(
         actual = event.get("input_preview") if isinstance(event.get("input_preview"), Mapping) else {}
         if result.get("ok") is not True or result.get("approval_required"):
             return []
+        if actual.get("app_name") != app_name:
+            resolved_name = _observed_catalog_app_name(
+                request, actual, planned=planned, timeline=timeline,
+                plan_id=plan_id, tool_timeline_start=tool_timeline_start,
+            )
+            if not resolved_name:
+                return []
+            request["input"] = payload = {**payload, "app_name": resolved_name}
         for key in ("app_name", "action", "text", "repeat_count", "direction", "pages", "x", "y"):
             if key in payload and actual.get(key) != payload[key]:
                 return []

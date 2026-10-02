@@ -65,3 +65,63 @@ def test_missing_model_remains_blocker_for_unexecuted_or_unbound_chain(change):
     elif change == "incomplete_chain": requests.insert(1, {**requests[0], "request_id": "plan-1:request:2:action", "step_id": "second-action"})
     elif change == "no_primary": requests = [requests[-1]]
     assert executed_bounded_desktop_requests(requests, timeline, tool_timeline_start=start) == []
+
+
+def _catalog_bound_dispatch():
+    requests, timeline = _dispatch(action="new_window")
+    requests[0]["input"].update({
+        "app_name": "PixelForge", "selection_source": "desktop.list_apps", "query": "PixelForge",
+    })
+    timeline[0]["input_preview"].update({
+        "app_name": "PixelForge Studio", "requested_app_name": "PixelForge",
+        "resolved_app_name": "PixelForge Studio", "app_resolution_source": "desktop.list_apps",
+    })
+    discovery = {
+        "tool": "desktop.list_apps", "input": {"query": "PixelForge"},
+        "plan_id": "plan-1", "request_id": "plan-1:request:0:discovery", "step_id": "discovery",
+    }
+    observation = {
+        "event": "agent.tool.call", "detail": "desktop.list_apps", "plan_id": "plan-1",
+        "request_id": discovery["request_id"], "step_id": "discovery",
+        "result": {"ok": True, "data": {
+            "query": "PixelForge", "apps": [{"name": "PixelForge Studio", "match_score": 96}],
+        }},
+    }
+    return [discovery, *requests], [observation, *timeline]
+
+
+def test_same_plan_catalog_resolution_preserves_truthful_partial_application_name():
+    requests, timeline = _catalog_bound_dispatch()
+    original = deepcopy(requests)
+    result = executed_bounded_desktop_requests(requests, timeline, tool_timeline_start=0)
+    assert result[1]["input"]["app_name"] == "PixelForge Studio"
+    assert result[1]["input"]["action"] == "new_window"
+    assert requests == original
+    assert "postcondition_verified" not in result[1]
+
+
+@pytest.mark.parametrize("change", [
+    "foreign_plan", "foreign_request", "foreign_step", "wrong_query", "wrong_original_query",
+    "wrong_requested_name", "wrong_resolved_name", "foreign_source", "missing_catalog",
+    "failed_catalog", "unknown_app", "ambiguous_catalog", "tied_best_match",
+])
+def test_unbound_or_ambiguous_catalog_resolution_keeps_missing_model_blocker(change):
+    requests, timeline = _catalog_bound_dispatch()
+    observation = timeline[0]
+    data = observation["result"]["data"]
+    actual = timeline[1]["input_preview"]
+    if change == "foreign_plan": observation["plan_id"] = "other-plan"
+    elif change == "foreign_request": observation["request_id"] = "plan-1:request:99:other"
+    elif change == "foreign_step": observation["step_id"] = "other-step"
+    elif change == "wrong_query": data["query"] = "Terminal"
+    elif change == "wrong_original_query": requests[1]["input"]["query"] = "Terminal"
+    elif change == "wrong_requested_name": actual["requested_app_name"] = "Terminal"
+    elif change == "wrong_resolved_name": actual["resolved_app_name"] = "Terminal"
+    elif change == "foreign_source": actual["app_resolution_source"] = "user_metadata"
+    elif change == "missing_catalog": timeline.pop(0)
+    elif change == "failed_catalog": observation["result"]["ok"] = False
+    elif change == "unknown_app": data["apps"] = [{"name": "Terminal"}]
+    elif change in {"ambiguous_catalog", "tied_best_match"}:
+        data["apps"].append({"name": "PixelForge Plus", "match_score": 96})
+        if change == "tied_best_match": data["best_match"] = data["apps"][0]
+    assert executed_bounded_desktop_requests(requests, timeline, tool_timeline_start=0) == []
