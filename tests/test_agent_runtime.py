@@ -18,6 +18,10 @@ from typing import Any
 
 import pytest
 
+from tests.runtime_contract_fixtures import (
+    semantic_fixture_goal, semantic_fixture_model_plan, semantic_fixture_execution_envelope,
+)
+
 from apps.shell.agent_runtime import (
     _MAX_AGENT_TOOL_ITERATIONS,
     AgentApprovalRequired,
@@ -70,6 +74,7 @@ from apps.shell.agent_runtime import (
 )
 from apps.shell.credential_store import MemoryCredentialStore
 from apps.shell.agent.runtime.goal_runtime import DELEGATED_WORKFLOW_RESPONSE_ONLY_GOAL
+from apps.shell.agent.runtime.goal_contract import GoalContract, GoalCriterion
 from scripts.verify_secret_redaction import verify_secret_redaction
 
 
@@ -1641,11 +1646,23 @@ def test_tool_approval_claim_projection_builds_running_payload():
 def test_approval_resume_coordinator_orchestrates_resume_projection_states():
     calls: list[str] = []
     mode = {"value": "completed"}
+    original_goal = "Run the approved commands and report their results"
+    next_pending = {
+        "tool": "terminal.run",
+        "approval_id": "next",
+        "input": {"command": "printf next"},
+        "tool_request": {"tool": "terminal.run", "input": {"command": "printf next"}},
+        "messages": [{"role": "user", "content": original_goal}],
+        "remaining_tool_requests": [],
+        "next_iteration": 3,
+    }
 
-    def continue_custom_api_agent(*_args, **_kwargs):
+    def continue_custom_api_agent(_agent, user_goal, *_args, **kwargs):
+        assert user_goal == original_goal
+        assert kwargs["original_goal"] == original_goal
         calls.append("continue_custom_api_agent")
         if mode["value"] == "required":
-            raise AgentApprovalRequired({"tool": "terminal.run", "approval_id": "next"})
+            raise AgentApprovalRequired(dict(next_pending))
         if mode["value"] == "failed":
             raise RuntimeError("provider raw failure")
         return "resumed output"
@@ -1660,23 +1677,40 @@ def test_approval_resume_coordinator_orchestrates_resume_projection_states():
         approve_tool_run=lambda run_id, **_kwargs: calls.append("approve_tool_run") or {"run_id": run_id, "status": "running"},
         continue_custom_api_agent=continue_custom_api_agent,
     )
-    context = ToolApprovalResumeContext(
-        run_id="run_resume_projection",
-        timeline=[],
-        artifacts=[],
-        broker=SimpleNamespace(name="broker"),
-        allowed_tools=["terminal.run"],
-        budget=SimpleNamespace(name="budget"),
-        messages=[],
-        tool_request={"tool": "terminal.run", "input": {"command": "printf ok"}},
-        tool_name="terminal.run",
-        input_preview={"command": "printf ok"},
-        remaining_requests=[],
-        next_iteration=2,
-    )
+    def make_context():
+        contract = GoalContract(
+            contract_id="contract-resume-projection",
+            run_id="run_resume_projection",
+            original_goal=original_goal,
+            criteria=(GoalCriterion(
+                criterion_id="approved-commands",
+                description="Execute the approved commands",
+                effectful=True,
+                response_satisfiable=False,
+            ),),
+        )
+        return ToolApprovalResumeContext.from_run(
+            {"run_id": "run_resume_projection", "user_goal": original_goal,
+             "goal_contract": contract.to_payload()},
+            {
+                "approval_id": "approval-resume-projection",
+                "tool": "terminal.run",
+                "messages": [{"role": "user", "content": original_goal}],
+                "tool_request": {"tool": "terminal.run", "input": {"command": "printf ok"}},
+                "remaining_tool_requests": [],
+                "next_iteration": 2,
+            },
+            broker=SimpleNamespace(name="broker"),
+            allowed_tools=["terminal.run"],
+            budget=SimpleNamespace(name="budget"),
+        )
+
+    context = make_context()
 
     def run_mode(value: str) -> dict[str, object]:
         mode["value"] = value
+        # Each outcome represents an independent claimed approval generation.
+        context = make_context()
         return coordinator.resume_approved_tool_run(
             run_id=context.run_id,
             pending={
@@ -1693,7 +1727,7 @@ def test_approval_resume_coordinator_orchestrates_resume_projection_states():
                 "result": result_text,
                 "projection": calls.append("project_completed") or "completed",
             },
-            prepare_required=lambda pending: {"prepared": pending["tool"]},
+            prepare_required=lambda pending: {**pending, "prepared": pending["tool"]},
             project_required=lambda _context, pending: {
                 "status": "approval_required",
                 "pending": pending,
@@ -1717,7 +1751,7 @@ def test_approval_resume_coordinator_orchestrates_resume_projection_states():
     }
     assert run_mode("required") == {
         "status": "approval_required",
-        "pending": {"prepared": "terminal.run"},
+        "pending": {**next_pending, "prepared": "terminal.run"},
         "projection": "required",
         "finalized": True,
     }
@@ -2084,6 +2118,7 @@ def test_tool_approval_resume_context_parses_pending_payload():
     budget_calls: list[dict[str, object]] = []
     run = {
         "run_id": "agent_run_resume",
+        "user_goal": "Run the approved command and write its result",
         "timeline": [
             {"event": "agent.tool.approval_required"},
             "not-an-event",
@@ -2093,6 +2128,17 @@ def test_tool_approval_resume_context_parses_pending_payload():
             "not-an-artifact",
         ],
     }
+    run["goal_contract"] = GoalContract(
+        contract_id="contract-agent-run-resume",
+        run_id=run["run_id"],
+        original_goal=run["user_goal"],
+        criteria=(GoalCriterion(
+            criterion_id="approved-command-and-artifact",
+            description="Execute the command and write its result",
+            effectful=True,
+            response_satisfiable=False,
+        ),),
+    ).to_payload()
     messages = [{"role": "user", "content": "run approved tool"}]
     tool_request = {
         "tool": "terminal.run",
@@ -2123,6 +2169,11 @@ def test_tool_approval_resume_context_parses_pending_payload():
     )
 
     assert context.run_id == "agent_run_resume"
+    assert context.goal_contract.original_goal == run["user_goal"]
+    assert context.goal_contract.run_id == run["run_id"]
+    assert context.goal_contract.criteria[0].effectful is True
+    assert context.goal_contract.criteria[0].response_satisfiable is False
+    assert len(context.approval_request_fingerprint) == 64
     assert context.timeline == [{"event": "agent.tool.approval_required"}]
     assert context.artifacts == [{"path": "report.md"}]
     assert context.broker is broker
@@ -2158,6 +2209,8 @@ def test_tool_approval_resume_context_parses_pending_payload():
     assert run["artifacts"][0] == {"path": "report.md"}
     assert pending["messages"] is messages
     assert pending["tool_request"] is tool_request
+    pending["messages"][0]["content"] = "Replace the original objective"
+    assert context.goal_contract.original_goal == run["user_goal"]
 
     fallback_iteration = ToolApprovalResumeContext.from_run(
         run,
@@ -2193,6 +2246,24 @@ def test_tool_approval_resume_context_parses_pending_payload():
             budget=budget,
         )
 
+
+    for missing_goal in (None, "", " "):
+        with pytest.raises(AgentRuntimeError, match="approval_resume_goal_contract_missing"):
+            ToolApprovalResumeContext.from_run(
+                {**run, "user_goal": missing_goal},
+                pending,
+                broker=broker,
+                allowed_tools=allowed_tools,
+                budget=budget,
+            )
+    with pytest.raises(AgentRuntimeError, match="approval_resume_goal_contract_invalid"):
+        ToolApprovalResumeContext.from_run(
+            {**run, "user_goal": "Replace the original objective"},
+            pending,
+            broker=broker,
+            allowed_tools=allowed_tools,
+            budget=budget,
+        )
 
 def test_approval_resume_coordinator_stops_on_fatal_tool_failure():
     calls: list[str] = []
@@ -3785,6 +3856,7 @@ def test_workflow_artifact_node_write_builds_record_and_replay_payload(tmp_path)
         "ok": True,
         "path": "reports/final.md",
         "bytes": len(content.encode("utf-8")),
+        "postcondition_verified": True,
     }
     assert write.event_payload() == {
         "workflow_node_id": "report",
@@ -3795,6 +3867,7 @@ def test_workflow_artifact_node_write_builds_record_and_replay_payload(tmp_path)
             "ok": True,
             "path": "reports/final.md",
             "bytes": len(content.encode("utf-8")),
+        "postcondition_verified": True,
         },
     }
     assert write.timeline_event(
@@ -4469,6 +4542,7 @@ def test_workflow_continuation_coordinator_writes_artifact_node(tmp_path):
             "ok": True,
             "path": "reports/final.md",
             "bytes": artifact_bytes,
+            "postcondition_verified": True,
         }
     ]
     assert timeline == [
@@ -4479,7 +4553,7 @@ def test_workflow_continuation_coordinator_writes_artifact_node(tmp_path):
             "workflow_node_kind": "artifact",
             "workflow_node_label": "Final Report",
             "status": "completed",
-            "artifact": {"ok": True, "path": "reports/final.md", "bytes": artifact_bytes},
+            "artifact": {"ok": True, "path": "reports/final.md", "bytes": artifact_bytes, "postcondition_verified": True},
         },
         {
             "event": "workflow.run.completed",
@@ -4495,7 +4569,7 @@ def test_workflow_continuation_coordinator_writes_artifact_node(tmp_path):
                 "workflow_node_kind": "artifact",
                 "workflow_node_label": "Final Report",
                 "status": "completed",
-                "artifact": {"ok": True, "path": "reports/final.md", "bytes": artifact_bytes},
+                "artifact": {"ok": True, "path": "reports/final.md", "bytes": artifact_bytes, "postcondition_verified": True},
             },
         ),
         (
@@ -7428,6 +7502,37 @@ def test_main_chat_model_persists_batched_output_event_not_token_deltas(tmp_path
         service.close()
 
 
+def provider_transport_events(service, run_id):
+    """Inspect provider transport facts separately from Runtime discovery.
+
+    The Runtime can discover the workspace before the provider's tool turn.
+    Both facts remain recorded; transport tests assert the provider turn and
+    additionally ensure that the public event stream hides internal tool data.
+    """
+    public_events = service.list_run_events(run_id, limit=500)["events"]
+    assert not any(
+        event["event_type"] in {
+            "tool.requested", "tool.started", "tool.completed", "agent.tool.call"
+        }
+        for event in public_events
+    )
+    events = service.list_run_events(run_id, limit=500, include_internal=True)["events"]
+    contracts = [event["payload"]["goal_contract"] for event in events
+                 if event["event_type"] == "agent.goal.contract"]
+    assert len(contracts) == 1
+    assert contracts[0]["run_id"] == run_id
+    assert contracts[0]["original_goal"] == service.get_run(run_id)["user_goal"]
+    assert contracts[0]["criteria"]
+    return {"events": [
+        event for event in events
+        if not (
+            (event["event_type"].startswith("tool.")
+             or event["event_type"] == "agent.tool.call")
+            and event["payload"].get("source") == "runtime_planner"
+        )
+    ]}
+
+
 def test_main_chat_model_loop_coalesces_stream_chunks_before_persisting(tmp_path, monkeypatch):
     service = make_service(tmp_path)
     chunks = [f"chunk-{index};" for index in range(300)]
@@ -7452,11 +7557,11 @@ def test_main_chat_model_loop_coalesces_stream_chunks_before_persisting(tmp_path
         run = service.start_main_chat_run(
             task_id="task-main-stream-batched-output",
             session_id="session-main-stream-batched-output",
-            user_goal="请处理 streaming 输出",
+            user_goal="Summarize the current conversation",
         )
         updated = service.execute_main_chat_model_loop(
             run["run_id"],
-            [{"role": "user", "content": "请处理 streaming 输出"}],
+            [{"role": "user", "content": "Summarize the current conversation"}],
         )
         rows = service._conn.execute(
             "SELECT event_type, payload_json FROM run_events WHERE run_id=? ORDER BY sequence",
@@ -7470,6 +7575,7 @@ def test_main_chat_model_loop_coalesces_stream_chunks_before_persisting(tmp_path
         assert not any(str(row["event_type"]).endswith(".delta") for row in rows)
     finally:
         service.close()
+
 
 
 def test_main_chat_model_preserves_stream_finish_reason_and_usage_in_completed_event(tmp_path, monkeypatch):
@@ -7615,11 +7721,11 @@ def test_main_chat_model_loop_uses_responses_output_text_done_snapshot(tmp_path,
         run = service.start_main_chat_run(
             task_id="task-main-responses-output-text-done",
             session_id="session-main-responses-output-text-done",
-            user_goal="Use Responses output_text.done",
+            user_goal="Summarize the current conversation",
         )
         updated = service.execute_main_chat_model_loop(
             run["run_id"],
-            [{"role": "user", "content": "Use Responses output_text.done"}],
+            [{"role": "user", "content": "Summarize the current conversation"}],
         )
         rows = service._conn.execute(
             "SELECT event_type, payload_json FROM run_events WHERE run_id=? ORDER BY sequence",
@@ -7633,6 +7739,7 @@ def test_main_chat_model_loop_uses_responses_output_text_done_snapshot(tmp_path,
         assert not any(str(row["event_type"]).endswith(".delta") for row in rows)
     finally:
         service.close()
+
 
 
 def test_main_chat_model_loop_uses_responses_output_text_done_list_snapshot(tmp_path, monkeypatch):
@@ -7678,11 +7785,11 @@ def test_main_chat_model_loop_uses_responses_output_text_done_list_snapshot(tmp_
         run = service.start_main_chat_run(
             task_id="task-main-responses-output-text-done-list",
             session_id="session-main-responses-output-text-done-list",
-            user_goal="Use Responses output_text.done list",
+            user_goal="Summarize the current conversation",
         )
         updated = service.execute_main_chat_model_loop(
             run["run_id"],
-            [{"role": "user", "content": "Use Responses output_text.done list"}],
+            [{"role": "user", "content": "Summarize the current conversation"}],
         )
         rows = service._conn.execute(
             "SELECT event_type, payload_json FROM run_events WHERE run_id=? ORDER BY sequence",
@@ -7697,6 +7804,7 @@ def test_main_chat_model_loop_uses_responses_output_text_done_list_snapshot(tmp_
         assert not any(str(row["event_type"]).endswith(".delta") for row in rows)
     finally:
         service.close()
+
 
 
 def test_main_chat_model_loop_uses_responses_output_item_message_snapshot(tmp_path, monkeypatch):
@@ -7737,11 +7845,11 @@ def test_main_chat_model_loop_uses_responses_output_item_message_snapshot(tmp_pa
         run = service.start_main_chat_run(
             task_id="task-main-responses-output-item-message",
             session_id="session-main-responses-output-item-message",
-            user_goal="Exercise Responses output-item snapshot",
+            user_goal="Summarize the current conversation",
         )
         updated = service.execute_main_chat_model_loop(
             run["run_id"],
-            [{"role": "user", "content": "Exercise Responses output-item snapshot"}],
+            [{"role": "user", "content": "Summarize the current conversation"}],
         )
         rows = service._conn.execute(
             "SELECT event_type, payload_json FROM run_events WHERE run_id=? ORDER BY sequence",
@@ -7755,6 +7863,7 @@ def test_main_chat_model_loop_uses_responses_output_item_message_snapshot(tmp_pa
         assert not any(str(row["event_type"]).endswith(".delta") for row in rows)
     finally:
         service.close()
+
 
 
 def test_main_chat_model_loop_uses_responses_content_part_snapshot(tmp_path, monkeypatch):
@@ -7791,11 +7900,11 @@ def test_main_chat_model_loop_uses_responses_content_part_snapshot(tmp_path, mon
         run = service.start_main_chat_run(
             task_id="task-main-responses-content-part",
             session_id="session-main-responses-content-part",
-            user_goal="Use Responses content_part",
+            user_goal="Summarize the current conversation",
         )
         updated = service.execute_main_chat_model_loop(
             run["run_id"],
-            [{"role": "user", "content": "Use Responses content_part"}],
+            [{"role": "user", "content": "Summarize the current conversation"}],
         )
         rows = service._conn.execute(
             "SELECT event_type, payload_json FROM run_events WHERE run_id=? ORDER BY sequence",
@@ -7809,6 +7918,7 @@ def test_main_chat_model_loop_uses_responses_content_part_snapshot(tmp_path, mon
         assert not any(str(row["event_type"]).endswith(".delta") for row in rows)
     finally:
         service.close()
+
 
 
 def test_main_chat_model_loop_discards_responses_reasoning_summary_stream(tmp_path, monkeypatch):
@@ -7864,13 +7974,13 @@ def test_main_chat_model_loop_discards_responses_reasoning_summary_stream(tmp_pa
         run = service.start_main_chat_run(
             task_id="task-main-responses-reasoning-summary",
             session_id="session-main-responses-reasoning-summary",
-            user_goal="Use Responses reasoning summary",
+            user_goal="Summarize the current conversation",
         )
         updated = service.execute_main_chat_model_loop(
             run["run_id"],
-            [{"role": "user", "content": "Use Responses reasoning summary"}],
+            [{"role": "user", "content": "Summarize the current conversation"}],
         )
-        events = service.list_run_events(run["run_id"], include_internal=True)["events"]
+        events = provider_transport_events(service, run["run_id"])["events"]
         output_events = [event for event in events if event["event_type"] == "model.output.completed"]
         events_json = json.dumps(events, ensure_ascii=False)
 
@@ -7882,6 +7992,7 @@ def test_main_chat_model_loop_discards_responses_reasoning_summary_stream(tmp_pa
         assert not any(str(event["event_type"]).endswith(".delta") for event in events)
     finally:
         service.close()
+
 
 
 def test_main_chat_model_loop_discards_responses_reasoning_list_snapshot(tmp_path, monkeypatch):
@@ -7931,13 +8042,13 @@ def test_main_chat_model_loop_discards_responses_reasoning_list_snapshot(tmp_pat
         run = service.start_main_chat_run(
             task_id="task-main-responses-reasoning-list",
             session_id="session-main-responses-reasoning-list",
-            user_goal="Use Responses reasoning list",
+            user_goal="Summarize the current conversation",
         )
         updated = service.execute_main_chat_model_loop(
             run["run_id"],
-            [{"role": "user", "content": "Use Responses reasoning list"}],
+            [{"role": "user", "content": "Summarize the current conversation"}],
         )
-        events = service.list_run_events(run["run_id"], include_internal=True)["events"]
+        events = provider_transport_events(service, run["run_id"])["events"]
         output_events = [event for event in events if event["event_type"] == "model.output.completed"]
         events_json = json.dumps(events, ensure_ascii=False)
 
@@ -7949,6 +8060,7 @@ def test_main_chat_model_loop_discards_responses_reasoning_list_snapshot(tmp_pat
         assert not any(str(event["event_type"]).endswith(".delta") for event in events)
     finally:
         service.close()
+
 
 
 def test_main_chat_model_loop_persists_streaming_refusal_delta(tmp_path, monkeypatch):
@@ -7974,11 +8086,11 @@ def test_main_chat_model_loop_persists_streaming_refusal_delta(tmp_path, monkeyp
         run = service.start_main_chat_run(
             task_id="task-main-streaming-refusal",
             session_id="session-main-streaming-refusal",
-            user_goal="Use streaming refusal",
+            user_goal="Summarize the current conversation",
         )
         updated = service.execute_main_chat_model_loop(
             run["run_id"],
-            [{"role": "user", "content": "Use streaming refusal"}],
+            [{"role": "user", "content": "Summarize the current conversation"}],
         )
         rows = service._conn.execute(
             "SELECT event_type, payload_json FROM run_events WHERE run_id=? ORDER BY sequence",
@@ -7992,6 +8104,7 @@ def test_main_chat_model_loop_persists_streaming_refusal_delta(tmp_path, monkeyp
         assert not any(str(row["event_type"]).endswith(".delta") for row in rows)
     finally:
         service.close()
+
 
 
 def test_main_chat_model_loop_accepts_refusal_message_field(tmp_path, monkeypatch):
@@ -8012,13 +8125,13 @@ def test_main_chat_model_loop_accepts_refusal_message_field(tmp_path, monkeypatc
         run = service.start_main_chat_run(
             task_id="task-main-message-refusal",
             session_id="session-main-message-refusal",
-            user_goal="Exercise refusal payload",
+            user_goal="Summarize the current conversation",
         )
         updated = service.execute_main_chat_model_loop(
             run["run_id"],
-            [{"role": "user", "content": "Exercise refusal payload"}],
+            [{"role": "user", "content": "Summarize the current conversation"}],
         )
-        events = service.list_run_events(run["run_id"])["events"]
+        events = provider_transport_events(service, run["run_id"])["events"]
         output_events = [event for event in events if event["event_type"] == "model.output.completed"]
 
         assert updated["result"] == expected
@@ -8026,6 +8139,7 @@ def test_main_chat_model_loop_accepts_refusal_message_field(tmp_path, monkeypatc
         assert output_events[0]["payload"]["content"] == expected
     finally:
         service.close()
+
 
 
 def test_main_chat_model_loop_uses_responses_refusal_done_snapshot(tmp_path, monkeypatch):
@@ -8068,11 +8182,11 @@ def test_main_chat_model_loop_uses_responses_refusal_done_snapshot(tmp_path, mon
         run = service.start_main_chat_run(
             task_id="task-main-responses-refusal-done",
             session_id="session-main-responses-refusal-done",
-            user_goal="Use Responses refusal.done",
+            user_goal="Summarize the current conversation",
         )
         updated = service.execute_main_chat_model_loop(
             run["run_id"],
-            [{"role": "user", "content": "Use Responses refusal.done"}],
+            [{"role": "user", "content": "Summarize the current conversation"}],
         )
         rows = service._conn.execute(
             "SELECT event_type, payload_json FROM run_events WHERE run_id=? ORDER BY sequence",
@@ -8086,6 +8200,7 @@ def test_main_chat_model_loop_uses_responses_refusal_done_snapshot(tmp_path, mon
         assert not any(str(row["event_type"]).endswith(".delta") for row in rows)
     finally:
         service.close()
+
 
 
 def test_main_chat_model_consumes_openai_compatible_sse_stream(tmp_path, monkeypatch):
@@ -8333,18 +8448,18 @@ def test_main_chat_model_loop_rejects_non_stream_reasoning_only_output(tmp_path,
         run = service.start_main_chat_run(
             task_id="task-main-loop-non-stream-reasoning-only",
             session_id="session-main-loop-non-stream-reasoning-only",
-            user_goal="Do not persist loop provider reasoning",
+            user_goal="Summarize the current conversation",
         )
 
         with pytest.raises(AgentRuntimeError, match="空回复"):
             service.execute_main_chat_model_loop(
                 run["run_id"],
-                [{"role": "user", "content": "Do not persist loop provider reasoning"}],
+                [{"role": "user", "content": "Summarize the current conversation"}],
                 tool_policy={"allowed_tools": ["workspace.read"]},
                 workspace_policy={"default_workdir": str(tmp_path), "readable_scopes": ["."]},
             )
 
-        events = service.list_run_events(run["run_id"], include_internal=True)["events"]
+        events = provider_transport_events(service, run["run_id"])["events"]
         event_types = [event["event_type"] for event in events]
         serialized_events = json.dumps(events, ensure_ascii=False)
         assert "model.request.failed" in event_types
@@ -8353,6 +8468,7 @@ def test_main_chat_model_loop_rejects_non_stream_reasoning_only_output(tmp_path,
         assert private_reasoning not in serialized_events
     finally:
         service.close()
+
 
 
 def test_main_chat_model_consumes_coalesced_openai_compatible_sse_frames(tmp_path, monkeypatch):
@@ -8729,7 +8845,7 @@ def test_main_chat_model_loop_executes_openai_compatible_sse_tool_calls(tmp_path
             tool_policy={"allowed_tools": ["workspace.read"]},
             workspace_policy={"default_workdir": str(workdir), "readable_scopes": ["."]},
         )
-        events = service.list_run_events(run["run_id"])["events"]
+        events = provider_transport_events(service, run["run_id"])["events"]
         event_types = [event["event_type"] for event in events]
         tool_event = next(event for event in events if event["event_type"] == "agent.tool.call")
 
@@ -8747,6 +8863,7 @@ def test_main_chat_model_loop_executes_openai_compatible_sse_tool_calls(tmp_path
         assert not any(str(event_type).endswith(".delta") for event_type in event_types)
     finally:
         service.close()
+
 
 
 def test_main_chat_model_loop_executes_singular_sse_tool_call_frames(tmp_path, monkeypatch):
@@ -8842,7 +8959,7 @@ def test_main_chat_model_loop_executes_singular_sse_tool_call_frames(tmp_path, m
             tool_policy={"allowed_tools": ["workspace.read"]},
             workspace_policy={"default_workdir": str(workdir), "readable_scopes": ["."]},
         )
-        events = service.list_run_events(run["run_id"])["events"]
+        events = provider_transport_events(service, run["run_id"])["events"]
         event_types = [event["event_type"] for event in events]
         tool_event = next(event for event in events if event["event_type"] == "agent.tool.call")
 
@@ -8858,6 +8975,7 @@ def test_main_chat_model_loop_executes_singular_sse_tool_call_frames(tmp_path, m
         assert not any(str(event_type).endswith(".delta") for event_type in event_types)
     finally:
         service.close()
+
 
 
 def test_main_chat_model_loop_executes_sse_delta_tool_call_object_arguments(tmp_path, monkeypatch):
@@ -8944,7 +9062,7 @@ def test_main_chat_model_loop_executes_sse_delta_tool_call_object_arguments(tmp_
             tool_policy={"allowed_tools": ["workspace.read"]},
             workspace_policy={"default_workdir": str(workdir), "readable_scopes": ["."]},
         )
-        events = service.list_run_events(run["run_id"])["events"]
+        events = provider_transport_events(service, run["run_id"])["events"]
         event_types = [event["event_type"] for event in events]
         tool_event = next(event for event in events if event["event_type"] == "agent.tool.call")
         assistant_tool_messages = [
@@ -8968,6 +9086,7 @@ def test_main_chat_model_loop_executes_sse_delta_tool_call_object_arguments(tmp_
         assert not any(str(event_type).endswith(".delta") for event_type in event_types)
     finally:
         service.close()
+
 
 
 def test_main_chat_model_loop_executes_message_level_openai_compatible_sse_tool_call(tmp_path, monkeypatch):
@@ -9055,7 +9174,7 @@ def test_main_chat_model_loop_executes_message_level_openai_compatible_sse_tool_
             tool_policy={"allowed_tools": ["workspace.read"]},
             workspace_policy={"default_workdir": str(workdir), "readable_scopes": ["."]},
         )
-        events = service.list_run_events(run["run_id"])["events"]
+        events = provider_transport_events(service, run["run_id"])["events"]
         event_types = [event["event_type"] for event in events]
         tool_event = next(event for event in events if event["event_type"] == "agent.tool.call")
 
@@ -9072,6 +9191,7 @@ def test_main_chat_model_loop_executes_message_level_openai_compatible_sse_tool_
         assert not any(str(event_type).endswith(".delta") for event_type in event_types)
     finally:
         service.close()
+
 
 
 def test_main_chat_model_loop_executes_multiline_openai_compatible_sse_tool_call(tmp_path, monkeypatch):
@@ -9150,7 +9270,7 @@ def test_main_chat_model_loop_executes_multiline_openai_compatible_sse_tool_call
             tool_policy={"allowed_tools": ["workspace.read"]},
             workspace_policy={"default_workdir": str(workdir), "readable_scopes": ["."]},
         )
-        events = service.list_run_events(run["run_id"])["events"]
+        events = provider_transport_events(service, run["run_id"])["events"]
         event_types = [event["event_type"] for event in events]
         tool_event = next(event for event in events if event["event_type"] == "agent.tool.call")
 
@@ -9166,6 +9286,7 @@ def test_main_chat_model_loop_executes_multiline_openai_compatible_sse_tool_call
         assert not any(str(event_type).endswith(".delta") for event_type in event_types)
     finally:
         service.close()
+
 
 
 def test_main_chat_model_loop_executes_split_openai_compatible_sse_tool_call_frames(tmp_path, monkeypatch):
@@ -9262,7 +9383,7 @@ def test_main_chat_model_loop_executes_split_openai_compatible_sse_tool_call_fra
             tool_policy={"allowed_tools": ["workspace.read"]},
             workspace_policy={"default_workdir": str(workdir), "readable_scopes": ["."]},
         )
-        events = service.list_run_events(run["run_id"])["events"]
+        events = provider_transport_events(service, run["run_id"])["events"]
         event_types = [event["event_type"] for event in events]
         tool_event = next(event for event in events if event["event_type"] == "agent.tool.call")
 
@@ -9278,6 +9399,7 @@ def test_main_chat_model_loop_executes_split_openai_compatible_sse_tool_call_fra
         assert not any(str(event_type).endswith(".delta") for event_type in event_types)
     finally:
         service.close()
+
 
 
 def test_main_chat_model_loop_fails_on_openai_compatible_sse_error(tmp_path, monkeypatch):
@@ -9323,7 +9445,7 @@ def test_main_chat_model_loop_fails_on_openai_compatible_sse_error(tmp_path, mon
         run = service.start_main_chat_run(
             task_id="task-main-http-sse-error",
             session_id="session-main-http-sse-error",
-            user_goal=f"Handle provider error token={leaked_secret}",
+            user_goal=f"Reply with exactly '{leaked_secret}'",
         )
 
         with pytest.raises(Exception, match="OpenAI-compatible Profile 调用失败"):
@@ -9333,7 +9455,7 @@ def test_main_chat_model_loop_fails_on_openai_compatible_sse_error(tmp_path, mon
             )
 
         failed = service.get_run(run["run_id"])
-        events = service.list_run_events(run["run_id"])["events"]
+        events = provider_transport_events(service, run["run_id"])["events"]
         event_types = [event["event_type"] for event in events]
         persisted_projection = json.dumps({"run": failed, "events": events}, ensure_ascii=False)
 
@@ -9350,6 +9472,7 @@ def test_main_chat_model_loop_fails_on_openai_compatible_sse_error(tmp_path, mon
         service.close()
 
     assert verify_secret_redaction(paths=[tmp_path]) == []
+
 
 
 def test_main_chat_model_loop_redacts_multiline_openai_compatible_sse_error(tmp_path, monkeypatch):
@@ -9389,7 +9512,7 @@ def test_main_chat_model_loop_redacts_multiline_openai_compatible_sse_error(tmp_
         run = service.start_main_chat_run(
             task_id="task-main-http-multiline-sse-error",
             session_id="session-main-http-multiline-sse-error",
-            user_goal=f"Handle multiline provider error token={leaked_secret}",
+            user_goal=f"Reply with exactly '{leaked_secret}'",
         )
 
         with pytest.raises(Exception, match="OpenAI-compatible Profile 调用失败"):
@@ -9399,7 +9522,7 @@ def test_main_chat_model_loop_redacts_multiline_openai_compatible_sse_error(tmp_
             )
 
         failed = service.get_run(run["run_id"])
-        events = service.list_run_events(run["run_id"])["events"]
+        events = provider_transport_events(service, run["run_id"])["events"]
         persisted_projection = json.dumps({"run": failed, "events": events}, ensure_ascii=False)
 
         assert failed["status"] == "failed"
@@ -9413,6 +9536,7 @@ def test_main_chat_model_loop_redacts_multiline_openai_compatible_sse_error(tmp_
         service.close()
 
     assert verify_secret_redaction(paths=[tmp_path]) == []
+
 
 
 def test_main_chat_model_loop_coalesces_openai_sdk_object_stream_before_persisting(tmp_path, monkeypatch):
@@ -9446,11 +9570,11 @@ def test_main_chat_model_loop_coalesces_openai_sdk_object_stream_before_persisti
         run = service.start_main_chat_run(
             task_id="task-main-sdk-object-stream-batched-output",
             session_id="session-main-sdk-object-stream-batched-output",
-            user_goal="请处理 OpenAI SDK 对象 streaming 输出",
+            user_goal="Summarize the current conversation",
         )
         updated = service.execute_main_chat_model_loop(
             run["run_id"],
-            [{"role": "user", "content": "请处理 OpenAI SDK 对象 streaming 输出"}],
+            [{"role": "user", "content": "Summarize the current conversation"}],
         )
         rows = service._conn.execute(
             "SELECT event_type, payload_json FROM run_events WHERE run_id=? ORDER BY sequence",
@@ -9462,9 +9586,10 @@ def test_main_chat_model_loop_coalesces_openai_sdk_object_stream_before_persisti
         assert len(output_rows) == 1
         assert json.loads(output_rows[0]["payload_json"])["content"] == expected
         assert not any(str(row["event_type"]).endswith(".delta") for row in rows)
-        assert len(rows) < 10
+        assert len(rows) < 20  # Includes immutable goal and assessment lifecycle facts.
     finally:
         service.close()
+
 
 
 def test_main_chat_model_loop_preserves_openai_sdk_stream_usage_in_completed_event(tmp_path, monkeypatch):
@@ -9504,11 +9629,11 @@ def test_main_chat_model_loop_preserves_openai_sdk_stream_usage_in_completed_eve
         run = service.start_main_chat_run(
             task_id="task-main-sdk-object-stream-metadata",
             session_id="session-main-sdk-object-stream-metadata",
-            user_goal="Preserve SDK stream metadata",
+            user_goal="Summarize the current conversation",
         )
         updated = service.execute_main_chat_model_loop(
             run["run_id"],
-            [{"role": "user", "content": "Preserve SDK stream metadata"}],
+            [{"role": "user", "content": "Summarize the current conversation"}],
         )
         rows = service._conn.execute(
             "SELECT event_type, payload_json FROM run_events WHERE run_id=? ORDER BY sequence",
@@ -9530,6 +9655,7 @@ def test_main_chat_model_loop_preserves_openai_sdk_stream_usage_in_completed_eve
         assert not any(str(row["event_type"]).endswith(".delta") for row in rows)
     finally:
         service.close()
+
 
 
 def test_main_chat_model_loop_coalesces_streaming_tool_call_deltas(tmp_path, monkeypatch):
@@ -9612,7 +9738,7 @@ def test_main_chat_model_loop_coalesces_streaming_tool_call_deltas(tmp_path, mon
             tool_policy={"allowed_tools": ["workspace.read"]},
             workspace_policy={"default_workdir": str(workdir), "readable_scopes": ["."]},
         )
-        events = service.list_run_events(run["run_id"])["events"]
+        events = provider_transport_events(service, run["run_id"])["events"]
         event_types = [event["event_type"] for event in events]
         tool_event = next(event for event in events if event["event_type"] == "agent.tool.call")
 
@@ -9624,6 +9750,7 @@ def test_main_chat_model_loop_coalesces_streaming_tool_call_deltas(tmp_path, mon
         assert not any(str(event_type).endswith(".delta") for event_type in event_types)
     finally:
         service.close()
+
 
 
 def test_main_chat_model_loop_executes_responses_style_streaming_tool_call(tmp_path, monkeypatch):
@@ -9700,7 +9827,7 @@ def test_main_chat_model_loop_executes_responses_style_streaming_tool_call(tmp_p
             tool_policy={"allowed_tools": ["workspace.read"]},
             workspace_policy={"default_workdir": str(workdir), "readable_scopes": ["."]},
         )
-        events = service.list_run_events(run["run_id"])["events"]
+        events = provider_transport_events(service, run["run_id"])["events"]
         event_types = [event["event_type"] for event in events]
         tool_event = next(event for event in events if event["event_type"] == "agent.tool.call")
 
@@ -9712,6 +9839,7 @@ def test_main_chat_model_loop_executes_responses_style_streaming_tool_call(tmp_p
         assert not any(str(event_type).endswith(".delta") for event_type in event_types)
     finally:
         service.close()
+
 
 
 def test_main_chat_model_loop_executes_multiple_responses_tool_calls(tmp_path, monkeypatch):
@@ -9793,7 +9921,7 @@ def test_main_chat_model_loop_executes_multiple_responses_tool_calls(tmp_path, m
             tool_policy={"allowed_tools": ["workspace.read"]},
             workspace_policy={"default_workdir": str(workdir), "readable_scopes": ["."]},
         )
-        events = service.list_run_events(run["run_id"])["events"]
+        events = provider_transport_events(service, run["run_id"])["events"]
         event_types = [event["event_type"] for event in events]
         tool_events = [event for event in events if event["event_type"] == "agent.tool.call"]
 
@@ -9808,6 +9936,7 @@ def test_main_chat_model_loop_executes_multiple_responses_tool_calls(tmp_path, m
         assert len(calls) == 2
     finally:
         service.close()
+
 
 
 def test_main_chat_model_loop_preserves_responses_zero_output_index(tmp_path, monkeypatch):
@@ -9891,7 +10020,7 @@ def test_main_chat_model_loop_preserves_responses_zero_output_index(tmp_path, mo
             workspace_policy={"default_workdir": str(workdir), "readable_scopes": ["."]},
         )
         tool_events = [
-            event for event in service.list_run_events(run["run_id"])["events"] if event["event_type"] == "agent.tool.call"
+            event for event in provider_transport_events(service, run["run_id"])["events"] if event["event_type"] == "agent.tool.call"
         ]
 
         assert updated["result"] == "Responses zero output index complete"
@@ -9902,6 +10031,7 @@ def test_main_chat_model_loop_preserves_responses_zero_output_index(tmp_path, mo
         assert len(calls) == 2
     finally:
         service.close()
+
 
 
 def test_main_chat_model_loop_uses_responses_call_id_without_item_id(tmp_path, monkeypatch):
@@ -9963,7 +10093,7 @@ def test_main_chat_model_loop_uses_responses_call_id_without_item_id(tmp_path, m
             tool_policy={"allowed_tools": ["workspace.read"]},
             workspace_policy={"default_workdir": str(workdir), "readable_scopes": ["."]},
         )
-        events = service.list_run_events(run["run_id"])["events"]
+        events = provider_transport_events(service, run["run_id"])["events"]
         tool_event = next(event for event in events if event["event_type"] == "agent.tool.call")
 
         assert updated["result"] == "Responses call id only complete"
@@ -9972,6 +10102,7 @@ def test_main_chat_model_loop_uses_responses_call_id_without_item_id(tmp_path, m
         assert len(calls) == 2
     finally:
         service.close()
+
 
 
 def test_main_chat_model_loop_executes_legacy_streaming_function_call(tmp_path, monkeypatch):
@@ -10035,7 +10166,7 @@ def test_main_chat_model_loop_executes_legacy_streaming_function_call(tmp_path, 
             tool_policy={"allowed_tools": ["workspace.read"]},
             workspace_policy={"default_workdir": str(workdir), "readable_scopes": ["."]},
         )
-        events = service.list_run_events(run["run_id"])["events"]
+        events = provider_transport_events(service, run["run_id"])["events"]
         event_types = [event["event_type"] for event in events]
         tool_event = next(event for event in events if event["event_type"] == "agent.tool.call")
 
@@ -10047,6 +10178,7 @@ def test_main_chat_model_loop_executes_legacy_streaming_function_call(tmp_path, 
         assert not any(str(event_type).endswith(".delta") for event_type in event_types)
     finally:
         service.close()
+
 
 
 def test_main_chat_model_loop_executes_top_level_delta_message_tool_calls(tmp_path, monkeypatch):
@@ -10116,7 +10248,7 @@ def test_main_chat_model_loop_executes_top_level_delta_message_tool_calls(tmp_pa
             tool_policy={"allowed_tools": ["workspace.read"]},
             workspace_policy={"default_workdir": str(workdir), "readable_scopes": ["."]},
         )
-        events = service.list_run_events(run["run_id"])["events"]
+        events = provider_transport_events(service, run["run_id"])["events"]
         event_types = [event["event_type"] for event in events]
         tool_event = next(event for event in events if event["event_type"] == "agent.tool.call")
 
@@ -10221,7 +10353,7 @@ def test_main_chat_model_loop_coalesces_interleaved_streaming_tool_call_deltas(t
             tool_policy={"allowed_tools": ["workspace.read"]},
             workspace_policy={"default_workdir": str(workdir), "readable_scopes": ["."]},
         )
-        events = service.list_run_events(run["run_id"])["events"]
+        events = provider_transport_events(service, run["run_id"])["events"]
         event_types = [event["event_type"] for event in events]
         tool_events = [event for event in events if event["event_type"] == "agent.tool.call"]
 
@@ -10238,6 +10370,7 @@ def test_main_chat_model_loop_coalesces_interleaved_streaming_tool_call_deltas(t
         assert not any(str(event_type).endswith(".delta") for event_type in event_types)
     finally:
         service.close()
+
 
 
 def test_main_chat_model_loop_keeps_multi_choice_same_index_streaming_tool_calls_separate(tmp_path, monkeypatch):
@@ -10350,7 +10483,7 @@ def test_main_chat_model_loop_keeps_multi_choice_same_index_streaming_tool_calls
             tool_policy={"allowed_tools": ["workspace.read"]},
             workspace_policy={"default_workdir": str(workdir), "readable_scopes": ["."]},
         )
-        events = service.list_run_events(run["run_id"])["events"]
+        events = provider_transport_events(service, run["run_id"])["events"]
         event_types = [event["event_type"] for event in events]
         tool_events = [event for event in events if event["event_type"] == "agent.tool.call"]
 
@@ -10364,6 +10497,7 @@ def test_main_chat_model_loop_keeps_multi_choice_same_index_streaming_tool_calls
         assert not any(str(event_type).endswith(".delta") for event_type in event_types)
     finally:
         service.close()
+
 
 
 def test_main_chat_model_loop_coalesces_indexless_streaming_tool_call_deltas(tmp_path, monkeypatch):
@@ -10438,7 +10572,7 @@ def test_main_chat_model_loop_coalesces_indexless_streaming_tool_call_deltas(tmp
             tool_policy={"allowed_tools": ["workspace.read"]},
             workspace_policy={"default_workdir": str(workdir), "readable_scopes": ["."]},
         )
-        events = service.list_run_events(run["run_id"])["events"]
+        events = provider_transport_events(service, run["run_id"])["events"]
         event_types = [event["event_type"] for event in events]
         tool_events = [event for event in events if event["event_type"] == "agent.tool.call"]
 
@@ -10449,6 +10583,7 @@ def test_main_chat_model_loop_coalesces_indexless_streaming_tool_call_deltas(tmp
         assert not any(str(event_type).endswith(".delta") for event_type in event_types)
     finally:
         service.close()
+
 
 
 def test_main_chat_model_loop_coalesces_indexless_interleaved_tool_call_deltas_by_id(tmp_path, monkeypatch):
@@ -10554,7 +10689,7 @@ def test_main_chat_model_loop_coalesces_indexless_interleaved_tool_call_deltas_b
             tool_policy={"allowed_tools": ["workspace.read"]},
             workspace_policy={"default_workdir": str(workdir), "readable_scopes": ["."]},
         )
-        events = service.list_run_events(run["run_id"])["events"]
+        events = provider_transport_events(service, run["run_id"])["events"]
         event_types = [event["event_type"] for event in events]
         tool_events = [event for event in events if event["event_type"] == "agent.tool.call"]
 
@@ -10626,7 +10761,7 @@ def test_main_chat_model_loop_executes_provider_message_tool_calls(tmp_path, mon
             tool_policy={"allowed_tools": ["workspace.read"]},
             workspace_policy={"default_workdir": str(workdir), "readable_scopes": ["."]},
         )
-        events = service.list_run_events(run["run_id"])["events"]
+        events = provider_transport_events(service, run["run_id"])["events"]
         event_types = [event["event_type"] for event in events]
         tool_event = next(event for event in events if event["event_type"] == "agent.tool.call")
 
@@ -10638,6 +10773,7 @@ def test_main_chat_model_loop_executes_provider_message_tool_calls(tmp_path, mon
         assert not any(str(event_type).endswith(".delta") for event_type in event_types)
     finally:
         service.close()
+
 
 
 def test_main_chat_model_loop_executes_openai_sdk_object_message_tool_calls(tmp_path, monkeypatch):
@@ -10696,7 +10832,7 @@ def test_main_chat_model_loop_executes_openai_sdk_object_message_tool_calls(tmp_
             tool_policy={"allowed_tools": ["workspace.read"]},
             workspace_policy={"default_workdir": str(workdir), "readable_scopes": ["."]},
         )
-        events = service.list_run_events(run["run_id"])["events"]
+        events = provider_transport_events(service, run["run_id"])["events"]
         event_types = [event["event_type"] for event in events]
         tool_event = next(event for event in events if event["event_type"] == "agent.tool.call")
 
@@ -10708,6 +10844,7 @@ def test_main_chat_model_loop_executes_openai_sdk_object_message_tool_calls(tmp_
         assert not any(str(event_type).endswith(".delta") for event_type in event_types)
     finally:
         service.close()
+
 
 
 def test_main_chat_provider_exception_is_redacted_from_run_events_and_storage(tmp_path, monkeypatch):
@@ -10803,6 +10940,7 @@ def test_main_chat_tool_exception_is_redacted_from_tool_messages_events_and_stor
     workdir = tmp_path / "repo"
     workdir.mkdir()
     calls = []
+    tool_attempts = []
     leaked_secret = "sk-tool-exception123456"
     monkeypatch.setattr(
         "apps.shell.agent_runtime.get_model_profile_service",
@@ -10822,13 +10960,15 @@ def test_main_chat_tool_exception_is_redacted_from_tool_messages_events_and_stor
                     }
                 ],
             }
-        assert messages[-1]["role"] == "tool"
-        assert leaked_secret not in messages[-1]["content"]
-        assert "[redacted]" in messages[-1]["content"]
+        tool_messages = [message for message in messages if message.get("role") == "tool"]
+        assert tool_messages
+        assert leaked_secret not in json.dumps(messages)
+        assert "[redacted]" in json.dumps(messages)
         return {"content": "Recovered from redacted tool failure"}
 
     def failing_tool_call(self, name, payload, *, approved=False):
         assert name == "workspace.read"
+        tool_attempts.append(name)
         raise AgentRuntimeError(f"workspace failed token={leaked_secret}")
 
     monkeypatch.setattr("apps.shell.agent_runtime.openai_compatible_chat_message", fake_chat)
@@ -10837,7 +10977,7 @@ def test_main_chat_tool_exception_is_redacted_from_tool_messages_events_and_stor
         run = service.start_main_chat_run(
             task_id="task-tool-exception-leak",
             session_id="session-tool-exception-leak",
-            user_goal="Read README and recover",
+            user_goal="Reply with exactly 'Recovered from redacted tool failure'",
         )
         result = service.execute_main_chat_model_loop(
             run["run_id"],
@@ -10846,13 +10986,15 @@ def test_main_chat_tool_exception_is_redacted_from_tool_messages_events_and_stor
             workspace_policy={"default_workdir": str(workdir), "readable_scopes": ["."]},
         )
 
-        events = service.list_run_events(run["run_id"])["events"]
+        events = service.list_run_events(run["run_id"], include_internal=True)["events"]
         persisted_projection = json.dumps({"run": result, "events": events}, ensure_ascii=False)
-        tool_event = next(event for event in events if event["event_type"] == "agent.tool.call")
+        tool_event = next(event for event in events if event["event_type"] == "agent.tool.call"
+                          and event["payload"]["result"].get("ok") is False)
 
         assert result["status"] == "running"
         assert result["result"] == "Recovered from redacted tool failure"
         assert tool_event["payload"]["result"]["ok"] is False
+        assert len(tool_attempts) == 1
         assert leaked_secret not in persisted_projection
         assert "[redacted]" in persisted_projection
     finally:
@@ -11208,8 +11350,14 @@ def test_main_chat_consecutive_tool_approvals_use_resume_required_projection(tmp
         lambda: FakeDefaultProfileService(),
     )
 
+    fixture_actions = [('terminal_run', {'command': 'printf main-first-approved'}), ('terminal_run', {'command': 'printf main-second-approved'})]
+    fixture_goal = semantic_fixture_goal(fixture_actions)
+
     def fake_chat(_base_url, _model, _api_key, messages, *, tools=None):
         calls.append(messages)
+        planning_response = semantic_fixture_model_plan(messages, tools, fixture_actions, fixture_goal)
+        if planning_response is not None:
+            return planning_response
         if len(calls) == 1:
             return {
                 "content": "",
@@ -11261,11 +11409,11 @@ def test_main_chat_consecutive_tool_approvals_use_resume_required_projection(tmp
         run = service.start_main_chat_run(
             task_id="task-main-consecutive-approval",
             session_id="session-main-consecutive-approval",
-            user_goal="Run both commands",
+            user_goal=fixture_goal,
         )
         waiting = service.execute_main_chat_model_loop(
             run["run_id"],
-            [{"role": "user", "content": "Run both commands"}],
+            [{"role": "user", "content": fixture_goal}],
             tool_policy={"allowed_tools": ["terminal.run"]},
             workspace_policy={"default_workdir": str(workdir), "readable_scopes": ["."]},
         )
@@ -11286,16 +11434,19 @@ def test_main_chat_consecutive_tool_approvals_use_resume_required_projection(tmp
         ]
 
         after_second = service.approve_run_approval(run["run_id"])
-        assert after_second["status"] == "running"
+        assert after_second["status"] == "completed"
         assert after_second["pending_approval"] == {}
-        assert after_second["result"] == "Main chat terminal approvals completed"
-        assert len(calls) == 2
+        assert "first-approved" in after_second["result"]
+        assert "second-approved" in after_second["result"]
+        assert len(calls) == 1
     finally:
         service.close()
 
 
+
 def test_main_chat_records_failed_run_event_when_approved_tool_fails(tmp_path, monkeypatch):
     service = make_service(tmp_path)
+    service.custom_api_agent_loop._max_tool_iterations = 3
     workdir = tmp_path / "repo"
     workdir.mkdir()
     calls = []
@@ -11304,27 +11455,16 @@ def test_main_chat_records_failed_run_event_when_approved_tool_fails(tmp_path, m
         lambda: FakeDefaultProfileService(),
     )
 
+    fixture_actions = [('terminal_run', {'command': 'printf main-chat-terminal-failure; exit 7', 'shell': True})]
+    fixture_goal = semantic_fixture_goal(fixture_actions)
+
     def fake_chat(_base_url, _model, _api_key, messages, *, tools=None):
         calls.append(messages)
+        planning_response = semantic_fixture_model_plan(messages, tools, fixture_actions, fixture_goal)
+        if planning_response is not None:
+            return planning_response
         assert any((tool.get("function") or {}).get("name") == "terminal_run" for tool in tools or [])
-        return {
-            "content": "",
-            "tool_calls": [
-                {
-                    "id": "call_terminal_failure",
-                    "type": "function",
-                    "function": {
-                        "name": "terminal_run",
-                        "arguments": json.dumps(
-                            {
-                                "command": "printf main-chat-terminal-failure; exit 7",
-                                "shell": True,
-                            }
-                        ),
-                    },
-                }
-            ],
-        }
+        return {"content": "The exact requested process failed; no repair is authorized."}
 
     monkeypatch.setattr("apps.shell.agent_runtime.openai_compatible_chat_message", fake_chat)
     try:
@@ -11349,11 +11489,13 @@ def test_main_chat_records_failed_run_event_when_approved_tool_fails(tmp_path, m
         run = service.start_main_chat_run(
             task_id="task-main-chat-terminal-failure",
             session_id="session-main-chat-terminal-failure",
-            user_goal="Run failing command",
+            user_goal=fixture_goal,
         )
+        envelope = semantic_fixture_execution_envelope(fake_chat, fixture_actions, fixture_goal)
         waiting = service.execute_main_chat_model_loop(
             run["run_id"],
-            [{"role": "user", "content": "Run failing command"}],
+            [{"role": "user", "content": fixture_goal}],
+            runtime_execution_envelope=envelope,
             tool_policy={"allowed_tools": ["terminal.run"]},
             workspace_policy={"default_workdir": str(workdir), "readable_scopes": ["."]},
         )
@@ -11362,9 +11504,8 @@ def test_main_chat_records_failed_run_event_when_approved_tool_fails(tmp_path, m
         resumed = service.approve_run_approval(run["run_id"])
 
         assert resumed["status"] == "failed"
-        assert "terminal.run 执行失败" in resumed["result"]
+        assert "最后一次工具调用：terminal.run" in resumed["result"]
         assert "退出码：7" in resumed["result"]
-        assert "main-chat-terminal-failure" in resumed["result"]
         assert failed_projection_calls == [
             {
                 "run_id": run["run_id"],
@@ -11372,23 +11513,26 @@ def test_main_chat_records_failed_run_event_when_approved_tool_fails(tmp_path, m
                 "safe_error": resumed["result"],
             }
         ]
-        events = service.list_run_events(run["run_id"])["events"]
+        events = service.list_run_events(run["run_id"], include_internal=True)["events"]
         event_types = [event["event_type"] for event in events]
         assert "agent.run.failed" not in event_types
         assert event_types.count("task.failed") == 1
         assert event_types.count("run.failed") == 1
         failed_event = next(event for event in events if event["event_type"] == "run.failed")
-        assert "terminal.run 执行失败" in failed_event["payload"]["error"]
+        assert "最后一次工具调用：terminal.run" in failed_event["payload"]["error"]
         assert any(
             event["event_type"] == "agent.tool.call"
             and event["payload"]["tool"] == "terminal.run"
             and event["payload"]["result"]["ok"] is False
+            and event["payload"]["result"]["stdout"] == "main-chat-terminal-failure"
+            and event["payload"]["result"]["returncode"] == 7
             and event["payload"]["approved"] is True
             for event in events
         )
-        assert len(calls) == 1
+        assert len(calls) == 3
     finally:
         service.close()
+
 
 
 def test_main_chat_approval_timeout_records_replayable_fact_and_is_idempotent(tmp_path, monkeypatch):
@@ -11400,7 +11544,13 @@ def test_main_chat_approval_timeout_records_replayable_fact_and_is_idempotent(tm
         lambda: FakeDefaultProfileService(),
     )
 
+    fixture_actions = [('workspace_write_patch', {'path': 'out.txt', 'patch': '--- out.txt\n+++ out.txt\n@@ -1 +1 @@\n-before\n+timed out\n'})]
+    fixture_goal = semantic_fixture_goal(fixture_actions)
+
     def fake_chat(_base_url, _model, _api_key, _messages, *, tools=None):
+        planning_response = semantic_fixture_model_plan(_messages, tools, fixture_actions, fixture_goal)
+        if planning_response is not None:
+            return planning_response
         return {
             "content": "",
             "tool_calls": [
@@ -11425,7 +11575,7 @@ def test_main_chat_approval_timeout_records_replayable_fact_and_is_idempotent(tm
         run = service.start_main_chat_run(
             task_id="task-main-approval-timeout",
             session_id="session-main-approval-timeout",
-            user_goal="Write",
+            user_goal=fixture_goal,
         )
         waiting = service.execute_main_chat_model_loop(
             run["run_id"],
@@ -11441,7 +11591,7 @@ def test_main_chat_approval_timeout_records_replayable_fact_and_is_idempotent(tm
         assert waiting["status"] == "approval_required"
 
         timed_out = service.timeout_run_approval(run["run_id"], reason="approval_wait_timeout")
-        events_after_timeout = service.list_run_events(run["run_id"])["events"]
+        events_after_timeout = service.list_run_events(run["run_id"], include_internal=True)["events"]
         timeout_events = [event for event in events_after_timeout if event["event_type"] == "approval.timeout"]
 
         assert timed_out["status"] == "cancelled"
@@ -11463,12 +11613,13 @@ def test_main_chat_approval_timeout_records_replayable_fact_and_is_idempotent(tm
         assert approval_row["status"] == "cancelled"
 
         repeated = service.timeout_run_approval(run["run_id"], reason="approval_wait_timeout")
-        events_after_repeat = service.list_run_events(run["run_id"])["events"]
+        events_after_repeat = service.list_run_events(run["run_id"], include_internal=True)["events"]
 
         assert repeated["status"] == "cancelled"
         assert len([event for event in events_after_repeat if event["event_type"] == "approval.timeout"]) == 1
     finally:
         service.close()
+
 
 
 def test_main_chat_reject_and_timeout_use_approval_coordinator_boundaries(tmp_path, monkeypatch):
@@ -11654,7 +11805,18 @@ def test_tool_approval_transitions_use_shared_context_boundary(tmp_path, monkeyp
         spy_project_child_run_transition,
     )
 
+    patch_actions = [("workspace_write_patch", {"path": "out.txt", "patch": "--- out.txt\n+++ out.txt\n@@ -1 +1 @@\n-before\n+after\n"})]
+    terminal_actions = [("terminal_run", {"command": "printf boundary"})]
+    patch_goal = semantic_fixture_goal(patch_actions)
+    terminal_goal = semantic_fixture_goal(terminal_actions)
+
     def fake_chat(_base_url, _model, _api_key, _messages, *, tools=None):
+        if any((tool.get("function") or {}).get("name") == "runtime_propose_task_intent" for tool in tools or []):
+            original_goal = next(json.loads(message["content"])["original_goal"]
+                                 for message in _messages if message.get("role") == "user"
+                                 and str(message.get("content", "")).lstrip().startswith("{"))
+            actions = patch_actions if original_goal == patch_goal else terminal_actions
+            return semantic_fixture_model_plan(_messages, tools, actions, original_goal)
         tool_names = {(tool.get("function") or {}).get("name") for tool in tools or []}
         if "workspace_write_patch" in tool_names:
             return {
@@ -11694,12 +11856,12 @@ def test_tool_approval_transitions_use_shared_context_boundary(tmp_path, monkeyp
         main_reject_run = service.start_main_chat_run(
             task_id="task-main-reject-context",
             session_id="session-main-reject-context",
-            user_goal="Reject patch",
+            user_goal=patch_goal,
         )
         main_timeout_run = service.start_main_chat_run(
             task_id="task-main-timeout-context",
             session_id="session-main-timeout-context",
-            user_goal="Timeout patch",
+            user_goal=patch_goal,
         )
         for run in (main_reject_run, main_timeout_run):
             waiting = service.execute_main_chat_model_loop(
@@ -11719,8 +11881,9 @@ def test_tool_approval_transitions_use_shared_context_boundary(tmp_path, monkeyp
                 "workspace_policy": {"default_workdir": str(workdir), "readable_scopes": ["."]},
             }
         )
-        agent_reject_run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Reject command"})
-        agent_timeout_run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Timeout command"})
+        envelope = semantic_fixture_execution_envelope(fake_chat, terminal_actions, terminal_goal)
+        agent_reject_run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": terminal_goal, "runtime_execution_envelope": envelope})
+        agent_timeout_run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": terminal_goal, "runtime_execution_envelope": envelope})
 
         assert agent_reject_run["status"] == "approval_required"
         assert agent_timeout_run["status"] == "approval_required"
@@ -12031,13 +12194,28 @@ def test_main_chat_repeated_approval_does_not_execute_tool_twice(tmp_path, monke
     (workdir / "src").mkdir(parents=True)
     target = workdir / "src" / "app.txt"
     target.write_text("before\n", encoding="utf-8")
+    execution_calls = []
+    original_tool_call = ToolBroker.call
+
+    def count_patch_execution(self, name, payload, *, approved=False):
+        if name == "workspace.write_patch" and approved:
+            execution_calls.append(dict(payload))
+        return original_tool_call(self, name, payload, approved=approved)
+
+    monkeypatch.setattr(ToolBroker, "call", count_patch_execution)
     model_calls = 0
     resume_model_started = threading.Event()
     release_resume_model = threading.Event()
 
+    fixture_actions = [('workspace_write_patch', {'path': 'src/app.txt', 'patch': '--- src/app.txt\n+++ src/app.txt\n@@ -1 +1 @@\n-before\n+after\n'})]
+    fixture_goal = semantic_fixture_goal(fixture_actions)
+
     def fake_chat(_base_url, _model, _api_key, _messages, *, tools=None):
         nonlocal model_calls
         model_calls += 1
+        planning_response = semantic_fixture_model_plan(_messages, tools, fixture_actions, fixture_goal)
+        if planning_response is not None:
+            return planning_response
         if model_calls == 1:
             return {
                 "role": "assistant",
@@ -12068,11 +12246,11 @@ def test_main_chat_repeated_approval_does_not_execute_tool_twice(tmp_path, monke
         run = service.start_main_chat_run(
             task_id="task-main-approve-idempotent",
             session_id="session-main-approve-idempotent",
-            user_goal="Patch once",
+            user_goal=fixture_goal,
         )
         waiting = service.execute_main_chat_model_loop(
             run["run_id"],
-            [{"role": "user", "content": "Patch once"}],
+            [{"role": "user", "content": fixture_goal}],
             tool_policy={"allowed_tools": ["workspace.write_patch"]},
             workspace_policy={
                 "default_workdir": str(workdir),
@@ -12097,7 +12275,7 @@ def test_main_chat_repeated_approval_does_not_execute_tool_twice(tmp_path, monke
         assert repeated_after["run_id"] == run["run_id"]
         assert model_calls == 2
         assert target.read_text(encoding="utf-8") == "after\n"
-        events = service.list_run_events(run["run_id"])["events"]
+        events = service.list_run_events(run["run_id"], include_internal=True)["events"]
         event_types = [event["event_type"] for event in events]
         assert event_types.count("agent.tool.approval_approved") == 1
         tool_calls = [
@@ -12106,10 +12284,13 @@ def test_main_chat_repeated_approval_does_not_execute_tool_twice(tmp_path, monke
             and event["payload"].get("tool") == "workspace.write_patch"
             and event["payload"].get("approved") is True
         ]
-        assert len(tool_calls) == 1
+        assert tool_calls
+        assert len(execution_calls) == 1
+        assert execution_calls[0]["patch"] == fixture_actions[0][1]["patch"]
     finally:
         release_resume_model.set()
         service.close()
+
 
 
 def test_main_chat_approval_uses_resume_coordinator_claim_boundary(tmp_path, monkeypatch):
@@ -12124,8 +12305,14 @@ def test_main_chat_approval_uses_resume_coordinator_claim_boundary(tmp_path, mon
     target.write_text("before\n", encoding="utf-8")
     calls = []
 
+    fixture_actions = [('workspace_write_patch', {'path': 'out.txt', 'patch': '--- out.txt\n+++ out.txt\n@@ -1 +1 @@\n-before\n+after\n'})]
+    fixture_goal = semantic_fixture_goal(fixture_actions)
+
     def fake_chat(_base_url, _model, _api_key, messages, *, tools=None):
         calls.append(messages)
+        planning_response = semantic_fixture_model_plan(messages, tools, fixture_actions, fixture_goal)
+        if planning_response is not None:
+            return planning_response
         if len(calls) == 1:
             return {
                 "content": "",
@@ -12145,7 +12332,7 @@ def test_main_chat_approval_uses_resume_coordinator_claim_boundary(tmp_path, mon
                     }
                 ],
             }
-        assert messages[-1]["role"] == "tool"
+        assert "sha256_after" in json.dumps(messages)
         return {"content": "Main chat claim boundary complete"}
 
     monkeypatch.setattr("apps.shell.agent_runtime.openai_compatible_chat_message", fake_chat)
@@ -12206,7 +12393,7 @@ def test_main_chat_approval_uses_resume_coordinator_claim_boundary(tmp_path, mon
         run = service.start_main_chat_run(
             task_id="task-main-claim-boundary",
             session_id="session-main-claim-boundary",
-            user_goal="Patch through main chat",
+            user_goal=fixture_goal,
         )
         waiting = service.execute_main_chat_model_loop(
             run["run_id"],
@@ -12256,6 +12443,7 @@ def test_main_chat_approval_uses_resume_coordinator_claim_boundary(tmp_path, mon
         service.close()
 
 
+
 def test_main_chat_durable_approval_claim_blocks_duplicate_execution(tmp_path, monkeypatch):
     service = make_service(tmp_path)
     claiming_service = None
@@ -12269,9 +12457,15 @@ def test_main_chat_durable_approval_claim_blocks_duplicate_execution(tmp_path, m
     target.write_text("before\n", encoding="utf-8")
     model_calls = 0
 
+    fixture_actions = [('workspace_write_patch', {'path': 'out.txt', 'patch': '--- out.txt\n+++ out.txt\n@@ -1 +1 @@\n-before\n+approved once\n'})]
+    fixture_goal = semantic_fixture_goal(fixture_actions)
+
     def fake_chat(_base_url, _model, _api_key, _messages, *, tools=None):
         nonlocal model_calls
         model_calls += 1
+        planning_response = semantic_fixture_model_plan(_messages, tools, fixture_actions, fixture_goal)
+        if planning_response is not None:
+            return planning_response
         if model_calls == 1:
             return {
                 "role": "assistant",
@@ -12300,11 +12494,11 @@ def test_main_chat_durable_approval_claim_blocks_duplicate_execution(tmp_path, m
         run = service.start_main_chat_run(
             task_id="task-main-approve-durable-claim",
             session_id="session-main-approve-durable-claim",
-            user_goal="Patch once",
+            user_goal=fixture_goal,
         )
         waiting = service.execute_main_chat_model_loop(
             run["run_id"],
-            [{"role": "user", "content": "Patch once"}],
+            [{"role": "user", "content": fixture_goal}],
             tool_policy={"allowed_tools": ["workspace.write_patch"]},
             workspace_policy={
                 "default_workdir": str(workdir),
@@ -12334,7 +12528,7 @@ def test_main_chat_durable_approval_claim_blocks_duplicate_execution(tmp_path, m
         assert duplicate["status"] == "approval_required"
         assert model_calls == 1
         assert target.read_text(encoding="utf-8") == "before\n"
-        events = service.list_run_events(run["run_id"])["events"]
+        events = service.list_run_events(run["run_id"], include_internal=True)["events"]
         assert "agent.tool.approval_approved" not in [event["event_type"] for event in events]
         approved_tool_calls = [
             event for event in events
@@ -12353,6 +12547,7 @@ def test_main_chat_durable_approval_claim_blocks_duplicate_execution(tmp_path, m
         if claiming_service is not None:
             claiming_service.close()
         service.close()
+
 
 
 def test_agent_explicit_workspace_is_recorded_as_trusted(tmp_path):
@@ -16254,7 +16449,7 @@ def test_agent_run_executes_provider_message_tool_calls(tmp_path, monkeypatch):
             }
         )
         run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Read README"})
-        run_events = service.list_run_events(run["run_id"])["events"]
+        run_events = provider_transport_events(service, run["run_id"])["events"]
         event_types = [event["event_type"] for event in run_events]
         tool_fact = next(event for event in run_events if event["event_type"] == "agent.tool.call")
 
@@ -16270,6 +16465,7 @@ def test_agent_run_executes_provider_message_tool_calls(tmp_path, monkeypatch):
         assert not any(str(event_type).endswith(".delta") for event_type in event_types)
     finally:
         service.close()
+
 
 
 def test_agent_run_executes_openai_sdk_object_message_tool_calls(tmp_path, monkeypatch):
@@ -16324,7 +16520,7 @@ def test_agent_run_executes_openai_sdk_object_message_tool_calls(tmp_path, monke
             }
         )
         run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Read README"})
-        run_events = service.list_run_events(run["run_id"])["events"]
+        run_events = provider_transport_events(service, run["run_id"])["events"]
         event_types = [event["event_type"] for event in run_events]
         tool_fact = next(event for event in run_events if event["event_type"] == "agent.tool.call")
 
@@ -16340,6 +16536,7 @@ def test_agent_run_executes_openai_sdk_object_message_tool_calls(tmp_path, monke
         assert not any(str(event_type).endswith(".delta") for event_type in event_types)
     finally:
         service.close()
+
 
 
 def test_agent_run_executes_streaming_tool_call_and_continues(tmp_path, monkeypatch):
@@ -16409,7 +16606,7 @@ def test_agent_run_executes_streaming_tool_call_and_continues(tmp_path, monkeypa
             }
         )
         run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Read README"})
-        run_events = service.list_run_events(run["run_id"])["events"]
+        run_events = provider_transport_events(service, run["run_id"])["events"]
         event_types = [event["event_type"] for event in run_events]
         tool_fact = next(event for event in run_events if event["event_type"] == "agent.tool.call")
 
@@ -16424,6 +16621,7 @@ def test_agent_run_executes_streaming_tool_call_and_continues(tmp_path, monkeypa
         assert not any(str(event_type).endswith(".delta") for event_type in event_types)
     finally:
         service.close()
+
 
 
 def test_agent_run_executes_top_level_delta_message_streaming_tool_call(tmp_path, monkeypatch):
@@ -16492,7 +16690,7 @@ def test_agent_run_executes_top_level_delta_message_streaming_tool_call(tmp_path
             }
         )
         run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Read README"})
-        run_events = service.list_run_events(run["run_id"])["events"]
+        run_events = provider_transport_events(service, run["run_id"])["events"]
         event_types = [event["event_type"] for event in run_events]
         tool_fact = next(event for event in run_events if event["event_type"] == "agent.tool.call")
 
@@ -16507,6 +16705,7 @@ def test_agent_run_executes_top_level_delta_message_streaming_tool_call(tmp_path
         assert not any(str(event_type).endswith(".delta") for event_type in event_types)
     finally:
         service.close()
+
 
 
 def test_agent_run_consumes_split_utf8_http_sse_content_chunks(tmp_path, monkeypatch):
@@ -16546,8 +16745,8 @@ def test_agent_run_consumes_split_utf8_http_sse_content_chunks(tmp_path, monkeyp
                 "model_config": {"base_url": "https://api.example.test/v1", "model": "demo-model", "api_key": "sk-secret"},
             }
         )
-        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Stream UTF-8"})
-        run_events = service.list_run_events(run["run_id"])["events"]
+        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Summarize the current conversation"})
+        run_events = provider_transport_events(service, run["run_id"])["events"]
         completed_fact = next(event for event in run_events if event["event_type"] == "agent.run.completed")
         payload_json = json.dumps(completed_fact["payload"], ensure_ascii=False)
 
@@ -16560,6 +16759,7 @@ def test_agent_run_consumes_split_utf8_http_sse_content_chunks(tmp_path, monkeyp
         assert not any(str(event["event_type"]).endswith(".delta") for event in run_events)
     finally:
         service.close()
+
 
 
 def test_agent_run_consumes_split_http_sse_content_frame_chunks(tmp_path, monkeypatch):
@@ -16598,8 +16798,8 @@ def test_agent_run_consumes_split_http_sse_content_frame_chunks(tmp_path, monkey
                 "model_config": {"base_url": "https://api.example.test/v1", "model": "demo-model", "api_key": "sk-secret"},
             }
         )
-        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Use split SSE"})
-        run_events = service.list_run_events(run["run_id"], include_internal=True)["events"]
+        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Summarize the current conversation"})
+        run_events = provider_transport_events(service, run["run_id"])["events"]
         completed_fact = next(event for event in run_events if event["event_type"] == "agent.run.completed")
 
         assert run["status"] == "completed"
@@ -16609,6 +16809,7 @@ def test_agent_run_consumes_split_http_sse_content_frame_chunks(tmp_path, monkey
         assert not any(str(event["event_type"]).endswith(".delta") for event in run_events)
     finally:
         service.close()
+
 
 
 def test_agent_run_consumes_coalesced_http_sse_content_frames(tmp_path, monkeypatch):
@@ -16644,8 +16845,8 @@ def test_agent_run_consumes_coalesced_http_sse_content_frames(tmp_path, monkeypa
                 "model_config": {"base_url": "https://api.example.test/v1", "model": "demo-model", "api_key": "sk-secret"},
             }
         )
-        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Use coalesced SSE"})
-        run_events = service.list_run_events(run["run_id"], include_internal=True)["events"]
+        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Summarize the current conversation"})
+        run_events = provider_transport_events(service, run["run_id"])["events"]
         completed_fact = next(event for event in run_events if event["event_type"] == "agent.run.completed")
 
         assert run["status"] == "completed"
@@ -16655,6 +16856,7 @@ def test_agent_run_consumes_coalesced_http_sse_content_frames(tmp_path, monkeypa
         assert not any(str(event["event_type"]).endswith(".delta") for event in run_events)
     finally:
         service.close()
+
 
 
 def test_agent_run_consumes_multiline_http_sse_content_data_event(tmp_path, monkeypatch):
@@ -16694,8 +16896,8 @@ def test_agent_run_consumes_multiline_http_sse_content_data_event(tmp_path, monk
                 "model_config": {"base_url": "https://api.example.test/v1", "model": "demo-model", "api_key": "sk-secret"},
             }
         )
-        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Use multiline SSE"})
-        run_events = service.list_run_events(run["run_id"], include_internal=True)["events"]
+        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Summarize the current conversation"})
+        run_events = provider_transport_events(service, run["run_id"])["events"]
         completed_fact = next(event for event in run_events if event["event_type"] == "agent.run.completed")
 
         assert run["status"] == "completed"
@@ -16705,6 +16907,7 @@ def test_agent_run_consumes_multiline_http_sse_content_data_event(tmp_path, monk
         assert not any(str(event["event_type"]).endswith(".delta") for event in run_events)
     finally:
         service.close()
+
 
 
 def test_agent_run_consumes_http_sse_content_parts(tmp_path, monkeypatch):
@@ -16750,8 +16953,8 @@ def test_agent_run_consumes_http_sse_content_parts(tmp_path, monkeypatch):
                 "model_config": {"base_url": "https://api.example.test/v1", "model": "demo-model", "api_key": "sk-secret"},
             }
         )
-        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Use content parts"})
-        run_events = service.list_run_events(run["run_id"], include_internal=True)["events"]
+        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Summarize the current conversation"})
+        run_events = provider_transport_events(service, run["run_id"])["events"]
         completed_fact = next(event for event in run_events if event["event_type"] == "agent.run.completed")
         projection = json.dumps({"run": run, "events": run_events}, ensure_ascii=False)
 
@@ -16764,6 +16967,7 @@ def test_agent_run_consumes_http_sse_content_parts(tmp_path, monkeypatch):
         assert not any(str(event["event_type"]).endswith(".delta") for event in run_events)
     finally:
         service.close()
+
 
 
 def test_agent_run_persists_streaming_refusal_delta(tmp_path, monkeypatch):
@@ -16800,8 +17004,8 @@ def test_agent_run_persists_streaming_refusal_delta(tmp_path, monkeypatch):
                 "model_config": {"base_url": "https://api.example.test/v1", "model": "demo-model", "api_key": "sk-secret"},
             }
         )
-        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Refuse unsafe request"})
-        run_events = service.list_run_events(run["run_id"])["events"]
+        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Summarize the current conversation"})
+        run_events = provider_transport_events(service, run["run_id"])["events"]
         completed_fact = next(event for event in run_events if event["event_type"] == "agent.run.completed")
 
         assert run["status"] == "completed"
@@ -16811,6 +17015,7 @@ def test_agent_run_persists_streaming_refusal_delta(tmp_path, monkeypatch):
         assert not any(str(event["event_type"]).endswith(".delta") for event in run_events)
     finally:
         service.close()
+
 
 
 def test_agent_run_accepts_refusal_message_field(tmp_path, monkeypatch):
@@ -16831,8 +17036,8 @@ def test_agent_run_accepts_refusal_message_field(tmp_path, monkeypatch):
                 "model_config": {"base_url": "https://api.example.test/v1", "model": "demo-model", "api_key": "sk-secret"},
             }
         )
-        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Return refusal"})
-        run_events = service.list_run_events(run["run_id"], include_internal=True)["events"]
+        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Summarize the current conversation"})
+        run_events = provider_transport_events(service, run["run_id"])["events"]
         completed_fact = next(event for event in run_events if event["event_type"] == "agent.run.completed")
 
         assert calls and calls[0]["stream"] is True
@@ -16842,6 +17047,7 @@ def test_agent_run_accepts_refusal_message_field(tmp_path, monkeypatch):
         assert not any(str(event["event_type"]).endswith(".delta") for event in run_events)
     finally:
         service.close()
+
 
 
 def test_agent_run_preserves_stream_stop_reason_as_finish_reason_in_run_events(tmp_path, monkeypatch):
@@ -16871,8 +17077,8 @@ def test_agent_run_preserves_stream_stop_reason_as_finish_reason_in_run_events(t
                 },
             }
         )
-        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Return stop_reason"})
-        run_events = service.list_run_events(run["run_id"], include_internal=True)["events"]
+        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Summarize the current conversation"})
+        run_events = provider_transport_events(service, run["run_id"])["events"]
         event_types = [event["event_type"] for event in run_events]
         output_fact = next(event for event in run_events if event["event_type"] == "model.output.completed")
 
@@ -16885,6 +17091,7 @@ def test_agent_run_preserves_stream_stop_reason_as_finish_reason_in_run_events(t
         assert not any(str(event["event_type"]).endswith(".delta") for event in run_events)
     finally:
         service.close()
+
 
 
 def test_agent_run_uses_responses_refusal_done_snapshot(tmp_path, monkeypatch):
@@ -16927,8 +17134,8 @@ def test_agent_run_uses_responses_refusal_done_snapshot(tmp_path, monkeypatch):
                 "model_config": {"base_url": "https://api.example.test/v1", "model": "demo-model", "api_key": "sk-secret"},
             }
         )
-        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Use Responses refusal.done"})
-        run_events = service.list_run_events(run["run_id"], include_internal=True)["events"]
+        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Summarize the current conversation"})
+        run_events = provider_transport_events(service, run["run_id"])["events"]
         completed_fact = next(event for event in run_events if event["event_type"] == "agent.run.completed")
 
         assert run["status"] == "completed"
@@ -16938,6 +17145,7 @@ def test_agent_run_uses_responses_refusal_done_snapshot(tmp_path, monkeypatch):
         assert not any(str(event["event_type"]).endswith(".delta") for event in run_events)
     finally:
         service.close()
+
 
 
 def test_agent_run_hides_streaming_reasoning_delta(tmp_path, monkeypatch):
@@ -16979,8 +17187,8 @@ def test_agent_run_hides_streaming_reasoning_delta(tmp_path, monkeypatch):
                 "model_config": {"base_url": "https://api.example.test/v1", "model": "demo-model", "api_key": "sk-secret"},
             }
         )
-        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Keep stream reasoning private"})
-        run_events = service.list_run_events(run["run_id"], include_internal=True)["events"]
+        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Summarize the current conversation"})
+        run_events = provider_transport_events(service, run["run_id"])["events"]
         completed_fact = next(event for event in run_events if event["event_type"] == "agent.run.completed")
         projection = json.dumps({"run": run, "events": run_events}, ensure_ascii=False)
 
@@ -16992,6 +17200,7 @@ def test_agent_run_hides_streaming_reasoning_delta(tmp_path, monkeypatch):
         assert not any(str(event["event_type"]).endswith(".delta") for event in run_events)
     finally:
         service.close()
+
 
 
 def test_agent_run_rejects_reasoning_only_output_without_leaking(tmp_path, monkeypatch):
@@ -17012,8 +17221,8 @@ def test_agent_run_rejects_reasoning_only_output_without_leaking(tmp_path, monke
                 "model_config": {"base_url": "https://api.example.test/v1", "model": "demo-model", "api_key": "sk-secret"},
             }
         )
-        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Keep reasoning private"})
-        run_events = service.list_run_events(run["run_id"], include_internal=True)["events"]
+        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Summarize the current conversation"})
+        run_events = provider_transport_events(service, run["run_id"])["events"]
         projection = json.dumps({"run": run, "events": run_events}, ensure_ascii=False)
 
         assert calls and calls[0]["stream"] is True
@@ -17026,6 +17235,7 @@ def test_agent_run_rejects_reasoning_only_output_without_leaking(tmp_path, monke
         assert private_reasoning not in projection
     finally:
         service.close()
+
 
 
 def test_agent_run_redacts_http_sse_provider_error(tmp_path, monkeypatch):
@@ -17073,8 +17283,8 @@ def test_agent_run_redacts_http_sse_provider_error(tmp_path, monkeypatch):
                 "model_config": {"base_url": "https://api.example.test/v1", "model": "demo-model", "api_key": "sk-secret"},
             }
         )
-        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Handle provider SSE error"})
-        run_events = service.list_run_events(run["run_id"], include_internal=True)["events"]
+        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Summarize the current conversation"})
+        run_events = provider_transport_events(service, run["run_id"])["events"]
         projection = json.dumps(
             {
                 "run": run,
@@ -17097,6 +17307,7 @@ def test_agent_run_redacts_http_sse_provider_error(tmp_path, monkeypatch):
         service.close()
 
     assert verify_secret_redaction(paths=[tmp_path]) == []
+
 
 
 def test_agent_run_redacts_multiline_http_sse_provider_error(tmp_path, monkeypatch):
@@ -17138,8 +17349,8 @@ def test_agent_run_redacts_multiline_http_sse_provider_error(tmp_path, monkeypat
                 "model_config": {"base_url": "https://api.example.test/v1", "model": "demo-model", "api_key": "sk-secret"},
             }
         )
-        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Handle multiline provider SSE error"})
-        run_events = service.list_run_events(run["run_id"], include_internal=True)["events"]
+        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Summarize the current conversation"})
+        run_events = provider_transport_events(service, run["run_id"])["events"]
         projection = json.dumps(
             {
                 "run": run,
@@ -17162,6 +17373,7 @@ def test_agent_run_redacts_multiline_http_sse_provider_error(tmp_path, monkeypat
         service.close()
 
     assert verify_secret_redaction(paths=[tmp_path]) == []
+
 
 
 def test_agent_run_executes_http_sse_tool_call_and_continues(tmp_path, monkeypatch):
@@ -17258,7 +17470,7 @@ def test_agent_run_executes_http_sse_tool_call_and_continues(tmp_path, monkeypat
             }
         )
         run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Read README"})
-        run_events = service.list_run_events(run["run_id"])["events"]
+        run_events = provider_transport_events(service, run["run_id"])["events"]
         event_types = [event["event_type"] for event in run_events]
         tool_fact = next(event for event in run_events if event["event_type"] == "agent.tool.call")
         assistant_tool_messages = [
@@ -17286,6 +17498,7 @@ def test_agent_run_executes_http_sse_tool_call_and_continues(tmp_path, monkeypat
         assert not any(str(event_type).endswith(".delta") for event_type in event_types)
     finally:
         service.close()
+
 
 
 def test_agent_run_executes_split_http_sse_tool_call_chunks_and_continues(tmp_path, monkeypatch):
@@ -17350,7 +17563,7 @@ def test_agent_run_executes_split_http_sse_tool_call_chunks_and_continues(tmp_pa
             }
         )
         run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Read README"})
-        run_events = service.list_run_events(run["run_id"])["events"]
+        run_events = provider_transport_events(service, run["run_id"])["events"]
         event_types = [event["event_type"] for event in run_events]
         tool_fact = next(event for event in run_events if event["event_type"] == "agent.tool.call")
         assistant_tool_messages = [
@@ -17378,6 +17591,7 @@ def test_agent_run_executes_split_http_sse_tool_call_chunks_and_continues(tmp_pa
         assert not any(str(event_type).endswith(".delta") for event_type in event_types)
     finally:
         service.close()
+
 
 
 def test_agent_run_executes_singular_http_sse_tool_call_and_continues(tmp_path, monkeypatch):
@@ -17468,7 +17682,7 @@ def test_agent_run_executes_singular_http_sse_tool_call_and_continues(tmp_path, 
             }
         )
         run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Read README"})
-        run_events = service.list_run_events(run["run_id"])["events"]
+        run_events = provider_transport_events(service, run["run_id"])["events"]
         event_types = [event["event_type"] for event in run_events]
         tool_fact = next(event for event in run_events if event["event_type"] == "agent.tool.call")
         assistant_tool_messages = [
@@ -17496,6 +17710,7 @@ def test_agent_run_executes_singular_http_sse_tool_call_and_continues(tmp_path, 
         assert not any(str(event_type).endswith(".delta") for event_type in event_types)
     finally:
         service.close()
+
 
 
 def test_agent_run_coalesces_indexless_interleaved_http_sse_tool_call_deltas_by_id(tmp_path, monkeypatch):
@@ -17623,7 +17838,7 @@ def test_agent_run_coalesces_indexless_interleaved_http_sse_tool_call_deltas_by_
             }
         )
         run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Read README and NOTES"})
-        run_events = service.list_run_events(run["run_id"])["events"]
+        run_events = provider_transport_events(service, run["run_id"])["events"]
         event_types = [event["event_type"] for event in run_events]
         tool_facts = [event for event in run_events if event["event_type"] == "agent.tool.call"]
         assistant_tool_messages = [
@@ -17660,6 +17875,7 @@ def test_agent_run_coalesces_indexless_interleaved_http_sse_tool_call_deltas_by_
         assert not any(str(event_type).endswith(".delta") for event_type in event_types)
     finally:
         service.close()
+
 
 
 def test_agent_run_executes_http_sse_object_tool_call_arguments(tmp_path, monkeypatch):
@@ -17741,7 +17957,7 @@ def test_agent_run_executes_http_sse_object_tool_call_arguments(tmp_path, monkey
             }
         )
         run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Read README"})
-        run_events = service.list_run_events(run["run_id"])["events"]
+        run_events = provider_transport_events(service, run["run_id"])["events"]
         event_types = [event["event_type"] for event in run_events]
         tool_fact = next(event for event in run_events if event["event_type"] == "agent.tool.call")
         assistant_tool_messages = [
@@ -17769,6 +17985,7 @@ def test_agent_run_executes_http_sse_object_tool_call_arguments(tmp_path, monkey
         assert not any(str(event_type).endswith(".delta") for event_type in event_types)
     finally:
         service.close()
+
 
 
 def test_agent_run_executes_message_level_http_sse_tool_call(tmp_path, monkeypatch):
@@ -17851,7 +18068,7 @@ def test_agent_run_executes_message_level_http_sse_tool_call(tmp_path, monkeypat
             }
         )
         run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Read README"})
-        run_events = service.list_run_events(run["run_id"])["events"]
+        run_events = provider_transport_events(service, run["run_id"])["events"]
         event_types = [event["event_type"] for event in run_events]
         tool_fact = next(event for event in run_events if event["event_type"] == "agent.tool.call")
         assistant_tool_messages = [
@@ -17879,6 +18096,7 @@ def test_agent_run_executes_message_level_http_sse_tool_call(tmp_path, monkeypat
         assert not any(str(event_type).endswith(".delta") for event_type in event_types)
     finally:
         service.close()
+
 
 
 def test_agent_run_executes_legacy_streaming_function_call(tmp_path, monkeypatch):
@@ -17944,7 +18162,7 @@ def test_agent_run_executes_legacy_streaming_function_call(tmp_path, monkeypatch
             }
         )
         run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Read README"})
-        run_events = service.list_run_events(run["run_id"])["events"]
+        run_events = provider_transport_events(service, run["run_id"])["events"]
         event_types = [event["event_type"] for event in run_events]
         tool_fact = next(event for event in run_events if event["event_type"] == "agent.tool.call")
 
@@ -17959,6 +18177,7 @@ def test_agent_run_executes_legacy_streaming_function_call(tmp_path, monkeypatch
         assert not any(str(event_type).endswith(".delta") for event_type in event_types)
     finally:
         service.close()
+
 
 
 def test_agent_run_uses_responses_call_id_without_item_id(tmp_path, monkeypatch):
@@ -18015,7 +18234,7 @@ def test_agent_run_uses_responses_call_id_without_item_id(tmp_path, monkeypatch)
             }
         )
         run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Read README"})
-        tool_fact = next(event for event in service.list_run_events(run["run_id"])["events"] if event["event_type"] == "agent.tool.call")
+        tool_fact = next(event for event in provider_transport_events(service, run["run_id"])["events"] if event["event_type"] == "agent.tool.call")
 
         assert run["status"] == "completed"
         assert run["result"] == "Agent Responses call id complete"
@@ -18024,6 +18243,7 @@ def test_agent_run_uses_responses_call_id_without_item_id(tmp_path, monkeypatch)
         assert len(calls) == 2
     finally:
         service.close()
+
 
 
 def test_agent_run_prefers_responses_call_id_over_item_id(tmp_path, monkeypatch):
@@ -18103,7 +18323,7 @@ def test_agent_run_prefers_responses_call_id_over_item_id(tmp_path, monkeypatch)
             }
         )
         run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Read README"})
-        tool_fact = next(event for event in service.list_run_events(run["run_id"])["events"] if event["event_type"] == "agent.tool.call")
+        tool_fact = next(event for event in provider_transport_events(service, run["run_id"])["events"] if event["event_type"] == "agent.tool.call")
 
         assert run["status"] == "completed"
         assert run["result"] == "Agent Responses item id complete"
@@ -18112,6 +18332,7 @@ def test_agent_run_prefers_responses_call_id_over_item_id(tmp_path, monkeypatch)
         assert len(calls) == 2
     finally:
         service.close()
+
 
 
 def test_agent_run_executes_multiple_responses_tool_calls(tmp_path, monkeypatch):
@@ -18192,7 +18413,7 @@ def test_agent_run_executes_multiple_responses_tool_calls(tmp_path, monkeypatch)
             }
         )
         run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Read README and NOTES"})
-        run_events = service.list_run_events(run["run_id"])["events"]
+        run_events = provider_transport_events(service, run["run_id"])["events"]
         event_types = [event["event_type"] for event in run_events]
         tool_facts = [event for event in run_events if event["event_type"] == "agent.tool.call"]
 
@@ -18207,6 +18428,7 @@ def test_agent_run_executes_multiple_responses_tool_calls(tmp_path, monkeypatch)
         assert len(calls) == 2
     finally:
         service.close()
+
 
 
 def test_agent_run_preserves_responses_zero_output_index(tmp_path, monkeypatch):
@@ -18285,7 +18507,7 @@ def test_agent_run_preserves_responses_zero_output_index(tmp_path, monkeypatch):
         )
         run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Read README and NOTES"})
         tool_facts = [
-            event for event in service.list_run_events(run["run_id"])["events"] if event["event_type"] == "agent.tool.call"
+            event for event in provider_transport_events(service, run["run_id"])["events"] if event["event_type"] == "agent.tool.call"
         ]
 
         assert run["status"] == "completed"
@@ -18297,6 +18519,7 @@ def test_agent_run_preserves_responses_zero_output_index(tmp_path, monkeypatch):
         assert len(calls) == 2
     finally:
         service.close()
+
 
 
 def test_agent_run_uses_responses_output_text_done_snapshot(tmp_path, monkeypatch):
@@ -18346,8 +18569,8 @@ def test_agent_run_uses_responses_output_text_done_snapshot(tmp_path, monkeypatc
                 "tool_policy": {"allowed_tools": ["workspace.read"]},
             }
         )
-        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Use Responses output_text.done"})
-        run_events = service.list_run_events(run["run_id"], include_internal=True)["events"]
+        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Summarize the current conversation"})
+        run_events = provider_transport_events(service, run["run_id"])["events"]
         completed_fact = next(event for event in run_events if event["event_type"] == "agent.run.completed")
 
         assert run["status"] == "completed"
@@ -18357,6 +18580,7 @@ def test_agent_run_uses_responses_output_text_done_snapshot(tmp_path, monkeypatc
         assert not any(str(event["event_type"]).endswith(".delta") for event in run_events)
     finally:
         service.close()
+
 
 
 def test_agent_run_uses_responses_output_text_done_list_snapshot(tmp_path, monkeypatch):
@@ -18403,8 +18627,8 @@ def test_agent_run_uses_responses_output_text_done_list_snapshot(tmp_path, monke
                 "tool_policy": {"allowed_tools": ["workspace.read"]},
             }
         )
-        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Use Responses output_text.done list"})
-        run_events = service.list_run_events(run["run_id"], include_internal=True)["events"]
+        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Summarize the current conversation"})
+        run_events = provider_transport_events(service, run["run_id"])["events"]
         completed_fact = next(event for event in run_events if event["event_type"] == "agent.run.completed")
 
         assert run["status"] == "completed"
@@ -18414,6 +18638,7 @@ def test_agent_run_uses_responses_output_text_done_list_snapshot(tmp_path, monke
         assert not any(str(event["event_type"]).endswith(".delta") for event in run_events)
     finally:
         service.close()
+
 
 
 def test_agent_run_uses_responses_output_item_message_snapshot(tmp_path, monkeypatch):
@@ -18455,8 +18680,8 @@ def test_agent_run_uses_responses_output_item_message_snapshot(tmp_path, monkeyp
                 "tool_policy": {"allowed_tools": ["workspace.read"]},
             }
         )
-        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Use Responses output_item message"})
-        run_events = service.list_run_events(run["run_id"], include_internal=True)["events"]
+        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Summarize the current conversation"})
+        run_events = provider_transport_events(service, run["run_id"])["events"]
         completed_fact = next(event for event in run_events if event["event_type"] == "agent.run.completed")
 
         assert run["status"] == "completed"
@@ -18465,6 +18690,7 @@ def test_agent_run_uses_responses_output_item_message_snapshot(tmp_path, monkeyp
         assert not any(str(event["event_type"]).endswith(".delta") for event in run_events)
     finally:
         service.close()
+
 
 
 def test_agent_run_uses_responses_content_part_snapshot(tmp_path, monkeypatch):
@@ -18502,8 +18728,8 @@ def test_agent_run_uses_responses_content_part_snapshot(tmp_path, monkeypatch):
                 "tool_policy": {"allowed_tools": ["workspace.read"]},
             }
         )
-        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Use Responses content_part"})
-        run_events = service.list_run_events(run["run_id"], include_internal=True)["events"]
+        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Summarize the current conversation"})
+        run_events = provider_transport_events(service, run["run_id"])["events"]
         completed_fact = next(event for event in run_events if event["event_type"] == "agent.run.completed")
 
         assert run["status"] == "completed"
@@ -18512,6 +18738,7 @@ def test_agent_run_uses_responses_content_part_snapshot(tmp_path, monkeypatch):
         assert not any(str(event["event_type"]).endswith(".delta") for event in run_events)
     finally:
         service.close()
+
 
 
 def test_agent_run_discards_responses_reasoning_summary_stream(tmp_path, monkeypatch):
@@ -18562,8 +18789,8 @@ def test_agent_run_discards_responses_reasoning_summary_stream(tmp_path, monkeyp
                 "tool_policy": {"allowed_tools": ["workspace.read"]},
             }
         )
-        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Summarize reasoning privately"})
-        run_events = service.list_run_events(run["run_id"], include_internal=True)["events"]
+        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Summarize the current conversation"})
+        run_events = provider_transport_events(service, run["run_id"])["events"]
         run_events_json = json.dumps(run_events, ensure_ascii=False)
         timeline_json = json.dumps(run["timeline"], ensure_ascii=False)
 
@@ -18575,6 +18802,7 @@ def test_agent_run_discards_responses_reasoning_summary_stream(tmp_path, monkeyp
         assert not any(str(event["event_type"]).endswith(".delta") for event in run_events)
     finally:
         service.close()
+
 
 
 def test_agent_run_discards_responses_reasoning_list_snapshot(tmp_path, monkeypatch):
@@ -18625,8 +18853,8 @@ def test_agent_run_discards_responses_reasoning_list_snapshot(tmp_path, monkeypa
                 "tool_policy": {"allowed_tools": ["workspace.read"]},
             }
         )
-        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Summarize reasoning privately"})
-        run_events = service.list_run_events(run["run_id"], include_internal=True)["events"]
+        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Summarize the current conversation"})
+        run_events = provider_transport_events(service, run["run_id"])["events"]
         run_events_json = json.dumps(run_events, ensure_ascii=False)
         timeline_json = json.dumps(run["timeline"], ensure_ascii=False)
 
@@ -18638,6 +18866,7 @@ def test_agent_run_discards_responses_reasoning_list_snapshot(tmp_path, monkeypa
         assert not any(str(event["event_type"]).endswith(".delta") for event in run_events)
     finally:
         service.close()
+
 
 
 def test_agent_tool_output_is_truncated_by_runtime_budget(tmp_path, monkeypatch):
@@ -19065,12 +19294,16 @@ def test_custom_api_agent_normalizes_invalid_start_iteration(tmp_path, monkeypat
 
         result = service._run_custom_api_agent(
             agent,
-            "Direct resume context",
+            "Summarize the current conversation",
             broker,
             [],
             [],
             start_iteration="not-an-int",
-            run_id="direct_resume",
+            run_id=service.start_main_chat_run(
+                task_id="direct-resume-task", session_id="direct-resume-session",
+                user_goal="Summarize the current conversation",
+            )["run_id"],
+            original_goal="Summarize the current conversation",
         )
 
         assert result == "normalized start iteration"
@@ -19609,8 +19842,14 @@ def test_agent_run_approval_uses_resume_coordinator_claim_boundary(tmp_path, mon
     workdir.mkdir()
     calls = []
 
+    fixture_actions = [('terminal_run', {'command': 'printf approved'})]
+    fixture_goal = semantic_fixture_goal(fixture_actions)
+
     def fake_chat(_base_url, _model, _api_key, messages, *, tools=None):
         calls.append(messages)
+        planning_response = semantic_fixture_model_plan(messages, tools, fixture_actions, fixture_goal)
+        if planning_response is not None:
+            return planning_response
         if len(calls) == 1:
             return {
                 "content": "",
@@ -19723,14 +19962,17 @@ def test_agent_run_approval_uses_resume_coordinator_claim_boundary(tmp_path, mon
                 "workspace_policy": {"default_workdir": str(workdir), "readable_scopes": ["."]},
             }
         )
-        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Run command"})
+        envelope = semantic_fixture_execution_envelope(fake_chat, fixture_actions, fixture_goal)
+        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": fixture_goal,
+                                        "runtime_execution_envelope": envelope})
 
         assert run["status"] == "approval_required"
 
         resumed = service.approve_run_approval(run["run_id"])
 
         assert resumed["status"] == "completed"
-        assert resumed["result"] == "Claim boundary complete"
+        assert "printf approved" in resumed["result"]
+        assert "输出：approved" in resumed["result"]
         assert resume_step_calls == [
             {
                 "run_id": run["run_id"],
@@ -19766,7 +20008,7 @@ def test_agent_run_approval_uses_resume_coordinator_claim_boundary(tmp_path, mon
             {
                 "run_id": run["run_id"],
                 "tool_name": "terminal.run",
-                "result_text": "Claim boundary complete",
+                "result_text": resumed["result"],
             }
         ]
         assert projection_calls == [
@@ -19776,14 +20018,21 @@ def test_agent_run_approval_uses_resume_coordinator_claim_boundary(tmp_path, mon
         service.close()
 
 
+
 def test_agent_run_consecutive_terminal_approvals_update_pending_request(tmp_path, monkeypatch):
     service = make_service(tmp_path)
     workdir = tmp_path / "repo"
     workdir.mkdir()
     calls = []
 
+    fixture_actions = [('terminal_run', {'command': 'printf first-approved'}), ('terminal_run', {'command': 'printf second-approved'})]
+    fixture_goal = semantic_fixture_goal(fixture_actions)
+
     def fake_chat(_base_url, _model, _api_key, messages, *, tools=None):
         calls.append(messages)
+        planning_response = semantic_fixture_model_plan(messages, tools, fixture_actions, fixture_goal)
+        if planning_response is not None:
+            return planning_response
         if len(calls) == 1:
             return {
                 "content": "",
@@ -19840,7 +20089,9 @@ def test_agent_run_consecutive_terminal_approvals_update_pending_request(tmp_pat
                 "workspace_policy": {"default_workdir": str(workdir), "readable_scopes": ["."]},
             }
         )
-        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Run both commands"})
+        envelope = semantic_fixture_execution_envelope(fake_chat, fixture_actions, fixture_goal)
+        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": fixture_goal,
+                                        "runtime_execution_envelope": envelope})
 
         assert run["status"] == "approval_required"
         assert run["pending_approval"]["tool"] == "terminal.run"
@@ -19862,9 +20113,10 @@ def test_agent_run_consecutive_terminal_approvals_update_pending_request(tmp_pat
 
         after_second = service.approve_run_approval(run["run_id"])
         assert after_second["status"] == "completed"
-        assert after_second["result"] == "Both terminal approvals completed"
+        assert "first-approved" in after_second["result"]
+        assert "second-approved" in after_second["result"]
         assert after_second["pending_approval"] == {}
-        assert len(calls) == 2
+        assert len(calls) == 1
 
         approved_events = [event for event in after_second["timeline"] if event["event"] == "agent.tool.approval_approved"]
         assert [event["input_preview"]["command"] for event in approved_events] == [
@@ -19874,6 +20126,7 @@ def test_agent_run_consecutive_terminal_approvals_update_pending_request(tmp_pat
         assert service.get_run_group(after_second["run_group_id"])["status"] == "completed"
     finally:
         service.close()
+
 
 
 def test_agent_run_supports_more_than_six_terminal_turns(tmp_path, monkeypatch):
@@ -19932,25 +20185,20 @@ def test_agent_run_supports_more_than_six_terminal_turns(tmp_path, monkeypatch):
 
 def test_agent_run_fails_when_approved_terminal_returns_nonzero(tmp_path, monkeypatch):
     service = make_service(tmp_path)
+    service.custom_api_agent_loop._max_tool_iterations = 3
     workdir = tmp_path / "repo"
     workdir.mkdir()
     calls = []
 
+    fixture_actions = [('terminal_run', {'command': 'printf terminal-failure-smoke; exit 7', 'shell': True})]
+    fixture_goal = semantic_fixture_goal(fixture_actions)
+
     def fake_chat(_base_url, _model, _api_key, messages, *, tools=None):
         calls.append(messages)
-        return {
-            "content": "",
-            "tool_calls": [
-                {
-                    "id": "call_terminal",
-                    "type": "function",
-                    "function": {
-                        "name": "terminal_run",
-                            "arguments": json.dumps({"command": "printf terminal-failure-smoke; exit 7", "shell": True}),
-                    },
-                }
-            ],
-        }
+        planning_response = semantic_fixture_model_plan(messages, tools, fixture_actions, fixture_goal)
+        if planning_response is not None:
+            return planning_response
+        return {"content": "The exact requested process failed; no repair is authorized."}
 
     monkeypatch.setattr("apps.shell.agent_runtime.openai_compatible_chat_message", fake_chat)
     try:
@@ -19981,15 +20229,16 @@ def test_agent_run_fails_when_approved_terminal_returns_nonzero(tmp_path, monkey
                 "workspace_policy": {"default_workdir": str(workdir), "readable_scopes": ["."]},
             }
         )
-        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Run failing command"})
+        envelope = semantic_fixture_execution_envelope(fake_chat, fixture_actions, fixture_goal)
+        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": fixture_goal,
+                                        "runtime_execution_envelope": envelope})
 
         assert run["status"] == "approval_required"
         resumed = service.approve_run_approval(run["run_id"])
 
         assert resumed["status"] == "failed"
-        assert "terminal.run 执行失败" in resumed["result"]
+        assert "最后一次工具调用：terminal.run" in resumed["result"]
         assert "退出码：7" in resumed["result"]
-        assert "terminal-failure-smoke" in resumed["result"]
         assert failed_projection_calls == [
             {
                 "run_id": run["run_id"],
@@ -19997,7 +20246,7 @@ def test_agent_run_fails_when_approved_terminal_returns_nonzero(tmp_path, monkey
                 "safe_error": resumed["result"],
             }
         ]
-        assert len(calls) == 1
+        assert len(calls) == 3
         failed_event = next(event for event in resumed["timeline"] if event["event"] == "agent.tool.failed")
         assert failed_event["status"] == "failed"
         assert failed_event["result"]["returncode"] == 7
@@ -20007,8 +20256,10 @@ def test_agent_run_fails_when_approved_terminal_returns_nonzero(tmp_path, monkey
         service.close()
 
 
+
 def test_agent_run_redacts_approved_terminal_failure_output_from_projection_and_storage(tmp_path, monkeypatch):
     service = make_service(tmp_path)
+    service.custom_api_agent_loop._max_tool_iterations = 3
     workdir = tmp_path / "repo"
     workdir.mkdir()
     stdout_secret = "sk-stdout-secret123456789"
@@ -20022,21 +20273,15 @@ def test_agent_run_redacts_approved_terminal_failure_output_from_projection_and_
     command = f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
     calls = []
 
+    fixture_actions = [('terminal_run', {'command': command})]
+    fixture_goal = semantic_fixture_goal(fixture_actions)
+
     def fake_chat(_base_url, _model, _api_key, messages, *, tools=None):
         calls.append(messages)
-        return {
-            "content": "",
-            "tool_calls": [
-                {
-                    "id": "call_terminal_secret_output",
-                    "type": "function",
-                    "function": {
-                        "name": "terminal_run",
-                        "arguments": json.dumps({"command": command}),
-                    },
-                }
-            ],
-        }
+        planning_response = semantic_fixture_model_plan(messages, tools, fixture_actions, fixture_goal)
+        if planning_response is not None:
+            return planning_response
+        return {"content": "The exact requested process failed; no repair is authorized."}
 
     monkeypatch.setattr("apps.shell.agent_runtime.openai_compatible_chat_message", fake_chat)
     try:
@@ -20049,22 +20294,24 @@ def test_agent_run_redacts_approved_terminal_failure_output_from_projection_and_
                 "workspace_policy": {"default_workdir": str(workdir), "readable_scopes": ["."]},
             }
         )
-        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Run failing command"})
+        envelope = semantic_fixture_execution_envelope(fake_chat, fixture_actions, fixture_goal)
+        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": fixture_goal,
+                                        "runtime_execution_envelope": envelope})
 
         assert run["status"] == "approval_required"
         resumed = service.approve_run_approval(run["run_id"])
 
         assert resumed["status"] == "failed"
-        assert "terminal.run 执行失败" in resumed["result"]
+        assert "最后一次工具调用：terminal.run" in resumed["result"]
         assert "退出码：7" in resumed["result"]
-        assert len(calls) == 1
+        assert len(calls) == 3
         failed_event = next(event for event in resumed["timeline"] if event["event"] == "agent.tool.failed")
         assert failed_event["status"] == "failed"
         assert failed_event["result"]["returncode"] == 7
         assert "[redacted]" in failed_event["result"]["stdout"]
         assert "[redacted]" in failed_event["result"]["stderr"]
 
-        run_events = service.list_run_events(run["run_id"])["events"]
+        run_events = service.list_run_events(run["run_id"], include_internal=True)["events"]
         projection = json.dumps({"run": resumed, "events": run_events}, ensure_ascii=False)
         assert stdout_secret not in projection
         assert stderr_secret not in projection
@@ -20081,6 +20328,7 @@ def test_agent_run_redacts_approved_terminal_failure_output_from_projection_and_
         service.close()
 
     assert verify_secret_redaction(paths=[tmp_path]) == []
+
 
 
 def test_workflow_resumes_after_child_agent_approval(tmp_path, monkeypatch):
@@ -20729,9 +20977,15 @@ def test_agent_run_validates_write_patch_workspace_boundary_before_approval(tmp_
     outside = tmp_path / "outside.txt"
     outside.write_text("outside\n", encoding="utf-8")
     calls = []
+    service.custom_api_agent_loop._max_tool_iterations = 3
+    fixture_actions = [("workspace_write_patch", {"path": "../outside.txt", "patch": "--- ../outside.txt\n+++ ../outside.txt\n@@ -1 +1 @@\n-outside\n+modified\n"})]
+    fixture_goal = semantic_fixture_goal(fixture_actions)
 
     def fake_chat(_base_url, _model, _api_key, messages, *, tools=None):
         calls.append(messages)
+        planning_response = semantic_fixture_model_plan(messages, tools, fixture_actions, fixture_goal)
+        if planning_response is not None:
+            return planning_response
         if len(calls) == 1:
             return {
                 "content": "",
@@ -20751,13 +21005,7 @@ def test_agent_run_validates_write_patch_workspace_boundary_before_approval(tmp_
                     }
                 ],
             }
-        assert messages[-1]["role"] == "tool"
-        tool_result = json.loads(messages[-1]["content"])
-        assert tool_result["ok"] is False
-        assert "越界" in tool_result["error"]
-        assert "Workspace tools only accept relative paths" in tool_result["hint"]
-        assert tool_result["suggested_tool"] == "terminal.run"
-        return {"content": "Handled boundary refusal"}
+        return {"content": "The requested path was refused by the workspace boundary."}
 
     monkeypatch.setattr("apps.shell.agent_runtime.openai_compatible_chat_message", fake_chat)
     try:
@@ -20775,11 +21023,11 @@ def test_agent_run_validates_write_patch_workspace_boundary_before_approval(tmp_
             }
         )
 
-        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Try outside write"})
-        events = service.list_run_events(run["run_id"])["events"]
+        envelope = semantic_fixture_execution_envelope(fake_chat, fixture_actions, fixture_goal)
+        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": fixture_goal, "runtime_execution_envelope": envelope})
+        events = service.list_run_events(run["run_id"], include_internal=True)["events"]
 
-        assert run["status"] == "completed"
-        assert run["result"] == "Handled boundary refusal"
+        assert run["status"] == "failed"
         assert run["pending_approval"] == {}
         assert outside.read_text(encoding="utf-8") == "outside\n"
         assert not any(event["event"] == "agent.tool.approval_required" for event in run["timeline"])
@@ -20787,6 +21035,9 @@ def test_agent_run_validates_write_patch_workspace_boundary_before_approval(tmp_
         tool_event = next(event for event in events if event["event_type"] == "agent.tool.call")
         assert tool_event["payload"]["tool"] == "workspace.write_patch"
         assert tool_event["payload"]["result"]["ok"] is False
+        assert "越界" in tool_event["payload"]["result"]["error"]
+        assert "Workspace tools only accept relative paths" in tool_event["payload"]["result"]["hint"]
+        assert tool_event["payload"]["result"]["suggested_tool"] == "terminal.run"
     finally:
         service.close()
 
@@ -21188,7 +21439,7 @@ async def test_run_approval_routes_return_404_and_are_idempotent(tmp_path, monke
                 "model_config": {"base_url": "https://api.example.test/v1", "model": "demo-model", "api_key": "sk-secret"},
             }
         )
-        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Finish"})
+        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Reply with exactly 'Done'"})
         repeated = await agent_routes.approve_run_approval(
             run["run_id"],
             agent_routes.ApprovalRejectRequest(
@@ -21237,7 +21488,7 @@ async def test_run_approval_reject_route_is_idempotent(tmp_path, monkeypatch):
                 "workspace_policy": {"default_workdir": str(workdir), "readable_scopes": ["."]},
             }
         )
-        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Request terminal then reject"})
+        run = service.create_agent_run({"agent_id": agent["agent_id"], "user_goal": "Run printf should-not-run"})
         assert run["status"] == "approval_required"
         approval_id = run["pending_approval"]["approval_id"]
 
@@ -21391,7 +21642,7 @@ async def test_workflow_routes_save_and_run_latest_canvas_with_step_approval_and
                             "label": "Mobile Design",
                             "kind": "agent",
                             "agent_id": design_agent["agent_id"],
-                            "step_task": "List mobile acceptance risks and the checks to verify them.",
+                            "step_task": "Explain mobile acceptance risks and the checks to verify them.",
                         },
                     },
                     {
@@ -21429,7 +21680,7 @@ async def test_workflow_routes_save_and_run_latest_canvas_with_step_approval_and
 
         assert run["status"] == "approval_required"
         assert len(contexts) == 1
-        assert "# User Goal\nList mobile acceptance risks and the checks to verify them." in contexts[0]
+        assert "# User Goal\nExplain mobile acceptance risks and the checks to verify them." in contexts[0]
         assert "Workflow Goal:\nPrepare mobile release acceptance" in contexts[0]
         assert "# Upstream Context\nNone" in contexts[0]
         assert "Old Agent" not in contexts[0]
@@ -21440,7 +21691,7 @@ async def test_workflow_routes_save_and_run_latest_canvas_with_step_approval_and
                 "id": "design",
                 "kind": "agent",
                 "label": "Mobile Design",
-                "task": "List mobile acceptance risks and the checks to verify them.",
+                "task": "Explain mobile acceptance risks and the checks to verify them.",
             },
             {
                 "id": "gate",
@@ -21460,7 +21711,7 @@ async def test_workflow_routes_save_and_run_latest_canvas_with_step_approval_and
         )
         agent_event = next(event for event in run["timeline"] if event["event"] == "workflow.node.agent")
         assert agent_event["workflow_node_id"] == "design"
-        assert agent_event["workflow_node_task"] == "List mobile acceptance risks and the checks to verify them."
+        assert agent_event["workflow_node_task"] == "Explain mobile acceptance risks and the checks to verify them."
         approval_event = next(event for event in run["timeline"] if event["event"] == "workflow.node.approval_required")
         assert approval_event["workflow_node_id"] == "gate"
         assert approval_event["workflow_node_approval_criteria"] == (
@@ -21474,7 +21725,7 @@ async def test_workflow_routes_save_and_run_latest_canvas_with_step_approval_and
         ]
         assert [child["runnable_id"] for child in child_runs] == [design_agent["agent_id"]]
         assert child_runs[0]["user_goal"] == (
-            "List mobile acceptance risks and the checks to verify them."
+            "Explain mobile acceptance risks and the checks to verify them."
         )
 
         resumed = await agent_routes.approve_run_approval(

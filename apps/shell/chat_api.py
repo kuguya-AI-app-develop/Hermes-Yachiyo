@@ -6070,6 +6070,38 @@ class ChatAPI:
         status = self._normalize_agent_run_status(str(run.get("status") or ""))
         assistant = self._session.get_assistant_message_for_task(task_id)
         existing_metadata = dict(assistant.metadata or {}) if assistant and isinstance(assistant.metadata, dict) else {}
+        if status in {"completed", "failed", "cancelled"}:
+            # Approval routes settle the durable Run independently of TaskRunner.
+            # Polling must project that same linked Run onto the in-memory Task.
+            if str(run.get("task_id") or task_id) != task_id:
+                return False
+            run_goal = run.get("user_goal")
+            if run_goal is not None and str(run_goal) != str(getattr(task, "description", "") or ""):
+                return False
+            if getattr(task, "status", None) != TaskStatus.RUNNING:
+                return False
+            summary = str(run.get("result") or "")
+            error = None
+            if status != "completed":
+                error = "任务已取消" if status == "cancelled" else summary or "任务执行失败"
+            terminal_status = {
+                "completed": TaskStatus.COMPLETED,
+                "failed": TaskStatus.FAILED,
+                "cancelled": TaskStatus.CANCELLED,
+            }[status]
+            try:
+                self._state.update_task_status(
+                    task_id,
+                    terminal_status,
+                    result=summary if status == "completed" else None,
+                    error=error,
+                )
+            except (KeyError, ValueError):
+                # Another observer may already have settled or removed this Task.
+                return False
+            if assistant is not None:
+                self._sync_missing_task_from_durable_run(assistant, run, self._session_context())
+            return True
         if status == "approval_required":
             content = self._project_main_chat_approval_message(
                 task_id=task_id,

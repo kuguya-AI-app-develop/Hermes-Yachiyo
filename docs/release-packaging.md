@@ -197,7 +197,7 @@ Helper。`packaging/entitlements.cua-driver.plist` 是专用策略，且必须�
 lock 除 archive/license SHA256 外，还以 `mach-o-without-code-signature-v1` 固定
 剥离代码签名后的内容 SHA256。Electron/codesign 重签会合理地改变 raw Mach-O 的
 签名字节，因此 verifier 只在临时副本上移除签名并比对 canonical hash，不修改正式
-包原件。官方二进制含 Hermes 兼容帮助文本；legacy token 扫描豁免仅适用于上述精确
+包原件。官方二进制含上游兼容帮助文本；legacy token 扫描豁免仅适用于上述精确
 内置资源路径，并仍以该 canonical hash 门禁兜底。
 
 升级内置驱动时：先审阅新的官方 release 与许可证；再一次性更新 lock 中的 version、

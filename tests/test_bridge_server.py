@@ -6,6 +6,7 @@ import importlib.util
 import inspect
 import json
 import re
+import shlex
 import sys
 import threading
 from pathlib import Path
@@ -40,6 +41,7 @@ from apps.shell.agent_runtime import AgentRuntimeError, AgentRuntimeService
 from apps.shell.credential_store import MemoryCredentialStore
 from packages.protocol.enums import TaskStatus
 from scripts.verify_secret_redaction import verify_secret_redaction
+from tests.runtime_contract_fixtures import semantic_fixture_model_plan
 
 
 class _FakeDefaultProfileService:
@@ -493,6 +495,7 @@ def test_all_registered_mutating_routes_require_bridge_token(monkeypatch):
     monkeypatch.setenv("OHA_YACHIYO_BRIDGE_TOKEN", "token-123")
     try:
         try:
+            from fastapi import APIRouter, routing as fastapi_routing
             from fastapi.testclient import TestClient
         except ModuleNotFoundError as exc:
             pytest.skip(f"FastAPI/TestClient dependency is not installed: {exc.name}")
@@ -506,13 +509,23 @@ def test_all_registered_mutating_routes_require_bridge_token(monkeypatch):
         spec.loader.exec_module(bridge_server)
         bridge_server._register_routes()
 
+        # Keep hidden and nested routes in the security sweep. OpenAPI alone
+        # omits include_in_schema=False endpoints and cannot prove coverage.
+        nested = APIRouter()
+        nested.add_api_route("/mutation", lambda: {"ok": True}, methods=["POST"], include_in_schema=False)
+        parent = APIRouter()
+        parent.include_router(nested, prefix="/security")
+        bridge_server.app.include_router(parent, prefix="/_smoke")
+        route_contexts = getattr(fastapi_routing, "iter_route_contexts", None)
+        routes = route_contexts(bridge_server.app.routes) if callable(route_contexts) else bridge_server.app.routes
+
         mutating_methods = {"POST", "PUT", "PATCH", "DELETE"}
         trusted_headers = {"host": "127.0.0.1:8420", "origin": "http://localhost:5174"}
         checked: list[tuple[str, str]] = []
         failures: list[tuple[str, str, int, object]] = []
 
         with TestClient(bridge_server.app) as client:
-            for route in bridge_server.app.routes:
+            for route in routes:
                 methods = sorted((getattr(route, "methods", None) or set()) & mutating_methods)
                 path = getattr(route, "path", "")
                 if not methods or not path:
@@ -525,6 +538,7 @@ def test_all_registered_mutating_routes_require_bridge_token(monkeypatch):
                         failures.append((method, path, response.status_code, response.json()))
 
         assert len(checked) >= 80
+        assert ("POST", "/_smoke/security/mutation") in checked
         assert failures == []
     finally:
         sys.modules.pop("_oha_bridge_server_routes_under_test", None)
@@ -1856,36 +1870,24 @@ def test_chat_approval_bridge_route_projects_failed_approved_tool(tmp_path, monk
         credential_store=MemoryCredentialStore(),
         seed_templates=False,
     )
+    service.custom_api_agent_loop._max_tool_iterations = 3
     workdir = tmp_path / "workspace"
     workdir.mkdir()
     session = ChatSession(session_id="bridge-approval-failure-session")
     session.attach_store(store, load_existing=False)
     state = AppState()
     model_calls: list[list[dict]] = []
+    command_code = 'print("bridge-terminal-failure", end=""); raise SystemExit(7)'
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(command_code)}"
+    fixture_actions = [("terminal_run", {"command": command})]
+    fixture_goal = f"Use the local terminal with these inputs. Execute `{command}`"
 
     def fake_chat(_base_url, _model, _api_key, messages, *, tools=None):
         model_calls.append(messages)
-        assert any((tool.get("function") or {}).get("name") == "terminal_run" for tool in tools or [])
-        return {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {
-                    "id": "call_terminal_failure",
-                    "type": "function",
-                    "function": {
-                        "name": "terminal_run",
-                        "arguments": json.dumps(
-                            {
-                                "command": "printf bridge-terminal-failure; exit 7",
-                                "shell": True,
-                            },
-                            ensure_ascii=False,
-                        ),
-                    },
-                }
-            ],
-        }
+        planning = semantic_fixture_model_plan(messages, tools, fixture_actions, fixture_goal)
+        if planning is not None:
+            return planning
+        return {"content": "The requested process failed with exit code 7."}
 
     monkeypatch.setattr(chat_store_mod, "get_chat_store", lambda: store)
     monkeypatch.setattr(activity_store_mod, "get_activity_store", lambda: activity_store)
@@ -1925,98 +1927,93 @@ def test_chat_approval_bridge_route_projects_failed_approved_tool(tmp_path, monk
     async def scenario():
         sent = await ui_routes.send_chat_message(
             ui_routes.SendChatMessageRequest(
-                text="请运行一个会失败的命令",
+                text=fixture_goal,
                 client_message_id="bridge-approval-failure-client-1",
             )
         )
         assert sent["ok"] is True
         task = state.get_task(sent["task_id"])
         assert task is not None
-        runner_task = asyncio.create_task(runner._execute_with_state(task.task_id))
-        try:
-            run = None
-            candidate = None
-            for _ in range(150):
-                try:
-                    candidate = service.get_run(service.get_task_run_link(task.task_id)["run_id"])
-                except KeyError:
-                    await asyncio.sleep(0.02)
-                    continue
-                if candidate["status"] == "approval_required":
-                    run = candidate
-                    break
+        run = None
+        candidate = None
+        for _ in range(150):
+            try:
+                candidate = service.get_run(service.get_task_run_link(task.task_id)["run_id"])
+            except KeyError:
                 await asyncio.sleep(0.02)
-            assert run is not None, (
-                candidate.get("status"),
-                candidate.get("result"),
-                candidate.get("pending_approval"),
-            )
+                continue
+            if candidate["status"] == "approval_required":
+                run = candidate
+                break
+            await asyncio.sleep(0.02)
+        assert run is not None, (
+            candidate.get("status"),
+            candidate.get("result"),
+            candidate.get("pending_approval"),
+        )
 
-            waiting_messages = await ui_routes.get_chat_messages()
-            assistant = next(message for message in waiting_messages["messages"] if message["role"] == "assistant")
-            assert waiting_messages["approval_count"] == 1
-            assert assistant["status"] == "processing"
-            assert assistant["metadata"]["run_id"] == run["run_id"]
-            assert assistant["metadata"]["run_status"] == "approval_required"
-            assert assistant["metadata"]["pending_approval"]["tool"] == "terminal.run"
+        waiting_messages = await ui_routes.get_chat_messages()
+        assistant = next(message for message in waiting_messages["messages"] if message["role"] == "assistant")
+        assert waiting_messages["approval_count"] == 1
+        assert assistant["status"] == "processing"
+        assert assistant["metadata"]["run_id"] == run["run_id"]
+        assert assistant["metadata"]["run_status"] == "approval_required"
+        assert assistant["metadata"]["pending_approval"]["tool"] == "terminal.run"
 
-            approved = await agent_routes.approve_run_approval(
-                run["run_id"],
-                agent_routes.ApprovalRejectRequest(
-                    approval_id=run["pending_approval"]["approval_id"]
-                ),
-            )
-            assert approved["status"] == "failed"
-            assert approved["pending_approval"] == {}
-            assert "terminal.run 执行失败" in approved["result"]
-            assert "退出码：7" in approved["result"]
-            assert "bridge-terminal-failure" in approved["result"]
-            await runner_task
+        approved = await agent_routes.approve_run_approval(
+            run["run_id"],
+            agent_routes.ApprovalRejectRequest(
+                approval_id=run["pending_approval"]["approval_id"]
+            ),
+        )
+        assert approved["status"] == "failed"
+        assert approved["pending_approval"] == {}
+        assert "terminal.run" in approved["result"]
+        assert "退出码：7" in approved["result"]
+        await ui_routes.get_chat_messages()
 
-            updated = state.get_task(task.task_id)
-            assert updated is not None
-            assert updated.status == TaskStatus.FAILED
-            assert updated.error is not None
-            assert "terminal.run 执行失败" in updated.error
+        updated = state.get_task(task.task_id)
+        assert updated is not None
+        assert updated.status == TaskStatus.FAILED
+        assert updated.error is not None
+        assert "退出码：7" in updated.error
 
-            detail = await agent_routes.get_any_run(run["run_id"])
-            assert detail["status"] == "failed"
-            assert detail["pending_approval"] == {}
-            assert detail["task_id"] == task.task_id
-            assert detail["task_run_link_run_status"] == "failed"
+        detail = await agent_routes.get_any_run(run["run_id"])
+        assert detail["status"] == "failed"
+        assert detail["pending_approval"] == {}
+        assert detail["task_id"] == task.task_id
+        assert detail["task_run_link_run_status"] == "failed"
 
-            replay = await run_routes.list_run_events(run["run_id"], after_sequence=0, limit=200)
-            event_types = [event["event_type"] for event in replay["events"]]
-            assert "agent.tool.approval_required" in event_types
-            assert "agent.tool.approval_approved" in event_types
-            assert "agent.tool.call" in event_types
-            assert "agent.run.failed" in event_types
-            failed_fact = next(event for event in replay["events"] if event["event_type"] == "agent.run.failed")
-            assert "terminal.run 执行失败" in failed_fact["payload"]["error"]
-            tool_fact = next(
-                event
-                for event in replay["events"]
-                if event["event_type"] == "agent.tool.call" and event["payload"].get("approved") is True
-            )
-            assert tool_fact["payload"]["tool"] == "terminal.run"
-            assert tool_fact["payload"]["result"]["ok"] is False
-            assert tool_fact["payload"]["result"]["returncode"] == 7
+        replay = await run_routes.list_run_events(run["run_id"], after_sequence=0, limit=200)
+        event_types = [event["event_type"] for event in replay["events"]]
+        assert "agent.tool.approval_required" in event_types
+        assert "agent.tool.approval_approved" in event_types
+        assert "agent.tool.call" not in event_types
+        private_events = service.list_run_events(run["run_id"], include_internal=True, limit=200)["events"]
+        assert "run.failed" in event_types
+        failed_fact = next(event for event in replay["events"] if event["event_type"] == "run.failed")
+        assert "退出码：7" in failed_fact["payload"]["error"]
+        tool_fact = next(
+            event
+            for event in private_events
+            if event["event_type"] == "agent.tool.call" and event["payload"].get("approved") is True
+        )
+        assert tool_fact["payload"]["tool"] == "terminal.run"
+        assert tool_fact["payload"]["result"]["ok"] is False
+        assert tool_fact["payload"]["result"]["returncode"] == 7
+        assert tool_fact["payload"]["result"]["stdout"] == "bridge-terminal-failure"
 
-            final_messages = await ui_routes.get_chat_messages()
-            final_assistant = next(
-                message
-                for message in final_messages["messages"]
-                if message["role"] == "assistant" and message["task_id"] == task.task_id
-            )
-            assert final_messages["approval_count"] == 0
-            assert final_assistant["status"] == "failed"
-            assert final_assistant["metadata"].get("run_status") == "failed"
-            assert final_assistant["metadata"].get("pending_approval") == {}
-            assert len(model_calls) == 1
-        finally:
-            if not runner_task.done():
-                runner_task.cancel()
-                await asyncio.gather(runner_task, return_exceptions=True)
+        final_messages = await ui_routes.get_chat_messages()
+        final_assistant = next(
+            message
+            for message in final_messages["messages"]
+            if message["role"] == "assistant" and message["task_id"] == task.task_id
+        )
+        assert final_messages["approval_count"] == 0
+        assert final_assistant["status"] == "failed"
+        assert final_assistant["metadata"].get("run_status") == "failed"
+        assert final_assistant["metadata"].get("pending_approval") == {}
+        assert len(model_calls) == 2
 
     try:
         asyncio.run(scenario())
@@ -4623,7 +4620,7 @@ def test_agent_run_http_routes_roundtrip_approval_detail_and_replay(tmp_path, mo
 
                 run_response = client.post(
                     "/ui/agent-runs",
-                    json={"agent_id": agent_id, "user_goal": "Run approved command"},
+                    json={"agent_id": agent_id, "user_goal": "Run printf route-approved"},
                     headers={"Idempotency-Key": "http-approval-run-1"},
                 )
                 run_response.raise_for_status()
@@ -4638,6 +4635,10 @@ def test_agent_run_http_routes_roundtrip_approval_detail_and_replay(tmp_path, mo
                         "approval_id": waiting["pending_approval"]["approval_id"]
                     },
                 )
+                public_replay = client.get(f"/runs/{run_id}/events?after_sequence=0&limit=200")
+                assert public_replay.status_code == 200
+                assert not any(event["event_type"] == "agent.tool.call"
+                               for event in public_replay.json()["events"])
                 detail_after = client.get(f"/ui/runs/{run_id}")
                 replay_after = client.get(f"/runs/{run_id}/events?after_sequence=0&limit=200")
 
@@ -4656,10 +4657,10 @@ def test_agent_run_http_routes_roundtrip_approval_detail_and_replay(tmp_path, mo
             approved = approve_response.json()
             assert approved["status"] == "completed"
             assert approved["pending_approval"] == {}
-            assert approved["result"] == "HTTP approved command complete"
+            assert "输出：route-approved" in approved["result"]
             assert detail_after.status_code == 200
             assert detail_after.json()["status"] == "completed"
-            assert detail_after.json()["result"] == "HTTP approved command complete"
+            assert detail_after.json()["result"] == approved["result"]
             assert detail_after.json()["pending_approval"] == {}
 
             replay_after_payload = replay_after.json()
@@ -4667,7 +4668,7 @@ def test_agent_run_http_routes_roundtrip_approval_detail_and_replay(tmp_path, mo
             assert replay_after.status_code == 200
             assert replay_after_types.count("agent.tool.approval_required") == 1
             assert replay_after_types.count("agent.tool.approval_approved") == 1
-            assert "agent.tool.call" in replay_after_types
+            assert "agent.tool.call" not in replay_after_types
             assert "agent.run.completed" in replay_after_types
             approved_fact = next(
                 event
@@ -4676,14 +4677,14 @@ def test_agent_run_http_routes_roundtrip_approval_detail_and_replay(tmp_path, mo
             )
             tool_facts = [
                 event
-                for event in replay_after_payload["events"]
+                for event in service.list_run_events(run_id, include_internal=True, limit=200)["events"]
                 if event["event_type"] == "agent.tool.call"
             ]
             assert approved_fact["payload"]["tool"] == "terminal.run"
             assert approved_fact["payload"]["input_preview"]["command"] == "printf route-approved"
             assert tool_facts[-1]["payload"]["tool"] == "terminal.run"
             assert tool_facts[-1]["payload"]["approved"] is True
-            assert len(model_calls) == 2
+            assert len(model_calls) == 0
         finally:
             service.close()
     finally:
@@ -4785,7 +4786,7 @@ def test_agent_run_http_routes_roundtrip_reject_detail_and_replay(tmp_path, monk
 
                 run_response = client.post(
                     "/ui/agent-runs",
-                    json={"agent_id": agent_id, "user_goal": "Run rejected command"},
+                    json={"agent_id": agent_id, "user_goal": "Run printf route-rejected"},
                     headers={"Idempotency-Key": "http-reject-run-1"},
                 )
                 run_response.raise_for_status()
@@ -4801,6 +4802,10 @@ def test_agent_run_http_routes_roundtrip_reject_detail_and_replay(tmp_path, monk
                         "reason": "Rejected from HTTP",
                     },
                 )
+                public_replay = client.get(f"/runs/{run_id}/events?after_sequence=0&limit=200")
+                assert public_replay.status_code == 200
+                assert not any(event["event_type"] == "agent.tool.call"
+                               for event in public_replay.json()["events"])
                 detail_after = client.get(f"/ui/runs/{run_id}")
                 replay_after = client.get(f"/runs/{run_id}/events?after_sequence=0&limit=200")
 
@@ -4833,7 +4838,7 @@ def test_agent_run_http_routes_roundtrip_reject_detail_and_replay(tmp_path, monk
             assert replay_after_types.count("agent.run.cancelled") == 1
             tool_facts = [
                 event
-                for event in replay_after_payload["events"]
+                for event in service.list_run_events(run_id, include_internal=True, limit=200)["events"]
                 if event["event_type"] == "agent.tool.call"
             ]
             assert not any(event["payload"].get("approved") is True for event in tool_facts)
@@ -4851,7 +4856,7 @@ def test_agent_run_http_routes_roundtrip_reject_detail_and_replay(tmp_path, monk
             assert rejected_fact["payload"]["input_preview"]["command"] == "printf route-rejected"
             assert rejected_fact["payload"]["reason"] == "Rejected from HTTP"
             assert cancelled_fact["payload"]["result"] == "工具审批已拒绝：Rejected from HTTP"
-            assert len(model_calls) == 1
+            assert len(model_calls) == 0
         finally:
             service.close()
     finally:
@@ -4953,7 +4958,7 @@ def test_agent_run_http_routes_roundtrip_cancel_detail_and_replay(tmp_path, monk
 
                 run_response = client.post(
                     "/ui/agent-runs",
-                    json={"agent_id": agent_id, "user_goal": "Run cancelled command"},
+                    json={"agent_id": agent_id, "user_goal": "Run printf route-cancelled"},
                     headers={"Idempotency-Key": "http-cancel-run-1"},
                 )
                 run_response.raise_for_status()
@@ -4963,6 +4968,10 @@ def test_agent_run_http_routes_roundtrip_cancel_detail_and_replay(tmp_path, monk
                 detail_before = client.get(f"/ui/runs/{run_id}")
                 replay_before = client.get(f"/runs/{run_id}/events?after_sequence=0&limit=200")
                 cancel_response = client.post(f"/ui/runs/{run_id}/cancel")
+                public_replay = client.get(f"/runs/{run_id}/events?after_sequence=0&limit=200")
+                assert public_replay.status_code == 200
+                assert not any(event["event_type"] == "agent.tool.call"
+                               for event in public_replay.json()["events"])
                 detail_after = client.get(f"/ui/runs/{run_id}")
                 replay_after = client.get(f"/runs/{run_id}/events?after_sequence=0&limit=200")
 
@@ -4997,7 +5006,7 @@ def test_agent_run_http_routes_roundtrip_cancel_detail_and_replay(tmp_path, monk
             assert "agent.run.completed" not in replay_after_types
             tool_facts = [
                 event
-                for event in replay_after_payload["events"]
+                for event in service.list_run_events(run_id, include_internal=True, limit=200)["events"]
                 if event["event_type"] == "agent.tool.call"
             ]
             assert not any(event["payload"].get("approved") is True for event in tool_facts)
@@ -5009,7 +5018,7 @@ def test_agent_run_http_routes_roundtrip_cancel_detail_and_replay(tmp_path, monk
             assert cancelled_fact["payload"]["kind"] == "agent_run"
             assert cancelled_fact["payload"]["status"] == "cancelled"
             assert cancelled_fact["payload"]["result"] == "Run cancelled"
-            assert len(model_calls) == 1
+            assert len(model_calls) == 0
         finally:
             service.close()
     finally:
