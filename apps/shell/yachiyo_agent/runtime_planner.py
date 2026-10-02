@@ -5732,6 +5732,18 @@ class RuntimePlanner:
             ):
                 app_search = fallback_app_search
                 type_target = None
+        if app_search and _explicit_app_search_field_click_target(
+            intent.user_goal, app_search
+        ):
+            # The app-search compiler owns the explicit field click, literal
+            # query, and dedicated search submit as one ordered chain. Generic
+            # field typing must not consume that chain or replace its submit
+            # with an unrelated foreground confirmation.
+            type_target = None
+            click_target = None
+            safe_type_text = ""
+            foreground_submit_action = ""
+            submit_action = ""
         create_first_safe_shortcut = (
             safe_shortcut_action in {"new_note", "new_document", "new_task"}
             and bool(safe_type_text)
@@ -7547,7 +7559,10 @@ class RuntimePlanner:
             verify_preview = _desktop_verify_input_preview(
                 verify_tool,
                 app_name=search_app_name or app_name,
-                operation_preview={"role_filter": "text", "limit": 80},
+                operation_preview={
+                    "role_filter": "" if search_terminal_step_id == "submit-app-search" else "text",
+                    "limit": 80,
+                },
             )
             if (
                 selected_app_payload

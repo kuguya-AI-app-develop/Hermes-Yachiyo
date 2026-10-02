@@ -1754,6 +1754,11 @@ def _verifier_matches_source_attempt(
         "desktop.type_text",
     }:
         return False
+    if (
+        predicate_kind == "exact_app_search_result_present"
+        and source_tool != "desktop.search_submit"
+    ):
+        return False
     verifier_tool = str(verifier_link.get("verifier_tool") or "").strip()
     if (
         source_tool in {"terminal.run", "python.run"}

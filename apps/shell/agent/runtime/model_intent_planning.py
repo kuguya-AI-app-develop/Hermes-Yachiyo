@@ -506,7 +506,7 @@ def _planned_step_action_families(step: Any) -> tuple[str, ...]:
         return ("open", "capture")
     if tool_name == "browser.open_url_and_extract_text":
         return ("open", "read", "extract")
-    if tool_name in {"browser.search", "browser.search_web"}:
+    if tool_name in {"browser.search", "browser.search_web", "desktop.search_submit"}:
         primary_family = "search"
     elif action in {
         "",
