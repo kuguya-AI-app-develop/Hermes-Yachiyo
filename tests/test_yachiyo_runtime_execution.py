@@ -48,6 +48,21 @@ def test_identity_readback_does_not_bypass_requested_analysis() -> None:
     ) is False
 
 
+def test_discovered_app_launch_plans_independent_running_observation() -> None:
+    allowed_tools = daily_desktop_allowed_tools()
+    decision, _requests = planner_decision_and_tool_requests("打开默认浏览器", allowed_tools)
+
+    verifier = next(step for step in decision.plan.tool_plan.steps if step.tool_name == "desktop.verify")
+    assert verifier.input_preview["verification_goal"] == "app_running"
+    envelope = runtime_execution_envelope_from_decision(
+        decision, allowed_tools=allowed_tools, full_plan=True,
+    )
+    assert envelope is not None
+    bound_verifier = next(request for request in envelope.requests if request.tool_name == "desktop.verify")
+    assert bound_verifier.input["verification_goal"] == "app_running"
+    assert bound_verifier.depends_on == ["open-selected-discovered-app"]
+
+
 def test_dispatch_shortcut_binds_exact_keyboard_copy_identity() -> None:
     target = bind_planned_action_target(
         {

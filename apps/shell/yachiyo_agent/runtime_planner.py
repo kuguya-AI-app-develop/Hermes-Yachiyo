@@ -13478,6 +13478,13 @@ def _append_selected_discovered_launch_verification_step(
         }
     else:
         input_preview = {}
+    if verify_tool == "desktop.verify" and not embedded_action and selected_tool in {
+        "app.open", "desktop.open_app",
+    }:
+        input_preview = {
+            "app_name": str(selected_payload.get("app_name") or ""),
+            "verification_goal": "app_running",
+        }
     steps.append(
         _step(
             intent,
