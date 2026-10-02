@@ -564,6 +564,14 @@ def _run_launcher_daily_desktop_quick_message(
         "apps.shell.chat_api.desktop_permission_missing_by_capability",
         permission_probe or (lambda use_cache=True: {}),
     )
+    if permission_probe is None:
+        # The tool fixtures model an available local desktop. Keep its passive
+        # readiness snapshot independent from the actual host's cache.
+        for module in ("legacy_tasks", "legacy_ports"):
+            monkeypatch.setattr(
+                f"apps.shell.yachiyo_agent.{module}.desktop_runtime_blocking_conditions_by_capability",
+                lambda: {},
+            )
     if permission_preflight is not None:
         monkeypatch.setattr(
             "apps.shell.agent.tools.desktop.permission_preflight",
@@ -592,7 +600,7 @@ def _run_launcher_daily_desktop_quick_message(
         ).model_dump(mode="json")
         public_events = service.list_run_events(run["run_id"])["events"]
         assert all(event.get("visibility") != "internal" for event in public_events)
-        events = service.list_run_events(run["run_id"], include_internal=True)["events"]
+        events = service.list_run_events(run["run_id"], include_internal=True, limit=500)["events"]
         event_types = [event["event_type"] for event in events]
         policy_decision_events = [
             event for event in events if event["event_type"] == "agent.tool.policy_decision"
@@ -631,10 +639,20 @@ def _run_launcher_daily_desktop_quick_message(
             assert policy_decision_events[0]["payload"]["decision"] == "allow"
             assert policy_decision_events[0]["payload"]["policy_scope"] == "daily_desktop"
         else:
-            assert set(user_metadata["daily_desktop_tools"]) <= {
-                "calendar.create_event",
-                "reminders.create",
-            }
+            envelope = user_metadata["yachiyo_execution_envelope"]
+            compiled_tools = {request["tool_name"] for request in envelope["requests"]}
+            for tool in tuple(compiled_tools):
+                if tool in {"app.open_and_safe_shortcut", "app.focus_and_safe_shortcut"}:
+                    compiled_tools.update({tool.split("_and_")[0], "desktop.safe_shortcut"})
+                elif tool in {"app.open_and_safe_type_text", "app.focus_and_safe_type_text"}:
+                    compiled_tools.update({tool.split("_and_")[0], "desktop.safe_type_text"})
+            assert set(user_metadata["daily_desktop_tools"]) <= compiled_tools
+            assert any(
+                event["event_type"] == "agent.plan.selection"
+                and event["actor"] == "native_runtime"
+                and event["payload"]["plan_id"] == envelope["plan_id"]
+                for event in events
+            )
         if agent_task["status"] == "waiting_approval":
             assert assistant.content in {
                 agent_task["summary"],
@@ -1585,6 +1603,22 @@ def test_chat_bridge_quick_message_opens_system_settings_pane_without_model(
         "apps.shell.agent.tools.desktop.system_settings_open",
         fake_system_settings_open,
     )
+    def observed_title():
+        pane = desktop_tools._system_settings_target(settings_calls[-1])
+        return pane[0] if pane else "System Settings"
+
+    monkeypatch.setattr(desktop_tools, "active_window", lambda: {
+        "ok": True, "action": "desktop.active_window", "data": {
+            "app_name": "System Settings", "pid": 100, "window_id": 200,
+            "title": observed_title(),
+        },
+    })
+    monkeypatch.setattr(desktop_tools, "ui_elements", lambda **kwargs: {
+        "ok": True, "action": "desktop.ui_elements", "data": desktop_tools._parse_ui_elements_output(
+            f"META\tSystem Settings\t100\t{observed_title()}\t200\n"
+            "1\tAXButton\t\tGeneral\t\t\ttrue\t120\t88\t100\t100"
+        ),
+    })
     result, agent_task, run, event_types = _run_launcher_daily_desktop_quick_message(
         tmp_path,
         monkeypatch,
@@ -3575,7 +3609,8 @@ def test_chat_bridge_quick_message_opens_system_settings_then_reads_options_with
             "summary": "Read System Settings options",
             "data": {
                 "app_name": "System Settings",
-                "title": "Settings",
+                "title": "System Settings",
+                "pid": 100, "window_id": 200,
                 "elements": [
                     {
                         "role": "AXButton",
@@ -3591,6 +3626,12 @@ def test_chat_bridge_quick_message_opens_system_settings_then_reads_options_with
         fake_system_settings_open,
     )
     monkeypatch.setattr("apps.shell.agent.tools.desktop.ui_elements", fake_ui_elements)
+    monkeypatch.setattr(desktop_tools, "active_window", lambda: {
+        "ok": True, "action": "desktop.active_window", "data": {
+            "app_name": "System Settings", "pid": 100, "window_id": 200,
+            "title": "System Settings",
+        },
+    })
     for launcher_mode in ("bubble", "live2d"):
         result, agent_task, run, event_types = _run_launcher_daily_desktop_quick_message(
             tmp_path,
@@ -3627,7 +3668,9 @@ def test_chat_bridge_quick_message_opens_system_settings_then_reads_options_with
     assert calls == [
         ("settings", "系统设置", None),
         ("ui", "", 80),
+        ("ui", "", 80),
         ("settings", "系统设置", None),
+        ("ui", "", 80),
         ("ui", "", 80),
     ]
 
@@ -5066,8 +5109,9 @@ def test_chat_bridge_quick_message_prepares_comm_message_then_waits_for_send_app
 
     def fake_ui_elements(**kwargs) -> dict:
         app = kwargs.get("app_name") or next((value for action, value in reversed(calls) if action in {"open", "focus"}), "WeChat")
-        typed = [(i, value) for i, (action, value) in enumerate(calls) if action == "type"]
-        submits = [i for i, (action, _) in enumerate(calls) if action == "search_submit"]
+        current_app_start = max((i for i, (action, _) in enumerate(calls) if action in {"open", "focus"}), default=-1)
+        typed = [(i, value) for i, (action, value) in enumerate(calls) if action == "type" and i > current_app_start]
+        submits = [i for i, (action, _) in enumerate(calls) if action == "search_submit" and i > current_app_start]
         submitted = submits[-1] if submits else -1
         query = next((value for i, value in reversed(typed) if submitted < 0 or i < submitted), "")
         message = next((value for i, value in reversed(typed) if i > submitted and submitted >= 0), "")
@@ -5077,7 +5121,8 @@ def test_chat_bridge_quick_message_prepares_comm_message_then_waits_for_send_app
         search_active = any(action == "shortcut" and value == "find" for action, value in calls)
         elements = [{"role": "AXTextField", "name": "Search", "value": query, "depth": 1, "editable": True, "focused": submitted < 0 and search_active, "center": {"x": 320, "y": 240}}]
         if submitted >= 0:
-            elements += [{"role": "AXTable", "name": "Search Results", "depth": 1}, {"role": "AXRow", "name": query, "depth": 2}]
+            elements += [{"role": "AXTable", "name": "Search Results", "depth": 1}, {"role": "AXRow", "name": query, "depth": 2},
+                         {"role": "AXStaticText", "name": query, "value": query, "description": "Conversation header", "depth": 1}]
         if not search_active:
             elements = []
         # A simple body-only goal types straight into the message composer.
@@ -5134,7 +5179,7 @@ def test_chat_bridge_quick_message_prepares_comm_message_then_waits_for_send_app
         run = service.get_run(link["run_id"])
         event_types = [
             event["event_type"]
-            for event in service.list_run_events(run["run_id"], include_internal=True)["events"]
+            for event in service.list_run_events(run["run_id"], include_internal=True, limit=500)["events"]
         ]
 
         second = bridge.send_quick_message(
@@ -5151,7 +5196,7 @@ def test_chat_bridge_quick_message_prepares_comm_message_then_waits_for_send_app
         second_run = service.get_run(second_link["run_id"])
         second_event_types = [
             event["event_type"]
-            for event in service.list_run_events(second_run["run_id"], include_internal=True)["events"]
+            for event in service.list_run_events(second_run["run_id"], include_internal=True, limit=500)["events"]
         ]
     finally:
         service.close()
@@ -5171,7 +5216,7 @@ def test_chat_bridge_quick_message_prepares_comm_message_then_waits_for_send_app
     assert run["status"] == "approval_required"
     assert run["pending_approval"]["tool"] == "desktop.submit_foreground"
     assert run["pending_approval"]["input_preview"] == {"action": "send"}
-    assert "agent.desktop.intent_approval_required" in event_types
+    assert "approval.required" in event_types
     assert "agent.desktop.intent_completed" not in event_types
     assert "model.request.started" not in event_types
     assert "model.requested" not in event_types
@@ -5190,7 +5235,7 @@ def test_chat_bridge_quick_message_prepares_comm_message_then_waits_for_send_app
     assert second_run["status"] == "approval_required"
     assert second_run["pending_approval"]["tool"] == "desktop.submit_foreground"
     assert second_run["pending_approval"]["input_preview"] == {"action": "send"}
-    assert "agent.desktop.intent_approval_required" in second_event_types
+    assert "approval.required" in second_event_types
     assert "agent.desktop.intent_completed" not in second_event_types
     assert "model.request.started" not in second_event_types
     assert "model.requested" not in second_event_types
@@ -10017,10 +10062,9 @@ def test_chat_bridge_quick_message_prepares_app_safe_type_text_then_waits_for_se
             "bubble",
             [
                 ("focus", "WeChat"),
-                ("active", "WeChat"),
                 ("type", "hello"),
             ],
-            "app.focus_and_safe_type_text",
+            "desktop.safe_type_text",
             "desktop.submit_foreground",
             {"action": "send"},
         ),
