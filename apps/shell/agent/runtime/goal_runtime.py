@@ -2065,6 +2065,20 @@ def _runtime_owned_correlated_native_receipt(
     ):
         return False
     predicate_kind = str(verifier_link.get("predicate_kind") or "").strip()
+    if predicate_kind == "native_music_search_playback":
+        from .native_music_receipts import native_music_search_receipt
+
+        source_events = [attempt["event"] for attempt in source_attempts.values()]
+        verifier = {
+            **dict(event),
+            "input": event.get("input_preview", result.get("verification_input")) or {},
+            "depends_on": event.get("depends_on", result.get("verification_depends_on")),
+        }
+        expected = native_music_search_receipt(
+            source_event, verifier, source_events, contract=contract,
+        )
+        if not expected or any(result.get(key) != value for key, value in expected.items()):
+            return False
     intrinsic_state = _intrinsic_native_state_source_receipt(source_attempt)
     if predicate_kind == "native_postcondition_receipt" and not (
         _exact_dispatch_only_source_receipt(source_attempt) or intrinsic_state

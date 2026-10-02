@@ -76,3 +76,42 @@ def test_authorized_literal_typing_keeps_the_alias_as_data():
     typed = next(step for step in steps if step.tool_name == "app.open_and_type_into_ui_element")
     assert typed.input_preview["text"] == "搜一下当前运行的应用"
     assert typed.input_preview["app_name"] == "Slack"
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "打开 Slack，并回复‘搜一下当前运行的应用’",
+        "切到 Slack 并回复‘搜一下当前运行的应用’",
+        '请回复"搜一下当前运行的应用"，然后打开 Slack',
+    ],
+)
+def test_unresolved_app_action_cannot_borrow_discovery_from_quoted_response(goal):
+    decision = RuntimePlanner().decision(goal, allowed_tools=DAILY_DESKTOP_TOOL_NAMES)
+    assert not decision.selected_intent.inputs.get("app_name_hint")
+    assert not decision.selected_intent.inputs.get("desktop_discovery_hint")
+    assert all(not step.tool_name for step in decision.plan.tool_plan.steps)
+    assert decision.plan.task_core.goal_contract.original_goal == goal
+
+
+def test_explicit_app_action_keeps_its_concrete_target():
+    decision = RuntimePlanner().decision("打开 Slack", allowed_tools=DAILY_DESKTOP_TOOL_NAMES)
+    opened = next(step for step in decision.plan.tool_plan.steps if step.tool_name == "app.open")
+    assert opened.input_preview == {"app_name": "Slack"}
+    assert not any(
+        step.tool_name == "desktop.running_apps" for step in decision.plan.tool_plan.steps
+    )
+
+
+def test_literal_negative_alias_is_still_typed_as_exact_data():
+    decision = RuntimePlanner().decision(
+        "在 Slack 的 Message 输入框输入“不要搜一下系统设置”",
+        allowed_tools=DAILY_DESKTOP_TOOL_NAMES,
+    )
+    typed = next(
+        step
+        for step in decision.plan.tool_plan.steps
+        if step.tool_name == "app.focus_and_type_into_ui_element"
+    )
+    assert typed.input_preview["text"] == "不要搜一下系统设置"
+    assert typed.input_preview["app_name"] == "Slack"

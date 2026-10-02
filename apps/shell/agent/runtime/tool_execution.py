@@ -11177,6 +11177,10 @@ def _native_postcondition_receipt_for_verifier(
                 continue
             result = event.get("result") if isinstance(event.get("result"), Mapping) else {}
             action_tool = str(event.get("detail") or event.get("tool") or "").strip()
+            if action_tool == "media.music_app_open_and_play":
+                from .native_music_receipts import native_music_search_receipt
+
+                return native_music_search_receipt(event, verifier_request, timeline)
             if action_tool == "desktop.submit_foreground":
                 # A generic mutation acknowledgement cannot prove that Return
                 # was dispatched to the exact prepared app/window/editable
