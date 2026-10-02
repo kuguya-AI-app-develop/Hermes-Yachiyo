@@ -2255,19 +2255,20 @@ def test_chat_group_dispatch_bridge_route_runs_native_summary(tmp_path, monkeypa
             assert "汇报：Coding bridge dispatch result" in last_content
             return {"role": "assistant", "content": "群组总结：Coding 已完成 Bridge route Native 派发。"}
         if "# Agent\nName: Coding Agent" in last_content:
-            assert "# User Goal\n做 Bridge route Native 群聊派发验证" in last_content
+            assert "# User Goal\nRespond with exactly 'Coding bridge dispatch result'" in last_content
             assert "[Oha-Yachiyo 群组执行约定]" in last_content
             assert "你在群内身份是：Coding" in last_content
             return {"role": "assistant", "content": "Coding bridge dispatch result"}
-        assert "请安排 Coding 做 Bridge route Native 群聊派发验证" in last_content
+        assert "请安排 Coding Respond with exactly 'Coding bridge dispatch result'" in last_content
         assert "oha.group_dispatch" in str(messages[0]["content"])
         return {
             "role": "assistant",
-            "content": (
-                "我会让 Coding 处理这件事。\n"
-                '{"tool":"oha.group_dispatch","input":{"tasks":[{"kind":"agent","target":"Coding",'
-                '"goal":"做 Bridge route Native 群聊派发验证"}]}}'
-            ),
+            "content": "我会让 Coding 处理这件事。\n" + json.dumps({
+                "tool": "oha.group_dispatch", "input": {"tasks": [{
+                    "kind": "agent", "target": "Coding",
+                    "goal": "Respond with exactly 'Coding bridge dispatch result'",
+                }]},
+            }, ensure_ascii=False),
         }
 
     monkeypatch.setattr(chat_store_mod, "get_chat_store", lambda: store)
@@ -2338,7 +2339,7 @@ def test_chat_group_dispatch_bridge_route_runs_native_summary(tmp_path, monkeypa
 
         sent = await ui_routes.send_chat_message(
             ui_routes.SendChatMessageRequest(
-                text="@主模型 请安排 Coding 做 Bridge route Native 群聊派发验证",
+                text="@主模型 请安排 Coding Respond with exactly 'Coding bridge dispatch result'",
                 client_message_id="bridge-group-dispatch-client-1",
             )
         )
@@ -2369,7 +2370,7 @@ def test_chat_group_dispatch_bridge_route_runs_native_summary(tmp_path, monkeypa
         assert "oha.group_dispatch" not in parent["content"]
         assert agent_message["metadata"]["runnable_id"] == coding["agent_id"]
         assert agent_message["metadata"]["delegated_by_task_id"] == sent["task_id"]
-        assert agent_message["metadata"]["delegated_goal"] == "做 Bridge route Native 群聊派发验证"
+        assert agent_message["metadata"]["delegated_goal"] == "Respond with exactly 'Coding bridge dispatch result'"
 
         agent_run_id = agent_message["metadata"]["run_id"]
         agent_run = await wait_for(
@@ -2413,9 +2414,9 @@ def test_chat_group_dispatch_bridge_route_runs_native_summary(tmp_path, monkeypa
         assert summary_message["status"] == "processing"
         assert summary_task is not None
         assert summary_task.chat_session_id == runtime.chat_session.session_id
-        assert "[Oha-Yachiyo 群组 Agent 汇总]" in summary_task.description
-        assert "Coding：已完成" in summary_task.description
-        assert "汇报：Coding bridge dispatch result" in summary_task.description
+        assert "[Oha-Yachiyo 群组 Agent 汇总]" in summary_task.response_context
+        assert "Coding：已完成" in summary_task.response_context
+        assert "汇报：Coding bridge dispatch result" in summary_task.response_context
 
         await runner._execute_with_state(summary_task.task_id)
 
