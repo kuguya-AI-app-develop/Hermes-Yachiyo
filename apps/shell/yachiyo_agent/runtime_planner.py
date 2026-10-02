@@ -863,6 +863,20 @@ class TaskIntentRouter:
         if foreground_paste and safe_shortcut is None:
             safe_shortcut = {"action": "paste"}
         desktop_discovery = _desktop_discovery_hint(text)
+        if (
+            desktop_discovery is None
+            and "搜一下" in text
+            and not readonly_discovery
+            and not _text_has_authorized_family_action(
+                text, _APP_CONTROL_AUTHORITY_ACTION_RE
+            )
+            and not _text_has_authorized_family_action(
+                text, _DESKTOP_NON_APP_AUTHORITY_ACTION_RE
+            )
+        ):
+            # Quoted response data must not select the generic app-discovery
+            # fallback merely because it contains an observation verb.
+            return _empty_intent("desktop_operation", text)
         affirmative_operation = _desktop_operation_hint(app_control_text)
         if (
             desktop_discovery is None
@@ -36118,7 +36132,7 @@ def _pure_desktop_discovery_question(text: str) -> bool:
     running_question = (
         rf"(?:(?:现在|当前)(?:开了|打开了?|开着|运行着?)(?:哪些|什么){app_label}|"
         rf"(?:现在|当前)(?:有哪些|哪些|什么){app_label}(?:开着|打开|在运行|运行中)|"
-        rf"(?:列一下|列出|列|看看|查看)(?:当前|现在)?"
+        rf"(?:列一下|列出|列|看看|查看|搜一下)(?:当前|现在)?"
         rf"(?:打开|开着|运行|正在运行)(?:的)?{app_label})"
     )
     return bool(
@@ -36132,6 +36146,12 @@ def _pure_desktop_discovery_question(text: str) -> bool:
 
 def _desktop_discovery_hint(text: str) -> dict[str, Any] | None:
     value = _clean_prompt(text)
+    passive_search = list(re.finditer(r"搜一下", value))
+    if passive_search and not _pure_desktop_discovery_question(value) and not any(
+        _speech_act_action_occurrence_is_authorized(value, match.start(), match.end())
+        for match in passive_search
+    ):
+        return None
     lowered = value.lower()
     if _looks_like_desktop_permissions_request(value, lowered):
         return {"action": "diagnose_permissions"}
