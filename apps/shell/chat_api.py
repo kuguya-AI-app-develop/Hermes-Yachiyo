@@ -6434,7 +6434,8 @@ class ChatAPI:
             source_text = self._format_group_dispatch_visible_content(source_text, dispatch_text)
             NativeAgentExecutor._project_native_group_dispatch(self._session, task, plan, children, source_text)
             self._session.update_assistant_message(assistant_id, source_text, status=MessageStatus.PROCESSING,
-                metadata={"run_id": parent["run_id"], "run_status": "running", "native_group_parent": True})
+                metadata={"run_id": parent["run_id"], "run_status": "running",
+                    "native_group_parent": True, "group_dispatch_direct": True})
             return assistant_id, "processing"
         except Exception as exc:
             if parent is not None:
@@ -6506,9 +6507,9 @@ class ChatAPI:
                     continue
                 if parent.get("status") == "running":
                     service.verify_main_chat_delegation(parent["run_id"])
-                    if notify_group_summary:
-                        self._maybe_create_group_agent_summary_task(task.task_id)
                     if plan["binding"].get("summary_required"):
+                        if notify_group_summary:
+                            self._maybe_create_group_agent_summary_task(task.task_id)
                         current_message = self._session.get_assistant_message_for_task(task.task_id)
                         summary_id = str(((current_message.metadata if current_message else {}) or {}).get("group_agent_summary_task_id") or "")
                         summary = self._state.get_task(summary_id)
@@ -8245,6 +8246,19 @@ class ChatAPI:
             if parent is None:
                 return
             parent_metadata = parent.metadata if isinstance(parent.metadata, dict) else {}
+            if parent_metadata.get("native_group_parent"):
+                from apps.shell.agent.runtime.main_chat_delegation import bound_plan
+
+                try:
+                    native_parent = self._agent_runtime_service().get_run(
+                        str(parent_metadata.get("run_id") or "")
+                    )
+                    plan = bound_plan(native_parent)
+                except Exception:
+                    logger.debug("群组父任务绑定不可读取，无法创建总结", exc_info=True)
+                    return
+                if plan is None or not plan["binding"].get("summary_required"):
+                    return
             if parent_metadata.get("group_agent_summary_task_id"):
                 return
             children = self._delegated_group_agent_children(parent_task_id)

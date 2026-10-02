@@ -2736,6 +2736,7 @@ class TaskIntentRouter:
                 "开发",
             ],
         )
+        project_creation_requested = _authorized_project_creation_requested(text)
         workspace_context_request = _looks_like_workspace_code_context_request(text)
         workspace_file_edit_request = _looks_like_workspace_file_edit_request(text)
         workspace_ui_development_request = _looks_like_workspace_ui_development_request(text)
@@ -2744,12 +2745,13 @@ class TaskIntentRouter:
             or workspace_file_edit_request
             or workspace_ui_development_request
             or explicit_workspace_file_read_target
+            or project_creation_requested
         ):
             score = 0.22
         if score <= 0:
             return _empty_intent("code_task", text)
         diagnostic_command = _code_task_diagnostic_command_hint(text)
-        write_requested = _code_task_write_requested(text)
+        write_requested = _code_task_write_requested(text) or project_creation_requested
         explicit_workspace_file_read_only = bool(
             explicit_workspace_file_read_target
             and not diagnostic_command
@@ -2769,7 +2771,7 @@ class TaskIntentRouter:
             inputs["code_area_context_hints"] = code_area_hints
         if write_requested:
             inputs["code_change_hint"] = {
-                "mode": _code_task_change_mode(text),
+                "mode": "create" if project_creation_requested else _code_task_change_mode(text),
             }
         if explicit_workspace_file_read_only:
             inputs.update(
@@ -3363,7 +3365,7 @@ _MODEL_INTENT_ACTION_EVIDENCE_RE = re.compile(
     r"(?:"
     r"打开|启动|运行|执行|读取|提取|查看|看看|看一下|看下|"
     r"搜索(?!框|栏|按钮)|查找|找到|找出|播放|创建|新建|写入?|"
-    r"记录|记下|做成|安排|加入|产出|协作|分工|评审|复盘|组建|"
+    r"记录|记下|做成|做(?:一个|个)(?:小)?项目|安排|加入|产出|协作|分工|评审|复盘|组建|"
     r"开(?=会|(?:一个|个).{0,16}(?:小组|团队|群组))|保存|发送|发给|"
     r"发(?=消息|邮件|一封)|回复|"
     r"删除|移动|复制|粘贴|改成|改为|更新为|置为|重命名|整理|分析|"
@@ -3389,6 +3391,17 @@ _MODEL_INTENT_ACTION_REQUEST_PREFIX_RE = re.compile(
     r"\b(?:can|could|would)\s+you|\bplease)\s*$",
     flags=re.IGNORECASE,
 )
+_PROJECT_CREATION_ACTION_RE = re.compile(r"做(?:一个|个)(?:小)?项目")
+
+
+def _authorized_project_creation_requested(text: str) -> bool:
+    normalized = _normalized_speech_act_text(text)
+    return any(
+        _speech_act_action_occurrence_is_authorized(normalized, match.start(), match.end())
+        for match in _PROJECT_CREATION_ACTION_RE.finditer(normalized)
+    )
+
+
 _SPEECH_ACT_NEGATION_RE = re.compile(
     r"(?:不要|不用|不必|(?<!能)不能|不该|(?<!可)不可|无需|"
     r"(?:^|[，,。！!？?；;\s]|请|千万|可)别|禁止|停止|切勿|请勿|勿)|"

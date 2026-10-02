@@ -22,6 +22,7 @@ from apps.shell.agent.tools.terminal import (
 )
 from apps.shell.agent.tools.workspace import (
     _apply_single_file_unified_diff,
+    _atomic_create_text,
     _atomic_write_text,
     _is_within,
     _safe_rel_path,
@@ -846,10 +847,16 @@ class ToolBroker:
         target = self._resolve_workspace_path(path, write=True)
         if not approved:
             return {"ok": False, "approval_required": True, "tool": "workspace.write_patch"}
-        mode = "patch"
+        creating = any(line == "--- /dev/null" for line in str(patch or "").splitlines())
+        mode = "create" if creating else "patch"
         if target.exists() and not target.is_file():
             return {"ok": False, "path": path, "error": "workspace.write_patch 只能写入普通文件"}
-        if not target.exists():
+        if creating and target.exists():
+            return {
+                "ok": False, "path": path,
+                "error": "workspace.write_patch create patch 要求目标文件不存在",
+            }
+        if not target.exists() and not creating:
             return {
                 "ok": False,
                 "path": path,
@@ -858,6 +865,11 @@ class ToolBroker:
         before_bytes = target.read_bytes() if target.exists() else b""
         before_sha256 = _sha256_bytes(before_bytes)
         clean_expected_sha256 = str(expected_sha256 or "").strip()
+        if creating and clean_expected_sha256 != before_sha256:
+            return {
+                "ok": False, "path": path,
+                "error": "workspace.write_patch create patch 要求明确的空文件 expected_sha256",
+            }
         if clean_expected_sha256 and clean_expected_sha256 != before_sha256:
             return {
                 "ok": False,
@@ -873,9 +885,20 @@ class ToolBroker:
                 "path": path,
                 "error": "workspace.write_patch patch 模式只支持 UTF-8 文本文件",
             }
-        content = _apply_single_file_unified_diff(before_text, str(patch or ""), expected_path=path)
+        content = _apply_single_file_unified_diff(
+            before_text, str(patch or ""), expected_path=path, allow_create=creating
+        )
         target.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write_text(target, content)
+        if creating:
+            try:
+                _atomic_create_text(target, content)
+            except OSError as exc:
+                return {
+                    "ok": False, "path": path,
+                    "error": f"workspace_patch_create_failed:{type(exc).__name__}",
+                }
+        else:
+            _atomic_write_text(target, content)
         after_sha256 = _sha256_file(target)
         postcondition_verified = bool(
             target.is_file()

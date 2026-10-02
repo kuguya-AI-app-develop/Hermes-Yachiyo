@@ -60,6 +60,22 @@ def _atomic_write_text(target: Path, content: str) -> None:
             tmp.unlink(missing_ok=True)
 
 
+def _atomic_create_text(target: Path, content: str) -> None:
+    """Publish a complete new file without replacing a concurrent target."""
+    tmp = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
+    created_tmp = False
+    try:
+        with tmp.open("xb") as stream:
+            created_tmp = True
+            stream.write(content.encode("utf-8"))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.link(tmp, target)
+    finally:
+        if created_tmp:
+            tmp.unlink(missing_ok=True)
+
+
 def _normalize_unified_diff_path(value: str) -> str:
     path = str(value or "").strip()
     if "\t" in path:
@@ -73,7 +89,9 @@ def _normalize_unified_diff_path(value: str) -> str:
     return _safe_rel_path(path)
 
 
-def _apply_single_file_unified_diff(original: str, patch: str, *, expected_path: str) -> str:
+def _apply_single_file_unified_diff(
+    original: str, patch: str, *, expected_path: str, allow_create: bool = False
+) -> str:
     if not patch.strip():
         raise AgentRuntimeError("workspace.write_patch patch 不能为空")
     if any(marker in patch for marker in ("GIT binary patch", "Binary files ")):
@@ -86,10 +104,16 @@ def _apply_single_file_unified_diff(original: str, patch: str, *, expected_path:
     new_headers = [line for line in lines if line.startswith("+++ ")]
     if len(old_headers) != 1 or len(new_headers) != 1:
         raise AgentRuntimeError("workspace.write_patch 只支持单文件 unified diff")
-    old_path = _normalize_unified_diff_path(old_headers[0][4:].rstrip("\r\n"))
+    creating = allow_create and old_headers[0][4:].rstrip("\r\n") == "/dev/null"
+    if creating and original:
+        raise AgentRuntimeError("workspace.write_patch create patch 要求空的原始内容")
+    old_path = (
+        None if creating
+        else _normalize_unified_diff_path(old_headers[0][4:].rstrip("\r\n"))
+    )
     new_path = _normalize_unified_diff_path(new_headers[0][4:].rstrip("\r\n"))
     clean_expected_path = _safe_rel_path(expected_path)
-    if old_path != clean_expected_path or new_path != clean_expected_path:
+    if (not creating and old_path != clean_expected_path) or new_path != clean_expected_path:
         raise AgentRuntimeError("workspace.write_patch patch 路径必须与目标 path 一致")
 
     original_lines = original.splitlines(keepends=True)
@@ -108,6 +132,13 @@ def _apply_single_file_unified_diff(original: str, patch: str, *, expected_path:
         old_start = int(match.group("old_start"))
         old_count = int(match.group("old_count") or "1")
         new_count = int(match.group("new_count") or "1")
+        if creating and (
+            hunk_count != 1 or old_start != 0 or old_count != 0
+            or int(match.group("new_start")) != 1 or new_count <= 0
+        ):
+            raise AgentRuntimeError(
+                "workspace.write_patch create patch 只允许单个 zero-old-line hunk"
+            )
         hunk_old_pos = max(0, old_start - 1)
         if hunk_old_pos < old_pos:
             raise AgentRuntimeError("workspace.write_patch hunk 顺序无效")

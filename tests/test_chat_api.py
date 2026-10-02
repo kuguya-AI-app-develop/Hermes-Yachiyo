@@ -20175,111 +20175,321 @@ def test_group_dispatch_partial_request_falls_back_to_missing_explicit_agent(tmp
 
 
 def test_group_explicit_agent_goal_dispatches_directly_without_main_model(tmp_path, monkeypatch):
+    _exercise_real_group_project_dispatch(tmp_path, monkeypatch, decision="approve")
+
+
+def _exercise_real_group_project_dispatch(tmp_path, monkeypatch, *, decision):
+    import hashlib
+    import subprocess
+    import sys
+
+    from apps.shell.agent.runtime.goal_runtime import runtime_goal_assessment, runtime_goal_contract
+    from apps.shell.agent.runtime.model_intent_planning import MODEL_INTENT_PLANNING_TOOL_NAME
+    from apps.shell.model_profiles import ModelProfileService
+
     api, runtime, store = _make_api(tmp_path)
     activity_store = ActivityStore(db_path=str(tmp_path / "activity.db"))
+    service = _make_agent_runtime_service(tmp_path)
+    profiles = ModelProfileService(
+        db_path=tmp_path / "profiles.db",
+        workspace_dir=tmp_path / "profiles",
+        credential_store=MemoryCredentialStore(),
+    )
     monkeypatch.setattr(chat_api_mod, "get_activity_store", lambda: activity_store)
-    design = {
-        "id": "agent_design",
-        "name": "Design Agent",
-        "nickname": "Design",
-        "kind": "agent",
-        "enabled": True,
-        "category": "design",
-        "description": "负责设计说明。",
-    }
-    coding = {
-        "id": "agent_coding",
-        "name": "Coding Agent",
-        "nickname": "furina",
-        "kind": "agent",
-        "enabled": True,
-        "category": "coding",
-        "description": "负责实现代码。",
-    }
-
-    class FakeRunnableService:
-        def __init__(self):
-            self.calls = []
-            self.runs = {}
-
-        def resolve_runnable(self, *, runnable_id="", name=""):
-            for runnable in (design, coding):
-                if runnable_id == runnable["id"] or name in {runnable["name"], runnable["nickname"]}:
-                    return runnable
-            return None
-
-        def create_run_for_runnable_async(
-            self,
-            *,
-            runnable_id="",
-            name="",
-            user_goal="",
-            run_group_id="",
-            upstream="",
-            on_complete=None,
-        ):
-            self.calls.append({
-                "runnable_id": runnable_id,
-                "name": name,
-                "user_goal": user_goal,
-                "run_group_id": run_group_id,
-                "upstream": upstream,
-            })
-            run = {
-                "run_id": f"agent_run_{runnable_id}",
-                "run_group_id": run_group_id or "run_group_direct",
-                "status": "completed",
-                "result": f"{runnable_id} 完成。",
-                "runnable": design if runnable_id == design["id"] else coding,
-            }
-            self.runs[run["run_id"]] = run
-            if on_complete:
-                on_complete(run)
-            return run
-
-        def get_run(self, run_id):
-            return self.runs[run_id]
-
-    service = FakeRunnableService()
     monkeypatch.setattr(chat_api_mod, "get_agent_runtime_service", lambda: service)
-    try:
-        created = api.create_group_session(name="demo Channel", participant_ids=[design["id"], coding["id"]])
-        assert created["ok"] is True
-        sent = api.send_message("请 Design Agent 和 Coding Agent 一起做一个小项目")
-        assert sent["ok"] is True
-        assert sent["status"] == "completed"
+    monkeypatch.setattr("apps.core.chat_store.get_chat_store", lambda: store)
+    monkeypatch.setattr("apps.shell.agent_runtime.get_model_profile_service", lambda: profiles)
+    monkeypatch.setattr("apps.shell.model_profiles.openai_compatible_chat", lambda *_a, **_k: "OK")
+    runtime.agent_runtime_service = service
+    goal = "请 Design Agent 和 Coding Agent 一起做一个小项目"
+    design_content = (
+        "# Greeting project\n\n"
+        "A small Python CLI prints Hello, World! with a reusable greet function."
+    )
+    source = 'def greet(name):\n    return f"Hello, {name}!"\n\nprint(greet("World"))\n'
+    patch = "--- /dev/null\n+++ app.py\n@@ -0,0 +1,4 @@\n" + "".join(
+        "+" + line for line in source.splitlines(keepends=True)
+    )
+    model_calls = []
+    model_state = {"second_patch_requested": False}
+    workdirs = {}
+    agents = []
 
-        parent_task = runtime.state.get_task(sent["task_id"])
-        assert parent_task.status == TaskStatus.COMPLETED
-        assert [call["runnable_id"] for call in service.calls] == [design["id"], coding["id"]]
-        assert service.calls[0]["run_group_id"] == ""
-        assert service.calls[1]["run_group_id"] == "run_group_direct"
-        assert "这是群组用户消息的直接派发" in service.calls[0]["user_goal"]
-        assert "请 Design Agent 和 Coding Agent 一起做一个小项目" in service.calls[1]["user_goal"]
+    def tool_response(name, arguments):
+        return {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": name,
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": json.dumps(arguments, ensure_ascii=False),
+                    },
+                }
+            ],
+        }
 
-        messages = api.get_messages()["messages"]
-        parent = next(
-            message
+    def model(_base, model_name, _key, messages, *, tools=None):
+        assert model_name in {"design-fixture", "coding-fixture"}
+        tool_names = {(tool.get("function") or {}).get("name") for tool in tools or []}
+        model_calls.append((model_name, tool_names))
+        if MODEL_INTENT_PLANNING_TOOL_NAME in tool_names:
+            planning_context = json.loads(messages[-1]["content"])
+            assert planning_context["original_goal"] == goal
+            return tool_response(
+                MODEL_INTENT_PLANNING_TOOL_NAME,
+                {
+                    "intent_kind": "report_generation"
+                    if model_name == "design-fixture"
+                    else "code_task",
+                    "planning_goal": goal
+                    + ("，生成项目设计说明文档" if model_name == "design-fixture" else ""),
+                    "action_evidence": "做一个小项目",
+                },
+            )
+        context = "\n".join(str(message.get("content") or "") for message in messages)
+        agent_name = "Design Agent" if model_name == "design-fixture" else "Coding Agent"
+        assert f"# Agent\nName: {agent_name}" in context
+        if model_name == "design-fixture":
+            if "Runtime follow-up context:" in messages[-1].get("content", ""):
+                return {"role": "assistant", "content": design_content}
+            if any(
+                message.get("role") == "tool" and "artifact.write" in str(message.get("content"))
+                for message in messages
+            ):
+                return {"role": "assistant", "content": "设计文档已实际写入并验证。"}
+            assert "artifact_write" in tool_names
+            return tool_response("artifact_write", {"path": "report.md", "content": design_content})
+        if any(
+            message.get("role") == "tool" and "sha256_after" in str(message.get("content"))
             for message in messages
-            if message["role"] == "assistant" and message["task_id"] == sent["task_id"]
+        ):
+            if decision == "second_approval" and not model_state["second_patch_requested"]:
+                model_state["second_patch_requested"] = True
+                return tool_response(
+                    "workspace_write_patch",
+                    {
+                        "path": "app.py",
+                        "patch": (
+                            '--- app.py\n+++ app.py\n@@ -4 +4 @@\n'
+                            '-print(greet("World"))\n+print(greet("Team"))\n'
+                        ),
+                        "expected_sha256": hashlib.sha256(source.encode()).hexdigest(),
+                    },
+                )
+            return {"role": "assistant", "content": "Python 项目源码已实际写入并验证。"}
+        assert "workspace_write_patch" in tool_names
+        return tool_response(
+            "workspace_write_patch",
+            {"path": "app.py", "patch": patch, "expected_sha256": hashlib.sha256(b"").hexdigest()},
+        )
+
+    monkeypatch.setattr("apps.shell.agent_runtime.openai_compatible_chat_message", model)
+    try:
+        for name, nickname, model_name, description, allowed in (
+            (
+                "Design Agent",
+                "Design",
+                "design-fixture",
+                "负责设计说明。",
+                ["workspace.list", "artifact.write"],
+            ),
+            (
+                "Coding Agent",
+                "furina",
+                "coding-fixture",
+                "负责实现代码。",
+                ["workspace.list", "workspace.read", "workspace.write_patch"],
+            ),
+        ):
+            profile = profiles.create_profile(
+                {
+                    "name": name + " profile",
+                    "capability": "chat",
+                    "base_url": "https://model.example.test/v1",
+                    "model": model_name,
+                    "api_key": "test-only",
+                }
+            )
+            assert profiles.test_profile(profile["profile_id"])["ok"]
+            assert profiles.get_profile(profile["profile_id"])["status"] == "available"
+            workspace = tmp_path / model_name
+            workspace.mkdir()
+            agent = service.create_agent(
+                {
+                    "name": name,
+                    "nickname": nickname,
+                    "description": description,
+                    "model_mode": "profile",
+                    "model_profile_id": profile["profile_id"],
+                    "tool_policy": {
+                        "allowed_tools": allowed,
+                        "approval_required": {"workspace.write_patch": True},
+                    },
+                    "workspace_policy": {
+                        "default_workdir": str(workspace),
+                        "readable_scopes": ["."],
+                        "writable_scopes": ["."],
+                    },
+                }
+            )
+            agents.append(agent)
+            workdirs[agent["agent_id"]] = workspace
+        created = api.create_group_session(
+            name="demo Channel", participant_ids=[a["agent_id"] for a in agents]
+        )
+        assert created["ok"]
+        sent = api.send_message(goal)
+        assert sent["ok"] and sent["status"] == "processing", sent
+        parent_id = service.get_task_run_link(sent["task_id"])["run_id"]
+
+        def children():
+            return [r for r in service.list_runs(limit=20)["runs"] if r["kind"] == "agent_run"]
+
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            runs = children()
+            if len(runs) == 2 and all(
+                r["status"] in {"completed", "approval_required", "failed"} for r in runs
+            ):
+                break
+            time.sleep(0.02)
+        assert len(runs) == 2, runs
+        coding = next(r for r in runs if r["runnable_id"] == agents[1]["agent_id"])
+        design = next(r for r in runs if r["runnable_id"] == agents[0]["agent_id"])
+        assert design["status"] == "completed", design["result"]
+        assert coding["status"] == "approval_required", coding["result"]
+        assert not (workdirs[agents[1]["agent_id"]] / "app.py").exists()
+        api.get_messages()
+        assert service.get_run(parent_id)["status"] == "running"
+        assert runtime.state.get_task(sent["task_id"]).status == TaskStatus.RUNNING
+        assert design["user_goal"] == coding["user_goal"] == goal
+        approval = coding["pending_approval"]
+        assert approval["tool"] == "workspace.write_patch"
+        if decision in {"reject", "cancel"}:
+            if decision == "reject":
+                service.reject_run_approval(
+                    coding["run_id"], expected_approval_id=approval["approval_id"]
+                )
+            else:
+                service.cancel_run(parent_id)
+            api.get_messages()
+            assert service.get_run(parent_id)["status"] == (
+                "failed" if decision == "reject" else "cancelled"
+            )
+            assert runtime.state.get_task(sent["task_id"]).status == (
+                TaskStatus.FAILED if decision == "reject" else TaskStatus.CANCELLED
+            )
+            assert not (workdirs[agents[1]["agent_id"]] / "app.py").exists()
+            return
+        service.approve_run_approval(coding["run_id"], expected_approval_id=approval["approval_id"])
+        if decision == "second_approval":
+            second = service.get_run(coding["run_id"])
+            assert second["status"] == "approval_required", second["result"]
+            assert second["pending_approval"]["approval_id"] != approval["approval_id"]
+            api.get_messages()
+            assert service.get_run(parent_id)["status"] == "running"
+            assert runtime.state.get_task(sent["task_id"]).status == TaskStatus.RUNNING
+            contract = runtime_goal_contract(
+                run_id=second["run_id"],
+                original_goal=goal,
+                runtime_execution_envelope=None,
+                runtime_execution_metadata=None,
+                messages=[],
+                timeline=second["timeline"],
+            )
+            assert runtime_goal_assessment(contract, second["timeline"]).completed
+            assert (workdirs[agents[1]["agent_id"]] / "app.py").read_text() == source
+            service.reject_run_approval(
+                second["run_id"], expected_approval_id=second["pending_approval"]["approval_id"]
+            )
+            api.get_messages()
+            assert service.get_run(parent_id)["status"] == "failed"
+            assert runtime.state.get_task(sent["task_id"]).status == TaskStatus.FAILED
+            assert (workdirs[agents[1]["agent_id"]] / "app.py").read_text() == source
+            return
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            messages = api.get_messages()["messages"]
+            if service.get_run(parent_id)["status"] in {"completed", "failed", "cancelled"} and any(
+                m["role"] == "assistant"
+                and m["task_id"] == sent["task_id"]
+                and m["status"] in {"completed", "failed"}
+                for m in messages
+            ):
+                break
+            time.sleep(0.02)
+        final = service.get_run(parent_id)
+        assert final["status"] == "completed", (
+            final["result"],
+            [(r["status"], r["result"], r["pending_approval"]) for r in children()],
+        )
+        assert runtime.state.get_task(sent["task_id"]).status == TaskStatus.COMPLETED
+        parent_contract = runtime_goal_contract(
+            run_id=parent_id,
+            original_goal=goal,
+            runtime_execution_envelope=None,
+            runtime_execution_metadata=None,
+            messages=[],
+            timeline=final["timeline"],
+        )
+        assert parent_contract.original_goal == goal
+        assert runtime_goal_assessment(parent_contract, final["timeline"]).completed
+        runs = children()
+        assert {r["runnable_id"] for r in runs} == {a["agent_id"] for a in agents}
+        group_id = design["run_group_id"]
+        assert group_id and all(r["run_group_id"] == group_id for r in runs)
+        for run in runs:
+            assert run["status"] == "completed", run["result"]
+            assert run["user_goal"] == goal
+            contract = runtime_goal_contract(
+                run_id=run["run_id"],
+                original_goal=goal,
+                runtime_execution_envelope=None,
+                runtime_execution_metadata=None,
+                messages=[],
+                timeline=run["timeline"],
+            )
+            assert runtime_goal_assessment(contract, run["timeline"]).completed
+        artifact = service.read_run_artifact(design["run_id"], "report.md")
+        assert artifact["content"] == design_content
+        assert (
+            hashlib.sha256(artifact["content"].encode()).hexdigest()
+            == hashlib.sha256(design_content.encode()).hexdigest()
+        )
+        code_path = workdirs[agents[1]["agent_id"]] / "app.py"
+        assert code_path.read_text() == source
+        compile(code_path.read_text(), str(code_path), "exec")
+        executed = subprocess.run(
+            [sys.executable, str(code_path)], capture_output=True, text=True, check=True
+        )
+        assert executed.stdout == "Hello, World!\n"
+        parent = next(
+            m for m in messages if m["role"] == "assistant" and m["task_id"] == sent["task_id"]
         )
         delegated = [
-            message
-            for message in messages
-            if message["metadata"].get("delegated_by_task_id") == sent["task_id"]
+            m for m in messages if m["metadata"].get("delegated_by_task_id") == sent["task_id"]
         ]
         assert parent["status"] == "completed"
         assert parent["metadata"]["group_dispatch_direct"] is True
         assert parent["metadata"]["group_dispatch_count"] == 2
-        assert parent["metadata"]["group_dispatch_run_group_id"] == "run_group_direct"
+        assert parent["metadata"]["group_dispatch_run_group_id"] == group_id
         assert "用户已明确点名群内 Agent" in parent["content"]
         assert "我把 2 个任务分别派给 Design、furina 了。" in parent["content"]
         assert len(delegated) == 2
-        assert {message["metadata"]["run_id"] for message in delegated} == {
-            "agent_run_agent_design",
-            "agent_run_agent_coding",
-        }
+        assert {m["metadata"]["run_id"] for m in delegated} == {r["run_id"] for r in runs}
+        assert len([c for c in model_calls if MODEL_INTENT_PLANNING_TOOL_NAME in c[1]]) == 2
+        assert not parent["metadata"].get("group_agent_summary_pending")
+        assert not parent["metadata"].get("group_agent_summary_task_id")
+        assert not any(
+            m["metadata"].get("group_agent_summary_for_task_id") == sent["task_id"]
+            for m in messages
+        )
     finally:
+        service.close()
+        profiles.close()
         activity_store.close()
         store.close()
 
