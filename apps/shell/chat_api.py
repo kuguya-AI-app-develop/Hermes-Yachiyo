@@ -2792,7 +2792,8 @@ class ChatAPI:
 
             task = self._state.create_task(
                 task_type=TaskType.GENERAL,
-                description=self._delegated_run_summary_task_description(run, activity),
+                description="Summarize the supplied context.",
+                response_context=self._delegated_run_summary_task_description(run, activity),
                 chat_session_id=self._session.session_id,
             )
             source_task_id = str(activity.get("task_id") or "")
@@ -8024,7 +8025,8 @@ class ChatAPI:
 
             task = self._state.create_task(
                 task_type=TaskType.GENERAL,
-                description=self._group_agent_summary_task_description(parent, children),
+                description="Summarize the supplied context.",
+                response_context=self._group_agent_summary_task_description(parent, children),
                 chat_session_id=self._session.session_id,
             )
             self._session.upsert_assistant_message(
@@ -8163,7 +8165,8 @@ class ChatAPI:
 
             task = self._state.create_task(
                 task_type=TaskType.GENERAL,
-                description=self._group_direct_agent_summary_task_description(agent_message),
+                description="Summarize the supplied context.",
+                response_context=self._group_direct_agent_summary_task_description(agent_message),
                 chat_session_id=self._session.session_id,
             )
             self._session.upsert_assistant_message(

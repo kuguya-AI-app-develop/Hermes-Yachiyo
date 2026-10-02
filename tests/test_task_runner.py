@@ -10,8 +10,8 @@ import pytest
 import apps.core.activity_store as activity_store_mod
 import apps.core.chat_store as chat_store_mod
 import apps.core.task_runner as task_runner_mod
-import apps.shell.proactive as proactive_mod
 import apps.shell.chat_api as chat_api_mod
+import apps.shell.proactive as proactive_mod
 from apps.core.activity_store import ActivityStore
 from apps.core.chat_session import ChatSession, MessageStatus
 from apps.core.chat_store import ChatStore
@@ -19,6 +19,7 @@ from apps.core.executor import NativeAgentExecutor, NativeAgentUnavailableExecut
 from apps.core.special_sessions import PROACTIVE_CHAT_SESSION_ID
 from apps.core.state import AppState
 from apps.core.task_runner import TaskRunner
+from apps.shell.agent.runtime.model_intent_planning import MODEL_INTENT_PLANNING_TOOL_NAME
 from apps.shell.agent_runtime import AgentRuntimeService
 from apps.shell.chat_api import ChatAPI
 from apps.shell.config import Live2DModeConfig
@@ -767,9 +768,9 @@ async def test_task_runner_main_chat_auto_delegation_uses_native_runtime(tmp_pat
         summary_task = state.get_task(summary_created["task_id"])
         assert summary_task is not None
         assert summary_task.chat_session_id == session.session_id
-        assert "[Oha-Yachiyo 自动委派 Run 汇总]" in summary_task.description
-        assert "Research Agent：已完成" in summary_task.description
-        assert "汇报：Research Agent native delegation result" in summary_task.description
+        assert "[Oha-Yachiyo 自动委派 Run 汇总]" in summary_task.response_context
+        assert "Research Agent：已完成" in summary_task.response_context
+        assert "汇报：Research Agent native delegation result" in summary_task.response_context
 
         await runner._execute_with_state(summary_task.task_id)
 
@@ -948,9 +949,9 @@ async def test_task_runner_group_dispatch_summary_uses_native_runtime(tmp_path, 
         assert summary_message["status"] == "processing"
         assert summary_task is not None
         assert summary_task.chat_session_id == session.session_id
-        assert "[Oha-Yachiyo 群组 Agent 汇总]" in summary_task.description
-        assert "Coding：已完成" in summary_task.description
-        assert "汇报：Coding native dispatch result" in summary_task.description
+        assert "[Oha-Yachiyo 群组 Agent 汇总]" in summary_task.response_context
+        assert "Coding：已完成" in summary_task.response_context
+        assert "汇报：Coding native dispatch result" in summary_task.response_context
 
         await runner._execute_with_state(summary_task.task_id)
 
@@ -1024,7 +1025,7 @@ async def test_task_runner_direct_group_agent_summary_uses_native_runtime(tmp_pa
             assert "不要再派发新的 Agent 任务" in last_content
             return {"role": "assistant", "content": "主模型整理：Design 的直接执行结果已归档。"}
         assert "# Agent\nName: Design Agent" in last_content
-        assert "# User Goal\n请回应 Native 验证标记" in last_content
+        assert "# User Goal\nRespond with exactly 'Design native direct result'." in last_content
         assert "[Oha-Yachiyo 群组执行约定]" in last_content
         assert "你在群内身份是：Design" in last_content
         return {"role": "assistant", "content": "Design native direct result"}
@@ -1061,7 +1062,7 @@ async def test_task_runner_direct_group_agent_summary_uses_native_runtime(tmp_pa
         assert created["ok"] is True
         assert created["session_context"]["conversation_kind"] == "group"
 
-        sent = api.send_message("请回应 Native 验证标记", runnable_id=design["agent_id"])
+        sent = api.send_message("Respond with exactly 'Design native direct result'.", runnable_id=design["agent_id"])
         assert sent["ok"] is True
         assert sent["agent_run_id"]
 
@@ -1099,9 +1100,9 @@ async def test_task_runner_direct_group_agent_summary_uses_native_runtime(tmp_pa
         summary_task = state.get_task(summary_message["task_id"])
         assert summary_task is not None
         assert summary_task.chat_session_id == session.session_id
-        assert "[Oha-Yachiyo 群组直接 Agent 汇总]" in summary_task.description
-        assert "Design：已完成" in summary_task.description
-        assert "汇报：Design native direct result" in summary_task.description
+        assert "[Oha-Yachiyo 群组直接 Agent 汇总]" in summary_task.response_context
+        assert "Design：已完成" in summary_task.response_context
+        assert "汇报：Design native direct result" in summary_task.response_context
 
         await runner._execute_with_state(summary_task.task_id)
 
@@ -1165,13 +1166,35 @@ async def test_task_runner_direct_group_agent_rejected_summary_uses_native_runti
     def fake_chat(_base_url, _model, _api_key, messages, *, tools=None):
         model_calls.append(messages)
         last_content = str(messages[-1]["content"])
+        if any(
+            (tool.get("function") or {}).get("name") == MODEL_INTENT_PLANNING_TOOL_NAME
+            for tool in tools or []
+        ):
+            proposal = {
+                "intent_kind": "code_task",
+                "planning_goal": "请执行终端命令 `printf should-not-run`",
+                "action_evidence": "执行终端命令 `printf should-not-run`",
+            }
+            return {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "call_intent",
+                    "type": "function",
+                    "function": {
+                        "name": MODEL_INTENT_PLANNING_TOOL_NAME,
+                        "arguments": json.dumps(proposal, ensure_ascii=False),
+                    },
+                }],
+            }
         if "[Oha-Yachiyo 群组直接 Agent 汇总]" in last_content:
             assert "Design：已取消" in last_content
             assert "汇报：工具审批已拒绝：Rejected by user" in last_content
             assert "不要再派发新的 Agent 任务" in last_content
             return {"role": "assistant", "content": "主模型整理：Design 的审批拒绝已告知用户。"}
-        assert "# Agent\nName: Design Agent" in last_content
-        assert "# User Goal\n完成需要审批的工具验证" in last_content
+        context = "\n".join(str(message.get("content") or "") for message in messages)
+        assert "# Agent\nName: Design Agent" in context
+        assert "# User Goal\n请执行终端命令 `printf should-not-run`" in context
         assert any((tool.get("function") or {}).get("name") == "terminal_run" for tool in tools or [])
         return {
             "role": "assistant",
@@ -1231,17 +1254,18 @@ async def test_task_runner_direct_group_agent_rejected_summary_uses_native_runti
         assert created["ok"] is True
         assert created["session_context"]["conversation_kind"] == "group"
 
-        sent = api.send_message("完成需要审批的工具验证", runnable_id=design["agent_id"])
+        sent = api.send_message("请执行终端命令 `printf should-not-run`", runnable_id=design["agent_id"])
         assert sent["ok"] is True
         assert sent["agent_run_id"]
 
         waiting = await _wait_for(
             lambda: (
                 service.get_run(sent["agent_run_id"])
-                if service.get_run(sent["agent_run_id"])["status"] == "approval_required"
+                if service.get_run(sent["agent_run_id"])["status"] in {"approval_required", "failed", "cancelled"}
                 else None
             )
         )
+        assert waiting["status"] == "approval_required", waiting.get("result")
         assert waiting["kind"] == "agent_run"
         assert waiting["pending_approval"]["tool"] == "terminal.run"
 
@@ -1276,9 +1300,9 @@ async def test_task_runner_direct_group_agent_rejected_summary_uses_native_runti
         summary_task = state.get_task(summary_message["task_id"])
         assert summary_task is not None
         assert summary_task.chat_session_id == session.session_id
-        assert "[Oha-Yachiyo 群组直接 Agent 汇总]" in summary_task.description
-        assert "Design：已取消" in summary_task.description
-        assert "汇报：工具审批已拒绝：Rejected by user" in summary_task.description
+        assert "[Oha-Yachiyo 群组直接 Agent 汇总]" in summary_task.response_context
+        assert "Design：已取消" in summary_task.response_context
+        assert "汇报：工具审批已拒绝：Rejected by user" in summary_task.response_context
 
         await runner._execute_with_state(summary_task.task_id)
 
