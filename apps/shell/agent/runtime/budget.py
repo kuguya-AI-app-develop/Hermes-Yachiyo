@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import time
 import json
+import os
+import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -14,12 +15,23 @@ from apps.shell.agent.runtime.errors import AgentRuntimeError
 class RunBudgetLimits:
     max_model_calls: int = 50
     max_tool_calls: int = 100
-    max_terminal_calls: int = 10
+    max_terminal_calls: int = 50
     max_run_duration_seconds: int = 600
     max_workflow_steps: int = 200
     max_model_output_chars: int = 200_000
     max_tool_output_chars: int = 100_000
     max_context_chars: int = 200_000
+
+
+    @classmethod
+    def from_environment(cls) -> "RunBudgetLimits":
+        """Apply an operator-controlled terminal budget without disabling other guards."""
+        raw = os.environ.get("OHA_YACHIYO_AGENT_MAX_TERMINAL_CALLS", "").strip()
+        try:
+            configured = int(raw) if raw else cls().max_terminal_calls
+        except ValueError:
+            configured = cls().max_terminal_calls
+        return cls(max_terminal_calls=max(0, min(configured, 1000)))
 
 
 @dataclass
