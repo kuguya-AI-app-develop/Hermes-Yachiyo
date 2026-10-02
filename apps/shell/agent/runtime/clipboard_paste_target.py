@@ -3,6 +3,8 @@
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from .private_native_observation import PrivateNativeObservationChannel
+
 _AUTHORITY = object()
 _KEY = "_runtime_private_clipboard_target"
 
@@ -103,7 +105,6 @@ def prepare_clipboard_paste_targets(
             continue
         expected = all_expected
         actual = requests
-        paste = next(r for r in actual if _step(r) == paste_id)
         hint = decision.selected_intent.inputs.get("direct_message_hint")
         recipient = str(hint.get("recipient") or "") if isinstance(hint, Mapping) else ""
         send_required = any(
@@ -111,12 +112,17 @@ def prepare_clipboard_paste_targets(
             and (r.get("input") or {}).get("action") == "send"
             for r in canonical
         )
-        paste[_KEY] = {
+        binding = {
             "_authority": _AUTHORITY,
+            "paste_step_id": paste_id,
+            "specs": {step: expected[step] for step in ids},
             "target_request": expected[target_id],
             "recipient": recipient,
             "send_required": send_required,
         }
+        for request in actual:
+            if _step(request) in ids:
+                request[_KEY] = binding
 
 
 def observed_clipboard_paste_target(
@@ -126,6 +132,7 @@ def observed_clipboard_paste_target(
     *,
     run_id: str,
     before_dispatch: bool = False,
+    private_observations: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Bind one recent focused editable AX object, with exact source lineage."""
     binding = request.get(_KEY)
@@ -189,6 +196,19 @@ def observed_clipboard_paste_target(
         event, observed
     ):
         return {}
+    raw_data = private_clipboard_paste_observation_data(
+        {
+            **event,
+            _KEY: binding,
+            "tool": "desktop.ui_elements",
+            "input": expected["input"],
+            "depends_on": expected.get("depends_on"),
+        },
+        private_observations,
+        run_id=run_id,
+    )
+    if raw_data:
+        observed = {**observed, "data": raw_data}
     data = observed.get("data")
     if not isinstance(data, Mapping) or data.get("truncated") is True:
         return {}
@@ -261,10 +281,80 @@ def observed_clipboard_paste_target(
         "target_ui_element": label,
         "pre_paste_target_identity": identity,
         "pre_paste_tool_call_id": event["tool_call_id"],
+        **({"composer_required": True} if binding.get("send_required") else {}),
         **({"target_recipient": recipient} if recipient else {}),
     }
 
 
 def clipboard_paste_target_is_bound(request: Mapping[str, Any]) -> bool:
     binding = request.get(_KEY)
-    return isinstance(binding, Mapping) and binding.get("_authority") is _AUTHORITY
+    return (
+        isinstance(binding, Mapping)
+        and binding.get("_authority") is _AUTHORITY
+        and _step(request) == binding.get("paste_step_id")
+    )
+
+
+def clipboard_paste_observation_is_bound(request: Mapping[str, Any]) -> bool:
+    binding = request.get(_KEY)
+    if not isinstance(binding, Mapping) or binding.get("_authority") is not _AUTHORITY:
+        return False
+    spec = (binding.get("specs") or {}).get(_step(request))
+    return bool(
+        isinstance(spec, Mapping)
+        and request.get("tool") in {"clipboard.read", "desktop.ui_elements"}
+        and all(
+            request.get(k) == spec.get(k) for k in ("tool", "plan_id", "request_id", "depends_on")
+        )
+        and dict(request.get("input") or request.get("input_preview") or {})
+        == dict(spec.get("input") or {})
+    )
+
+
+def private_clipboard_paste_observation_data(
+    request: Mapping[str, Any],
+    private_observations: dict[str, dict[str, Any]] | None,
+    *,
+    run_id: str,
+    consume: bool = False,
+) -> dict[str, Any]:
+    """Keep original bytes confined to this exact, canonically owned read."""
+    if not private_observations or not clipboard_paste_observation_is_bound(request):
+        return {}
+    call_id = str(request.get("tool_call_id") or "")
+    record = private_observations.get(call_id)
+    if not isinstance(record, Mapping) or record.get("_authority") is not _AUTHORITY:
+        return {}
+    expected = {
+        key: str(request.get(key) or "")
+        for key in ("run_id", "plan_id", "request_id", "tool_call_id", "step_id", "tool")
+    }
+    expected["run_id"] = run_id
+    if not all(expected.values()) or record.get("scope") != expected:
+        return {}
+    if consume:
+        private_observations.pop(call_id, None)
+    data = record.get("data")
+    return dict(data) if isinstance(data, Mapping) else {}
+
+
+_OBSERVATION_CHANNEL = PrivateNativeObservationChannel(
+    clipboard_paste_observation_is_bound,
+    authority=_AUTHORITY,
+    tools=frozenset({"clipboard.read", "desktop.ui_elements"}),
+)
+CLIPBOARD_OBSERVATION_RESULT_KEY = "_runtime_private_clipboard_observation"
+
+
+def capture_clipboard_paste_observation(
+    request: Mapping[str, Any], raw_result: Mapping[str, Any], *, local_broker_executed: bool
+) -> Any:
+    return _OBSERVATION_CHANNEL.capture(
+        request, raw_result, local_broker_executed=local_broker_executed
+    )
+
+
+def consume_clipboard_paste_observation(
+    token: Any, request: Mapping[str, Any], *, run_id: str
+) -> dict[str, Any]:
+    return _OBSERVATION_CHANNEL.consume(token, request, run_id=run_id)

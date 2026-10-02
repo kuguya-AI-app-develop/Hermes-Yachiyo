@@ -1,5 +1,7 @@
 """Explicit paste uses a private source and one observed editable target."""
 
+import json
+import re
 from copy import deepcopy
 from types import SimpleNamespace
 
@@ -250,7 +252,15 @@ def test_after_paste_readback_must_match_same_focused_editable_identity_and_byte
     )
 
 
-@pytest.mark.parametrize("exact", ["clipboard content", "原文\n  literal  "])
+@pytest.mark.parametrize(
+    "exact",
+    [
+        "clipboard content",
+        "原文\n  literal  ",
+        "前导\t第二行\r\n尾巴  ",
+        "api_key=sk-abcdefghijklmnopqrstuvwxyz0123456789\r\n  literal  ",
+    ],
+)
 def test_real_main_chat_paste_reads_exact_source_and_waits_before_actual_approved_send(
     tmp_path, monkeypatch, exact
 ):
@@ -300,25 +310,31 @@ def test_real_main_chat_paste_reads_exact_source_and_waits_before_actual_approve
         }
 
     def ui(**kwargs):
+        from apps.shell.agent.tools import desktop
+
         calls.append("ui")
+        focused = {
+            "app_name": "WeChat",
+            "pid": 100,
+            "window_id": 200,
+            "role": "AXTextArea",
+            "name": "Message",
+            "identifier": "composer-1",
+            "value": state["value"],
+            "focused": True,
+        }
+        display_value = re.sub(r"[\t\r\n]+", " ", state["value"])
+        native = (
+            "META\tWeChat\t100\tChat\t200\n"
+            "1\tAXTextArea\t\tMessage\tMessage composer\t"
+            + display_value
+            + "\ttrue\t0\t0\t100\t100\n"
+            "FOCUSED\t" + json.dumps(focused)
+        )
         return {
             "ok": True,
             "action": "desktop.ui_elements",
-            "data": {
-                "app_name": "WeChat",
-                "pid": 100,
-                "window_id": 200,
-                "elements": [
-                    {
-                        "role": "AXTextArea",
-                        "name": "Message",
-                        "identifier": "composer-1",
-                        "value": state["value"],
-                        "focused": True,
-                        "editable": True,
-                    }
-                ],
-            },
+            "data": desktop._parse_ui_elements_output(native),
         }
 
     def paste(action):
@@ -434,3 +450,35 @@ def test_named_paste_target_comes_from_immutable_goal_and_exact_order(mutation):
         pt.observed_clipboard_paste_target(paste, events[-1]["result"], events, run_id="run-paste")
         == {}
     )
+
+
+@pytest.mark.parametrize(
+    "mutation", ["foreign_channel", "wrong_scope", "second_use", "public_copy"]
+)
+def test_private_paste_observation_cannot_be_replayed_or_minted_by_public_mapping(mutation):
+    requests, paste, verifier, events, _source = _case()
+    target = next(r for r in requests if r["step_id"].startswith("inspect-clipboard-paste-target-"))
+    raw = deepcopy(events[0]["result"])
+    raw["data"]["focused_element"] = dict(raw["data"]["elements"][0])
+    token = pt.capture_clipboard_paste_observation(target, raw, local_broker_executed=True)
+    assert token is not None
+    if mutation == "foreign_channel":
+        from apps.shell.agent.runtime.private_native_observation import (
+            PrivateNativeObservationChannel,
+        )
+
+        channel = PrivateNativeObservationChannel(lambda r: True, authority=object())
+        token = channel.capture(target, raw, local_broker_executed=True)
+    elif mutation == "wrong_scope":
+        target = {**target, "tool_call_id": "foreign-call"}
+    elif mutation == "second_use":
+        assert pt.consume_clipboard_paste_observation(token, target, run_id="run-paste")
+    elif mutation == "public_copy":
+        token = {
+            "scope": {
+                k: target[k]
+                for k in ("run_id", "plan_id", "request_id", "tool_call_id", "step_id", "tool")
+            },
+            "data": raw["data"],
+        }
+    assert pt.consume_clipboard_paste_observation(token, target, run_id="run-paste") == {}

@@ -25,6 +25,12 @@ from apps.shell.agent.runtime.clipboard_copy_transaction import (
     exact_copy_observation,
     prepare_copy_transactions,
 )
+from apps.shell.agent.runtime.clipboard_paste_target import (
+    CLIPBOARD_OBSERVATION_RESULT_KEY,
+    capture_clipboard_paste_observation,
+    consume_clipboard_paste_observation,
+    private_clipboard_paste_observation_data,
+)
 from apps.shell.agent.runtime.desktop_execution_providers import (
     LOCAL_DESKTOP_PROVIDER_ID,
     LOCAL_DESKTOP_PROVIDER_KIND,
@@ -5705,8 +5711,10 @@ class RuntimeToolCallExecutor:
         # below and never written back to model-authored input.
         ensure_tool_call_id(tool_request)
         tool_request = dict(tool_request)
-        private_copy_request = dict(tool_request) if copy_transaction_bound(tool_request) else {}
+        private_native_request = dict(tool_request)
         tool_request.pop(COPY_TRANSACTION_KEY, None)
+        tool_request.pop("_runtime_private_clipboard_target", None)
+        tool_request.pop("_runtime_private_typed_observation", None)
         private_prepared_submit_context = tool_request.pop(
             _RUNTIME_PRIVATE_PREPARED_SUBMIT_REQUEST_KEY,
             None,
@@ -6097,7 +6105,10 @@ class RuntimeToolCallExecutor:
             }
         self._assert_execution_lease(run_id)
         private_copy_observation = capture_copy_observation(
-            private_copy_request, tool_result, local_broker_executed=local_broker_executed,
+            private_native_request, tool_result, local_broker_executed=local_broker_executed,
+        )
+        private_clipboard_observation = capture_clipboard_paste_observation(
+            private_native_request, tool_result, local_broker_executed=local_broker_executed,
         )
         tool_result = self._limit_tool_result(tool_result)
         tool_result = _tool_result_with_desktop_provider_session_context(
@@ -6236,8 +6247,15 @@ class RuntimeToolCallExecutor:
                         artifact_context,
                     ),
                 )
+        private_observation_results = {}
         if private_copy_observation is not None:
-            return {**tool_result, COPY_OBSERVATION_RESULT_KEY: private_copy_observation}
+            private_observation_results[COPY_OBSERVATION_RESULT_KEY] = private_copy_observation
+        if private_clipboard_observation is not None:
+            private_observation_results[CLIPBOARD_OBSERVATION_RESULT_KEY] = (
+                private_clipboard_observation
+            )
+        if private_observation_results:
+            return {**tool_result, **private_observation_results}
         if (
             private_exact_submit_result
             and str(tool_result.get("submitted_action") or "").strip()
@@ -6737,6 +6755,7 @@ def _private_clipboard_paste_binding_from_action(
     run_id: str,
     tool_sequence: int,
     timeline: Sequence[Mapping[str, Any]] = (),
+    private_observations: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if source_receipt.get("_authority") is not (
         _RUNTIME_PRIVATE_CLIPBOARD_SOURCE_AUTHORITY
@@ -6789,6 +6808,7 @@ def _private_clipboard_paste_binding_from_action(
         from .clipboard_paste_target import observed_clipboard_paste_target
         focused_target = observed_clipboard_paste_target(
             paste_request, paste_result, timeline, run_id=clean_run_id,
+            private_observations=private_observations,
         )
         if focused_target:
             target_app_name = focused_target["target_app_name"]
@@ -8106,6 +8126,7 @@ class RuntimeToolRequestRunner:
         active_window_verification_target: dict[str, Any] | None = None
         private_clipboard_source_receipts: dict[str, dict[str, Any]] = {}
         private_copy_observations: dict[str, dict[str, Any]] = {}
+        private_clipboard_observations: dict[str, dict[str, Any]] = {}
         private_clipboard_paste_bindings: dict[str, dict[str, Any]] = {}
         private_prepared_submit_contexts: dict[str, dict[str, Any]] = {}
         private_exact_submit_dispatch_receipts: dict[str, dict[str, Any]] = {}
@@ -8703,6 +8724,7 @@ class RuntimeToolRequestRunner:
             from .clipboard_paste_target import clipboard_paste_target_is_bound, observed_clipboard_paste_target
             if clipboard_paste_target_is_bound(tool_request) and not observed_clipboard_paste_target(
                 tool_request, {}, timeline, run_id=run_id, before_dispatch=True,
+                private_observations=private_clipboard_observations,
             ):
                 blocked_result = {
                     "ok": False, "action": tool_name, "status": "blocked",
@@ -8861,6 +8883,14 @@ class RuntimeToolRequestRunner:
                 private_copy_observations[str(tool_request.get("tool_call_id") or "")] = (
                     private_copy_result
                 )
+            private_clipboard_token = tool_result.pop(CLIPBOARD_OBSERVATION_RESULT_KEY, None)
+            private_clipboard_result = consume_clipboard_paste_observation(
+                private_clipboard_token, tool_request, run_id=run_id,
+            )
+            if private_clipboard_result:
+                private_clipboard_observations[str(tool_request.get("tool_call_id") or "")] = (
+                    private_clipboard_result
+                )
             private_exact_submit_result = tool_result.pop(
                 _RUNTIME_PRIVATE_EXACT_SUBMIT_RESULT_KEY,
                 None,
@@ -8909,9 +8939,16 @@ class RuntimeToolRequestRunner:
                     None,
                 )
             if tool_name == "clipboard.read":
+                raw_source_data = private_clipboard_paste_observation_data(
+                    tool_request, private_clipboard_observations,
+                    run_id=run_id, consume=True,
+                )
+                private_source_result = (
+                    {**tool_result, "data": raw_source_data} if raw_source_data else tool_result
+                )
                 source_receipt = _private_clipboard_source_receipt_from_result(
                     tool_request,
-                    tool_result,
+                    private_source_result,
                     run_id=run_id,
                     tool_sequence=tool_sequence,
                 )
@@ -8941,6 +8978,7 @@ class RuntimeToolRequestRunner:
                     run_id=run_id,
                     tool_sequence=tool_sequence,
                     timeline=timeline,
+                    private_observations=private_clipboard_observations,
                 )
                 if paste_binding and paste_tool_call_id:
                     private_clipboard_paste_bindings[paste_tool_call_id] = (
@@ -9034,6 +9072,7 @@ class RuntimeToolRequestRunner:
                         private_clipboard_paste_binding
                     ),
                     private_copy_observations=private_copy_observations,
+                    private_clipboard_observations=private_clipboard_observations,
                 )
             )
             if trusted_observation_receipt:
@@ -10938,6 +10977,7 @@ def _trusted_postcondition_observation_receipt_for_verifier(
     run_id: str,
     private_clipboard_paste_binding: Mapping[str, Any] | None = None,
     private_copy_observations: dict[str, dict[str, Any]] | None = None,
+    private_clipboard_observations: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Bind a real read-only observation to one exact prior mutation.
 
@@ -11076,6 +11116,7 @@ def _trusted_postcondition_observation_receipt_for_verifier(
                     verifier_request,
                     verifier_result,
                     private_clipboard_paste_binding,
+                    private_observations=private_clipboard_observations,
                 )
             if not observed and action_tool == "desktop.safe_shortcut":
                 observed = exact_copy_observation(
@@ -12009,6 +12050,8 @@ def _trusted_exact_pasted_content_observation_receipt(
     verifier_request: Mapping[str, Any],
     verifier_result: Mapping[str, Any],
     private_binding: Mapping[str, Any] | None,
+    *,
+    private_observations: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Prove that the exact private clipboard bytes reached one editable UI.
 
@@ -12112,6 +12155,12 @@ def _trusted_exact_pasted_content_observation_receipt(
         or private_binding.get("content_byte_length") != len(encoded)
     ):
         return {}
+    from .clipboard_paste_target import private_clipboard_paste_observation_data
+    raw_data = private_clipboard_paste_observation_data(
+        verifier_request, private_observations, run_id=exact_identity["run_id"], consume=True,
+    )
+    if raw_data:
+        verifier_result = {**verifier_result, "data": raw_data}
     verifier_data = (
         verifier_result.get("data")
         if isinstance(verifier_result.get("data"), Mapping)
@@ -12159,47 +12208,67 @@ def _trusted_exact_pasted_content_observation_receipt(
     ).strip()
     if not expected_target:
         return {}
-    matches = [
-        element
-        for element in elements
-        if element.get("value") == content
-        and _trusted_ui_element_is_editable(element)
-        and (
-            not expected_target
-            or _trusted_ui_element_matches_target(element, expected_target)
-        )
-    ]
-    if len(matches) != 1:
-        return {}
-    target_ui_identity = _trusted_editable_ui_target_identity(matches[0])
-    if not target_ui_identity:
-        return {}
+    pre_paste_identity = private_binding.get("pre_paste_target_identity")
+    focused = verifier_data.get("focused_element")
+    if pre_paste_identity and isinstance(focused, Mapping):
+        # Only AXFocusedUIElement preserves the adapter's original text bytes.
+        # General AX values are display text and can collapse whitespace.
+        target_ui_identity = _trusted_editable_ui_target_identity(focused)
+        if (
+            focused.get("focused") is not True
+            or focused.get("value") != content
+            or not _trusted_ui_element_is_editable(focused)
+            or target_ui_identity != pre_paste_identity
+            or not _trusted_ui_element_matches_target(focused, expected_target)
+            or any(
+                _trusted_editable_ui_target_identity(element) != pre_paste_identity
+                for element in elements
+                if _trusted_ui_element_is_editable(element) and element.get("focused") is True
+            )
+        ):
+            return {}
+        same_value_elements = [element for element in elements
+            if _trusted_ui_element_is_editable(element) and element.get("value") == content]
+        if len(same_value_elements) > 1:
+            return {}
+        for element in same_value_elements:
+            display_identity = _trusted_editable_ui_target_identity(element)
+            common = set(display_identity) & set(pre_paste_identity)
+            if (
+                display_identity.get("role") != pre_paste_identity.get("role")
+                or not (common - {"role"})
+                or any(display_identity[key] != pre_paste_identity[key] for key in common)
+            ):
+                return {}
+        matched_element = focused
+    else:
+        matches = [
+            element for element in elements
+            if element.get("value") == content
+            and _trusted_ui_element_is_editable(element)
+            and _trusted_ui_element_matches_target(element, expected_target)
+        ]
+        if len(matches) != 1:
+            return {}
+        matched_element = matches[0]
+        target_ui_identity = _trusted_editable_ui_target_identity(matched_element)
+        if not target_ui_identity:
+            return {}
+        if pre_paste_identity:
+            focused_elements = [element for element in elements
+                if element.get("focused") is True and _trusted_ui_element_is_editable(element)]
+            if (
+                target_ui_identity != pre_paste_identity
+                or len(focused_elements) != 1
+                or _trusted_editable_ui_target_identity(focused_elements[0]) != pre_paste_identity
+            ):
+                return {}
     recipient = str(private_binding.get("target_recipient") or "")
     if recipient:
         from .communication_target import conversation_recipient_matches
         if not conversation_recipient_matches(verifier_data, recipient):
             return {}
-    pre_paste_identity = private_binding.get("pre_paste_target_identity")
-    if pre_paste_identity:
-        focused = verifier_data.get("focused_element")
-        focused_identity = (
-            _trusted_editable_ui_target_identity(focused)
-            if isinstance(focused, Mapping) and focused.get("focused") is True
-            else {}
-        )
-        focused_elements = [
-            element for element in elements
-            if element.get("focused") is True and _trusted_ui_element_is_editable(element)
-        ]
-        if (
-            target_ui_identity != pre_paste_identity
-            or len(focused_elements) > 1
-            or any(_trusted_editable_ui_target_identity(element) != pre_paste_identity for element in focused_elements)
-            or (not focused_elements and focused_identity != pre_paste_identity)
-            or (focused_identity and focused_identity != pre_paste_identity)
-        ):
-            return {}
-    observed_target = _trusted_ui_element_identity(matches[0])
+    observed_target = _trusted_ui_element_identity(matched_element)
     return {
         "verification_predicate_kind": EXACT_PASTED_CONTENT_PRESENT_PREDICATE,
         "verified_observed_state": "fulfilled",
@@ -12212,6 +12281,7 @@ def _trusted_exact_pasted_content_observation_receipt(
         "target_ui_editable_verified": True,
         "clipboard_source_verified": True,
         **({"target_recipient": recipient} if recipient else {}),
+        **({"composer_required": True} if private_binding.get("composer_required") is True else {}),
         "content_sha256": content_sha256,
         "content_length": len(content),
         "content_byte_length": len(encoded),
