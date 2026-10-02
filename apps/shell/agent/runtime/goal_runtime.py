@@ -36,6 +36,7 @@ from apps.shell.agent.runtime.input_bindings import (
 )
 from apps.shell.agent.runtime.tool_capabilities import capability_ids_for_tool
 from apps.shell.agent.runtime.process_receipts import verified_terminal_process_observation
+from apps.shell.agent.runtime.supplied_images import persisted_supplied_image_binding
 from apps.shell.agent.runtime.tool_outcomes import (
     OutcomeStatus,
     ToolOutcome,
@@ -112,7 +113,10 @@ def runtime_goal_contract(
             and contract.original_goal != immutable_original_goal
         ):
             raise ValueError("goal_contract_conflict: original_goal")
-        if _response_only_contract_is_unsafe_for_goal(contract):
+        if _response_only_contract_is_unsafe_for_goal(
+            contract,
+            supplied_image_bound=_contract_has_supplied_image_binding(contract, timeline),
+        ):
             raise ValueError("goal_contract_invalid: response_only_nonconversation")
         return contract
     if not immutable_original_goal:
@@ -136,6 +140,43 @@ def runtime_goal_contract(
                 response_satisfiable=True,
             ),
         ),
+    )
+
+
+def supplied_image_goal_contract_payload(
+    *, run_id: str, original_goal: str, timeline: Sequence[Mapping[str, Any]]
+) -> dict[str, Any]:
+    binding = persisted_supplied_image_binding(
+        run_id=run_id, original_goal=original_goal, timeline=timeline
+    )
+    if binding is None:
+        return {}
+    contract_id = _stable_id("goal-contract", run_id, original_goal, binding["binding_id"])
+    return GoalContract(
+        contract_id=contract_id,
+        run_id=run_id,
+        original_goal=original_goal,
+        intent_kind="general",
+        criteria=(GoalCriterion(
+            criterion_id=_stable_id("goal-criterion", contract_id, "supplied-image"),
+            description="Describe the image already supplied with the original request",
+            response_satisfiable=True,
+            expected={"supplied_image_binding_id": binding["binding_id"]},
+        ),),
+    ).to_payload()
+
+
+def _contract_has_supplied_image_binding(
+    contract: GoalContract, timeline: Sequence[Mapping[str, Any]]
+) -> bool:
+    binding = persisted_supplied_image_binding(
+        run_id=contract.run_id, original_goal=contract.original_goal, timeline=timeline
+    )
+    return bool(
+        binding
+        and len(contract.criteria) == 1
+        and dict(contract.criteria[0].expected)
+        == {"supplied_image_binding_id": binding["binding_id"]}
     )
 
 
@@ -398,7 +439,9 @@ def _explicit_contextual_advisory_goal(user_goal: str) -> bool:
     return external_source is None
 
 
-def _response_only_contract_is_unsafe_for_goal(contract: GoalContract) -> bool:
+def _response_only_contract_is_unsafe_for_goal(
+    contract: GoalContract, *, supplied_image_bound: bool = False
+) -> bool:
     """Reject prose-only completion for a goal that still needs discovery.
 
     A deterministic router may classify an underspecified action as `general`,
@@ -421,6 +464,7 @@ def _response_only_contract_is_unsafe_for_goal(contract: GoalContract) -> bool:
     return bool(
         response_only
         and not _explicit_pure_conversation_goal(contract.original_goal)
+        and not supplied_image_bound
     )
 
 

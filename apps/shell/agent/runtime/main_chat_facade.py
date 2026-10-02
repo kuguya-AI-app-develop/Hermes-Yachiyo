@@ -38,6 +38,11 @@ def _preferred_runtime_execution_mapping(
 class RuntimeMainChatFacadeMixin:
     """Keeps daily Chat runtime methods while delegating to split services."""
 
+    def bind_main_chat_supplied_images(
+        self, run_id: str, messages: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        return self.main_chat_runs.bind_supplied_images(run_id, messages)
+
     def start_main_chat_run(
         self,
         *,

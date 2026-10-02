@@ -1323,6 +1323,9 @@ class NativeAgentExecutor(ExecutionStrategy):
                 runtime_service=service,
             )
             if image_paths:
+                bind_supplied_images = getattr(service, "bind_main_chat_supplied_images", None)
+                if callable(bind_supplied_images):
+                    await asyncio.to_thread(bind_supplied_images, run_id, messages)
                 from apps.shell.native_capabilities import get_native_image_input_capability
 
                 image_capability = get_native_image_input_capability()
