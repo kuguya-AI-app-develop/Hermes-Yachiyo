@@ -1186,12 +1186,20 @@ def test_browser_type_text_broker_fallback_preserves_foreground_lock_busy(
         foreground_lock=foreground_lock,
         foreground_lock_owner="group-run-1:run-2",
     )
+    broker.restore_owned_browser_target("owned-original")
     lease = foreground_lock.acquire(holder="group-run-1:run-1", tool_name="browser.type_text")
+    calls = []
 
     def raise_no_cdp(_expression: str) -> dict[str, object]:
+        calls.append("cdp")
         raise RuntimeError("browser.cdp_url is not configured")
 
     monkeypatch.setattr(browser_mod, "_evaluate_current_page", raise_no_cdp)
+    monkeypatch.setattr(
+        browser_mod,
+        "_type_text_foreground_fallback",
+        lambda *_args: calls.append("native") or {"ok": True},
+    )
 
     try:
         result = broker.browser_type_text(
@@ -1203,11 +1211,11 @@ def test_browser_type_text_broker_fallback_preserves_foreground_lock_busy(
         lease.release()
 
     assert result["ok"] is False
-    assert result["error"] == "browser_foreground_fallback_unavailable"
-    assert result["fallback"] == "desktop.type_text"
+    assert result["action"] == "foreground_lock"
     assert result["foreground_lock_busy"] is True
     assert result["locked_by"] == "group-run-1:run-1"
-    assert result["missing_permissions"] == ["chrome_cdp"]
+    assert calls == []
+    assert broker._owned_browser_target_id == "owned-original"
 
 
 def test_browser_type_text_registry_never_uses_foreground_fallback(

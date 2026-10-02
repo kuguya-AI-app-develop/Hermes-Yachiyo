@@ -7,8 +7,10 @@ from typing import Any, Callable
 
 from apps.shell.agent.tools import browser
 from apps.shell.agent.tools.broker import ToolBroker
-from apps.shell.agent.tools.foreground_lock import ForegroundActionLock
-
+from apps.shell.agent.tools.foreground_lock import (
+    ForegroundActionLock,
+    shared_native_foreground_lock,
+)
 
 _BROWSER_TARGET_OWNERSHIP_ERRORS = {
     "browser_owned_target_invalid",
@@ -119,6 +121,7 @@ class RuntimeToolBrokerFactory:
         self._future_task_store = future_task_store
         self._main_chat_agent_id = main_chat_agent_id
         self._foreground_lock = foreground_lock
+        self._foreground_device_lock = shared_native_foreground_lock()
         self._foreground_locks: dict[str, ForegroundActionLock] = {}
 
     def for_run(
@@ -142,7 +145,7 @@ class RuntimeToolBrokerFactory:
             lock = self._foreground_locks.setdefault(clean_lock_key, ForegroundActionLock())
         if lock is None:
             lock = self._foreground_lock
-        extra: dict[str, Any] = {}
+        extra: dict[str, Any] = {"foreground_device_lock": self._foreground_device_lock}
         if lock is not None:
             extra["foreground_lock"] = lock
         clean_owner = str(foreground_lock_owner or "").strip()
