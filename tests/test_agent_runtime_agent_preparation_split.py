@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+import pytest
 
 from apps.shell import agent_runtime
 from apps.shell.agent.runtime.agent_preparation import RuntimeAgentRunPreparer
+from apps.shell.agent.runtime.goal_contract import GoalContract, GoalCriterion
 from apps.shell.agent_runtime import AgentRuntimeService
 from apps.shell.credential_store import MemoryCredentialStore
 
@@ -176,7 +178,7 @@ def test_agent_run_preparer_builds_started_timeline_context_and_broker(tmp_path:
             "model_mode": "custom_api",
             "skill_ids": ["skill-1"],
         },
-        "Finish",
+        "Reply with exactly 'Done'",
         "Parent context",
     )
 
@@ -202,7 +204,7 @@ def test_agent_run_preparer_builds_started_timeline_context_and_broker(tmp_path:
     ]
     assert state["skill_ids"] == ["skill-1"]
     assert state["context_args"] == {
-        "user_goal": "Finish",
+        "user_goal": "Reply with exactly 'Done'",
         "upstream": "Parent context",
         "skills": [{"skill_id": "skill-1", "name": "Brief Reader"}],
     }
@@ -218,6 +220,44 @@ def test_agent_run_preparer_builds_started_timeline_context_and_broker(tmp_path:
     assert preparation.artifacts == []
 
 
+def test_preparer_uses_entrypoint_contract_before_deterministic_recompilation(tmp_path, monkeypatch):
+    state = {}
+    preparer = _preparer(tmp_path, state)
+    goal = "Read exactly README.md and then LICENSE"
+    contract = GoalContract(contract_id="entrypoint-goal", original_goal=goal, criteria=(
+        GoalCriterion(criterion_id="read-both", description="Read both requested inputs",
+                      source_step_ids=("read-first", "read-second")),
+    ))
+
+    def reject_second_compile(*args, **kwargs):
+        raise AssertionError("The entrypoint plan must retain its original authority")
+
+    monkeypatch.setattr("apps.shell.agent.runtime.agent_preparation.planned_goal_contract_payload",
+                        reject_second_compile)
+    result = preparer.prepare("run-1", {"agent_id": "agent-1", "name": "Reader"}, goal,
+                              runtime_execution_envelope={"task_core": {"goal_contract": contract.to_payload()}})
+    assert result.goal_contract == contract.bind_run("run-1").to_payload()
+    assert state["context_args"]["user_goal"] == goal
+
+
+@pytest.mark.parametrize("mutation", ["wrong_goal", "invalid", "response_only_effect"])
+def test_preparer_rejects_conflicting_or_invalid_envelope_before_broker(tmp_path, mutation):
+    state = {}
+    preparer = _preparer(tmp_path, state)
+    goal = "Read exactly README.md"
+    contract = GoalContract(contract_id="entrypoint-goal", original_goal=goal, criteria=(
+        GoalCriterion(criterion_id="read", description="Read the requested input",
+                      source_step_ids=("read",)),
+    )).to_payload()
+    if mutation == "wrong_goal": contract["original_goal"] = "Read LICENSE"
+    elif mutation == "invalid": contract["criteria"] = []
+    else: contract["criteria"][0]["response_satisfiable"] = True
+    with pytest.raises(ValueError, match="goal_contract_(?:conflict|invalid)"):
+        preparer.prepare("run-1", {"agent_id": "agent-1", "name": "Reader"}, goal,
+                         runtime_execution_envelope={"task_core": {"goal_contract": contract}})
+    assert "broker_args" not in state
+
+
 def test_agent_run_preparer_can_use_shared_tool_broker_factory(tmp_path: Path) -> None:
     state: dict[str, Any] = {}
     tool_brokers = FakeSharedToolBrokers()
@@ -230,7 +270,7 @@ def test_agent_run_preparer_can_use_shared_tool_broker_factory(tmp_path: Path) -
             "name": "Prep Agent",
             "skill_ids": ["skill-1"],
         },
-        "Finish",
+        "Reply with exactly 'Done'",
     )
 
     assert preparation.broker is tool_brokers.broker
@@ -260,7 +300,7 @@ def test_agent_run_preparer_scopes_shared_tool_broker_to_run_group(tmp_path: Pat
             "name": "Prep Agent",
             "skill_ids": ["skill-1"],
         },
-        "Finish",
+        "Reply with exactly 'Done'",
         run_group_id="group-1",
     )
 
@@ -289,7 +329,7 @@ def test_agent_run_preparer_scopes_shared_tool_broker_to_workflow_run(tmp_path: 
             "name": "Prep Agent",
             "skill_ids": ["skill-1"],
         },
-        "Finish",
+        "Reply with exactly 'Done'",
         workflow_run_id="workflow-run-1",
     )
 
@@ -312,7 +352,7 @@ def test_agent_run_preparer_writes_observable_context_artifact(tmp_path: Path) -
     preparation = preparer.prepare(
         "run-1",
         {"agent_id": "agent-1", "name": "Prep Agent", "skill_ids": ["skill-1"]},
-        "Finish",
+        "Reply with exactly 'Done'",
     )
 
     artifact = preparer.write_context_artifact("run-1", preparation)

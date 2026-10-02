@@ -305,7 +305,7 @@ class MainChatModelLoopRunner:
                         model_assisted_selection.event_payload
                     ),
                 }
-            elif not image_goal_template:
+            elif not image_goal_template and not authoritative_direct_daily_desktop_intent:
                 goal_contract_template = planned_goal_contract_payload(
                     user_goal,
                     allowed_tools=allowed_tools,
