@@ -142,6 +142,23 @@ def test_real_broker_music_readback_finishes_exact_declared_goal(tmp_path, monke
     assert not runtime_goal_assessment(contract, timeline).completed
 
 
+@pytest.mark.parametrize("event_index", [1, 5], ids=["catalog", "playback"])
+@pytest.mark.parametrize("field", ["result", "data"])
+def test_truncated_native_observation_cannot_complete_music_goal(
+    tmp_path, monkeypatch, event_index, field
+):
+    contract, timeline, verifier = _case(tmp_path, monkeypatch)
+    receipt = native_music_search_receipt(timeline[-1], verifier, timeline)
+    assert receipt
+    observation = timeline[event_index]["result"]
+    if field == "data":
+        observation = observation["data"]
+    observation["truncated"] = True
+    assert native_music_search_receipt(timeline[-1], verifier, timeline) == {}
+    assessment = runtime_goal_assessment(contract, [*timeline, _projection(verifier, receipt)])
+    assert not assessment.completed
+
+
 @pytest.mark.parametrize(
     "mutation",
     [

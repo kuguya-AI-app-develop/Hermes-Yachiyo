@@ -106,6 +106,11 @@ def native_music_search_receipt(
             or result.get("permission_error")
             or result.get("approval_required")
             or result.get("fallback_used")
+            or result.get("truncated")
+            or (
+                isinstance(result.get("data"), Mapping)
+                and result["data"].get("truncated")
+            )
             or te._trusted_runtime_execution_provider_identity(event, result)
             != (te.LOCAL_DESKTOP_PROVIDER_KIND, te.LOCAL_DESKTOP_PROVIDER_ID)
         ):
