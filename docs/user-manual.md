@@ -203,7 +203,7 @@ GPT-SoVITS 音色包导入后，页面会填入权重、参考音频、语言、
 
 单次 Run 默认允许 50 次模型调用、100 次工具调用、50 次实际 terminal 执行，时长预算为 600 秒。审批等待和实际执行分别计数，同一对话的新 Run 使用新的预算。
 
-需要调整 terminal 预算时，在启动应用前设置 `OHA_YACHIYO_AGENT_MAX_TERMINAL_CALLS`，接受 0–1000；0 禁止 terminal 实际执行。工具循环上限默认 200，可用 `OHA_YACHIYO_AGENT_TOOL_ITERATION_LIMIT` 设置为 10–1000，旧 `HERMES_AGENT_TOOL_ITERATION_LIMIT` 仍兼容。非法值使用默认值。即使提高其中一项，其余模型、工具、时长、workspace 和审批限制仍生效。
+需要调整 terminal 预算时，在启动应用前设置 `OHA_YACHIYO_AGENT_MAX_TERMINAL_CALLS`，接受 0–1000；0 禁止 terminal 实际执行。工具循环上限默认 200，可用 `OHA_YACHIYO_AGENT_TOOL_ITERATION_LIMIT` 设置为 10–1000。非整数值使用默认值，超出范围的整数值按上下界限制。即使提高其中一项，其余模型、工具、时长、workspace 和审批限制仍生效。
 
 工具失败会进入 Run projection 和 RunEvent replay，但不会把明显 secret 写入用户可见输出。
 
