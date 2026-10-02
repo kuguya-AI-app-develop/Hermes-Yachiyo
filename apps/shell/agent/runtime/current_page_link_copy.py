@@ -32,7 +32,8 @@ def bounded_page_link_copy_goal(goal: str) -> bool:
     return bool(
         re.fullmatch(
             r"(?:please\s+)?copy\s+(?:the\s+)?current\s+page\s+link[.!?]?|"
-            r"(?:请|帮我)?复制当前(?:网页|页面|页)链接[。！!]?",
+            r"(?:请|帮我)?(?:复制当前(?:网页|页面|页)链接|"
+            r"把当前网址放到剪贴板|把当前链接复制给我)[。！!]?",
             goal.strip(),
             re.I,
         )

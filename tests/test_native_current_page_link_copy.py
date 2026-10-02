@@ -155,7 +155,10 @@ def _receipt(events, verifier, observed, *, actual_broker=True):
     )
 
 
-@pytest.mark.parametrize("goal", ["copy current page link", "复制当前网页链接"])
+@pytest.mark.parametrize("goal", [
+    "copy current page link", "复制当前网页链接",
+    "把当前网址放到剪贴板", "把当前链接复制给我",
+])
 def test_native_address_and_new_exact_pasteboard_complete_the_original_copy_goal(goal):
     contract, events, verifier, observed = _case(goal)
     assert "focused_element" not in events[1]["result"]["data"]
@@ -316,7 +319,15 @@ def test_partial_or_changed_actual_plan_never_receives_url_copy_capability(bad):
 
 @pytest.mark.parametrize(
     "goal",
-    ["不要复制当前网页链接", "copy current page link then send it", "复制当前网页链接并删除文件"],
+    [
+        "不要复制当前网页链接", "copy current page link then send it", "复制当前网页链接并删除文件",
+        "不要把当前网址放到剪贴板", "如果有必要把当前网址放到剪贴板",
+        "请解释把当前网址放到剪贴板", "请说把当前链接复制给我",
+        "把当前网址放到剪贴板并发送给 WeChat", "把当前链接复制给我然后删除文件",
+        "把当前网址放到剪贴板然后粘贴", "把当前链接复制给我并退出 Chrome",
+        "输入“把当前网址放到剪贴板”", "翻译“把当前链接复制给我”",
+        "“把当前网址放到剪贴板”", "把当前网址放到剪贴板或发送到邮箱",
+    ],
 )
 def test_extra_actions_and_negation_do_not_receive_the_native_page_copy_transaction(goal):
     decision = RuntimePlanner().decision(goal, allowed_tools=DAILY_DESKTOP_TOOL_NAMES)
@@ -342,7 +353,9 @@ def test_url_observation_capability_is_exact_scope_and_one_use(bad):
 
 
 @pytest.mark.parametrize("mode", ["normal", "secret", "scheme_elided", "wrong_clipboard"])
-def test_actual_main_chat_copies_only_the_verified_native_parser_url(tmp_path, monkeypatch, mode):
+def test_actual_main_chat_copies_only_the_verified_native_parser_url(
+    tmp_path, monkeypatch, mode, _goal="copy current page link"
+):
     from tests.test_chat_api import _make_agent_runtime_service, _make_api, _send_foreground_message
 
     api, runtime, store = _make_api(tmp_path)
@@ -404,8 +417,9 @@ def test_actual_main_chat_copies_only_the_verified_native_parser_url(tmp_path, m
     monkeypatch.setattr("apps.shell.agent.tools.desktop.clipboard_read", read)
     monkeypatch.setattr("apps.shell.agent.tools.desktop.desktop_safe_shortcut", copy)
     try:
-        response = _send_foreground_message(api, "copy current page link")
+        response = _send_foreground_message(api, _goal)
         run = service.get_run(response["run_id"])
+        assert run["user_goal"] == _goal
         assert run["status"] == ("completed" if mode in {"normal", "secret"} else "failed"), run
         assert calls == (
             ["clipboard", "ui"]
@@ -426,3 +440,11 @@ def test_actual_main_chat_copies_only_the_verified_native_parser_url(tmp_path, m
     finally:
         service.close()
         store.close()
+
+
+@pytest.mark.parametrize("goal", ["把当前网址放到剪贴板", "把当前链接复制给我"])
+@pytest.mark.parametrize("mode", ["normal", "secret", "scheme_elided", "wrong_clipboard"])
+def test_actual_page_copy_alias_retains_native_bytes_and_source_checks(tmp_path, monkeypatch, goal, mode):
+    test_actual_main_chat_copies_only_the_verified_native_parser_url(
+        tmp_path, monkeypatch, mode, _goal=goal
+    )

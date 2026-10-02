@@ -1914,6 +1914,12 @@ class TaskIntentRouter:
         metadata: Mapping[str, Any],
     ) -> TaskIntentSnapshot:
         clean_text = _clean_prompt(text)
+        from apps.shell.agent.runtime.current_page_link_copy import bounded_page_link_copy_goal
+
+        if bounded_page_link_copy_goal(clean_text):
+            # A whole-goal native URL copy is not a request to research the
+            # address or navigate to it.  Keep its verified clipboard plan.
+            return _empty_intent("web_research", text)
         note_capture = capture_note_hint(text)
         note_target = _dynamic_context_transfer_app_name_hint(text)
         if (
