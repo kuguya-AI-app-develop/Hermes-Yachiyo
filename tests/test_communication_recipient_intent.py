@@ -37,7 +37,13 @@ def test_unchanged_clipboard_send_keeps_native_recipient_and_send_approval(recip
     send_step = next(step for step in selection.decision.plan.tool_plan.steps
                      if step.step_id == "send-communication-message")
     assert send_step.approval_required is True
-    assert send_step.depends_on == ["paste-communication-message"]
+    assert send_step.depends_on == [
+        "paste-communication-message", "verify-clipboard-paste-paste-communication-message",
+    ]
+    paste_verifier = next(step for step in selection.decision.plan.tool_plan.steps
+                          if step.step_id == send_step.depends_on[1])
+    assert paste_verifier.tool_name == "desktop.ui_elements"
+    assert paste_verifier.depends_on == ["paste-communication-message"]
     assert selection.decision.selected_intent.user_goal == goal
 
 

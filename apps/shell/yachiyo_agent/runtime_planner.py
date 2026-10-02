@@ -4477,6 +4477,7 @@ class RuntimePlanner:
             allowed_tools=allowed_tools,
             metadata=metadata,
             original_goal=immutable_goal,
+            explicit_native_typed_binding=False,
         )
         if (
             _model_intent_goal_blocks_direct_execution(immutable_goal)
@@ -4563,6 +4564,7 @@ class RuntimePlanner:
         allowed_tools: Iterable[str] | None = None,
         metadata: Mapping[str, Any] | None = None,
         original_goal: str | None = None,
+        explicit_native_typed_binding: bool = True,
     ) -> RuntimePlanSnapshot:
         allowed = _allowed_tool_set(allowed_tools)
         intent = _normalize_intent_for_allowed_tools(intent, allowed)
@@ -4591,6 +4593,7 @@ class RuntimePlanner:
                 intent,
                 allowed,
                 prefer_background_desktop=prefer_background,
+                explicit_native_typed_binding=explicit_native_typed_binding,
             )
             steps = _select_best_runtime_step_tools(
                 steps,
@@ -4745,21 +4748,18 @@ class RuntimePlanner:
         allowed: set[str] | None,
         *,
         prefer_background_desktop: bool = False,
+        explicit_native_typed_binding: bool = True,
     ) -> list[ToolPlanStepSnapshot]:
         if intent.kind == "data_analysis":
             return self._data_analysis_steps(intent, allowed)
         if intent.kind == "desktop_operation":
+            desktop_steps = self._desktop_operation_steps(
+                intent, allowed, prefer_background_desktop=prefer_background_desktop,
+            )
             return _explicit_clipboard_paste_readback_steps(
                 intent,
-                _explicit_typed_target_steps(
-                    intent,
-                    self._desktop_operation_steps(
-                        intent,
-                        allowed,
-                        prefer_background_desktop=prefer_background_desktop,
-                    ),
-                    allowed,
-                ),
+                (_explicit_typed_target_steps(intent, desktop_steps, allowed)
+                 if explicit_native_typed_binding else desktop_steps),
                 allowed,
             )
         if intent.kind == "media_playback":
@@ -4780,7 +4780,9 @@ class RuntimePlanner:
             return self._schedule_steps(intent, allowed)
         if intent.kind == "communication":
             return _explicit_clipboard_paste_readback_steps(
-                intent, self._communication_steps(intent, allowed), allowed,
+                intent, self._communication_steps(
+                    intent, allowed, explicit_native_typed_binding=explicit_native_typed_binding,
+                ), allowed,
             )
         if intent.kind == "information_capture":
             return self._information_capture_steps(intent, allowed)
@@ -10211,6 +10213,8 @@ class RuntimePlanner:
         self,
         intent: TaskIntentSnapshot,
         allowed: set[str] | None,
+        *,
+        explicit_native_typed_binding: bool = True,
     ) -> list[ToolPlanStepSnapshot]:
         context_source = str(intent.inputs.get("context_source") or "").strip()
         direct_message = intent.inputs.get("direct_message_hint")
@@ -10236,7 +10240,8 @@ class RuntimePlanner:
         if isinstance(direct_message, Mapping):
             direct_steps = _direct_communication_steps(intent, allowed, direct_message)
             if direct_steps:
-                return _explicit_typed_target_steps(intent, direct_steps, allowed)
+                return (_explicit_typed_target_steps(intent, direct_steps, allowed)
+                        if explicit_native_typed_binding else direct_steps)
             if str(direct_message.get("body_source") or "").strip() == "app_search_result":
                 context_steps = _app_search_result_context_steps(
                     intent,
@@ -12270,6 +12275,17 @@ def _explicit_typed_target_steps(
     if not observe_tool or not plain_type:
         return steps
     direct = intent.inputs.get("direct_message_hint")
+    if (
+        intent.inputs.get("context_source")
+        or (isinstance(direct, Mapping) and any(
+            direct.get(key) for key in ("body_source", "content_transform_hint")
+        ))
+        or any(step.input_bindings for step in steps)
+    ):
+        # Generated/materialized content keeps its existing Runtime binding
+        # and independent verification path. The opaque native authority is
+        # only for literal source text in the deterministic original plan.
+        return steps
     default_app = str(direct.get("app_name") or "") if isinstance(direct, Mapping) else ""
     eligible = intent.kind == "communication" or any(
         step.tool_name == "desktop.submit_foreground" for step in steps
@@ -12654,7 +12670,7 @@ def _direct_communication_steps(
             shortcut_tool,
             _communication_recipient_focus_action(channel),
         )
-        focus_capability = "communication.compose"
+        focus_capability = "desktop.ui_operation"
         focus_reason = "Open foreground recipient search with a generic safe shortcut."
     else:
         focus_tool = app_shortcut_tool
@@ -12662,7 +12678,7 @@ def _direct_communication_steps(
             "app_name": app_name,
             "action": _communication_recipient_focus_action(channel),
         }
-        focus_capability = "communication.compose"
+        focus_capability = "desktop.ui_operation"
         focus_reason = "Open the app's recipient search with a safe shortcut before drafting the message."
     steps.extend(
         [
