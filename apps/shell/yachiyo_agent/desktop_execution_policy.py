@@ -948,6 +948,11 @@ def desktop_execution_route_decision(
     foreground_control = bool(mode_payload.get("foreground_control"))
     keyboard_mouse_capture = bool(mode_payload.get("keyboard_mouse_capture"))
     foreground_required = foreground_control or keyboard_mouse_capture
+    passive_permission_diagnostic = (
+        clean_tool == "desktop.permissions"
+        and mode_payload.get("mode") == "read_only_observation"
+        and not foreground_required
+    )
     sandbox_required = bool(mode_payload.get("sandbox_recommended")) or (
         str(policy_payload.get("mode") or "").strip().lower().replace("-", "_")
         == "sandbox_preferred"
@@ -966,7 +971,7 @@ def desktop_execution_route_decision(
         "probe_desktop_provider_health",
         "sandbox_provider_health_probe",
     )
-    sandbox_provider = sandbox_desktop_provider_status(
+    sandbox_provider = {} if passive_permission_diagnostic else sandbox_desktop_provider_status(
         decision_context,
         probe_health=should_probe_provider_health,
     )
@@ -1051,6 +1056,18 @@ def desktop_execution_route_decision(
             "can_auto_start": False,
             "reason": "No executable tool was selected.",
             "blocking_conditions": ["missing_tool"],
+        }
+
+    if passive_permission_diagnostic:
+        # This adapter reads cached host permission readiness. It neither
+        # observes a provider-owned desktop target nor sends foreground input,
+        # and must remain available to diagnose a missing desktop backend.
+        return {
+            **route,
+            "selected_provider_kind": "none",
+            "selected_provider_id": "",
+            "provider_execution_required": False,
+            "reason": "Read passive host permission readiness through the local broker.",
         }
 
     if background_desktop_preferred and (

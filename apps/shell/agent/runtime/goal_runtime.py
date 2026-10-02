@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import replace
 from typing import Any
 
 from apps.shell.agent.runtime.desktop_execution_providers import (
@@ -16,6 +17,8 @@ from apps.shell.agent.runtime.dispatch_semantics import (
     exact_native_dispatch_receipt_matches,
     intrinsic_native_postcondition_state,
     intrinsic_native_postcondition_target_matches,
+    is_semantic_safe_key,
+    is_semantic_search_submit,
 )
 from apps.shell.agent.runtime.events import (
     RUNTIME_EXECUTION_PROVENANCE_KEY,
@@ -33,9 +36,12 @@ from apps.shell.agent.runtime.input_bindings import (
     validate_workspace_file_resolution_receipt,
 )
 from apps.shell.agent.runtime.tool_capabilities import capability_ids_for_tool
+from apps.shell.agent.runtime.process_receipts import verified_terminal_process_observation
+from apps.shell.agent.runtime.supplied_images import persisted_supplied_image_binding
 from apps.shell.agent.runtime.tool_outcomes import (
     OutcomeStatus,
     ToolOutcome,
+    VerificationStatus,
     canonical_media_playback_state,
     from_tool_result,
     media_track_change_verified,
@@ -108,7 +114,10 @@ def runtime_goal_contract(
             and contract.original_goal != immutable_original_goal
         ):
             raise ValueError("goal_contract_conflict: original_goal")
-        if _response_only_contract_is_unsafe_for_goal(contract):
+        if _response_only_contract_is_unsafe_for_goal(
+            contract,
+            supplied_image_bound=_contract_has_supplied_image_binding(contract, timeline),
+        ):
             raise ValueError("goal_contract_invalid: response_only_nonconversation")
         return contract
     if not immutable_original_goal:
@@ -132,6 +141,43 @@ def runtime_goal_contract(
                 response_satisfiable=True,
             ),
         ),
+    )
+
+
+def supplied_image_goal_contract_payload(
+    *, run_id: str, original_goal: str, timeline: Sequence[Mapping[str, Any]]
+) -> dict[str, Any]:
+    binding = persisted_supplied_image_binding(
+        run_id=run_id, original_goal=original_goal, timeline=timeline
+    )
+    if binding is None:
+        return {}
+    contract_id = _stable_id("goal-contract", run_id, original_goal, binding["binding_id"])
+    return GoalContract(
+        contract_id=contract_id,
+        run_id=run_id,
+        original_goal=original_goal,
+        intent_kind="general",
+        criteria=(GoalCriterion(
+            criterion_id=_stable_id("goal-criterion", contract_id, "supplied-image"),
+            description="Describe the image already supplied with the original request",
+            response_satisfiable=True,
+            expected={"supplied_image_binding_id": binding["binding_id"]},
+        ),),
+    ).to_payload()
+
+
+def _contract_has_supplied_image_binding(
+    contract: GoalContract, timeline: Sequence[Mapping[str, Any]]
+) -> bool:
+    binding = persisted_supplied_image_binding(
+        run_id=contract.run_id, original_goal=contract.original_goal, timeline=timeline
+    )
+    return bool(
+        binding
+        and len(contract.criteria) == 1
+        and dict(contract.criteria[0].expected)
+        == {"supplied_image_binding_id": binding["binding_id"]}
     )
 
 
@@ -394,7 +440,9 @@ def _explicit_contextual_advisory_goal(user_goal: str) -> bool:
     return external_source is None
 
 
-def _response_only_contract_is_unsafe_for_goal(contract: GoalContract) -> bool:
+def _response_only_contract_is_unsafe_for_goal(
+    contract: GoalContract, *, supplied_image_bound: bool = False
+) -> bool:
     """Reject prose-only completion for a goal that still needs discovery.
 
     A deterministic router may classify an underspecified action as `general`,
@@ -417,6 +465,7 @@ def _response_only_contract_is_unsafe_for_goal(contract: GoalContract) -> bool:
     return bool(
         response_only
         and not _explicit_pure_conversation_goal(contract.original_goal)
+        and not supplied_image_bound
     )
 
 
@@ -458,6 +507,24 @@ def runtime_goal_assessment(
             continue
         event = _flatten_event(raw_event)
         event_type = str(event.get("event") or event.get("event_type") or "").strip()
+        if event_type == "agent.delegation.children.verified":
+            from .main_chat_delegation import completion_outcome, same_goal_evidence
+
+            inherited_evidence = same_goal_evidence(contract, event, timeline)
+            if inherited_evidence is not None:
+                payload = assessment.to_payload()
+                payload["evidence"].extend(inherited_evidence)
+                assessment = coordinator.restore_assessment(contract, payload)
+                continue
+            delegated = completion_outcome(contract, event, timeline)
+            if delegated is not None:
+                outcome, observed, plan_id = delegated
+                assessment = coordinator.record_tool_outcome(
+                    contract, assessment, outcome, run_id=contract.run_id,
+                    source_tool_call_id=f"delegation:{observed['delegation_binding_id']}",
+                    source_step_id="group-multi_agent", plan_id=plan_id, observed=observed,
+                )
+            continue
         if event_type == "agent.goal.subgoal.opened":
             subgoal = _mapping_from_json(event.get("subgoal_json"))
             if subgoal is None:
@@ -570,6 +637,20 @@ def runtime_goal_assessment(
             opened_subgoals=opened_subgoals,
             source_attempts=source_attempts,
         )
+        process_observation = verified_terminal_process_observation(
+            contract,
+            goal_event,
+            result,
+            runtime_owned=_runtime_owned_terminal_event(
+                goal_event,
+                result,
+                run_id=contract.run_id,
+                plan_id=str(goal_event.get("plan_id") or ""),
+            ),
+            eligible_criterion_ids=tuple(eligible_criterion_ids),
+        )
+        if process_observation:
+            outcome = replace(outcome, verification=VerificationStatus.VERIFIED)
         observed = _canonical_observed_payload(
             contract,
             goal_event,
@@ -578,6 +659,7 @@ def runtime_goal_assessment(
             eligible_criterion_ids=eligible_criterion_ids,
             timeline=timeline,
         )
+        observed.update(process_observation)
         recovery_root_target = _recovery_root_target(
             goal_event,
             source_attempts=source_attempts,
@@ -1561,6 +1643,10 @@ def _trusted_verifier_link(
         "app_window_present",
         "exact_typed_content_present",
         "exact_submit_dispatch_receipt",
+        "exact_app_search_result_present",
+        "exact_selected_full_text_copied",
+        "exact_current_page_link_copied",
+        "exact_search_link_navigation",
         EXACT_FILE_CONTENT_PRESENT_PREDICATE,
     }:
         return None
@@ -1673,7 +1759,48 @@ def _verifier_matches_source_attempt(
         "desktop.type_text",
     }:
         return False
+    if (
+        predicate_kind == "exact_app_search_result_present"
+        and source_tool != "desktop.search_submit"
+    ):
+        return False
+    if predicate_kind == "exact_selected_full_text_copied":
+        source_input = (
+            event.get("input_preview")
+            if isinstance(event.get("input_preview"), Mapping) else {}
+        )
+        if source_tool != "desktop.safe_shortcut" or source_input.get("action") != "copy":
+            return False
+        if (
+            str(event.get("step_id") or event.get("planner_step_id") or "")
+            != "copy-selected-full-text"
+        ):
+            return False
+    if predicate_kind == "exact_current_page_link_copied":
+        source_input = event.get("input_preview") or {}
+        if (
+            source_tool != "desktop.safe_shortcut"
+            or source_input.get("action") != "copy_current_page_link"
+            or str(event.get("step_id") or event.get("planner_step_id") or "")
+            != "copy-current-page-link"
+        ):
+            return False
     verifier_tool = str(verifier_link.get("verifier_tool") or "").strip()
+    if predicate_kind == "exact_search_link_navigation":
+        source_input = (
+            event.get("input_preview")
+            if isinstance(event.get("input_preview"), Mapping) else {}
+        )
+        selector = source_input.get("selector")
+        if (
+            source_tool != "browser.click"
+            or verifier_tool != "browser.current_page"
+            or not isinstance(selector, str)
+            or not re.fullmatch(r"search-result=[1-9][0-9]*", selector)
+            or type(source_input.get("click_count")) is not int
+            or dict(source_input) != {"selector": selector, "click_count": 1}
+        ):
+            return False
     if (
         source_tool in {"terminal.run", "python.run"}
         and verifier_tool in EXACT_FILE_READBACK_VERIFIER_TOOLS
@@ -1938,6 +2065,20 @@ def _runtime_owned_correlated_native_receipt(
     ):
         return False
     predicate_kind = str(verifier_link.get("predicate_kind") or "").strip()
+    if predicate_kind == "native_music_search_playback":
+        from .native_music_receipts import native_music_search_receipt
+
+        source_events = [attempt["event"] for attempt in source_attempts.values()]
+        verifier = {
+            **dict(event),
+            "input": event.get("input_preview", result.get("verification_input")) or {},
+            "depends_on": event.get("depends_on", result.get("verification_depends_on")),
+        }
+        expected = native_music_search_receipt(
+            source_event, verifier, source_events, contract=contract,
+        )
+        if not expected or any(result.get(key) != value for key, value in expected.items()):
+            return False
     intrinsic_state = _intrinsic_native_state_source_receipt(source_attempt)
     if predicate_kind == "native_postcondition_receipt" and not (
         _exact_dispatch_only_source_receipt(source_attempt) or intrinsic_state
@@ -2035,6 +2176,10 @@ def _exact_dispatch_only_source_receipt(
         else {}
     )
     tool_name = str(source_attempt.get("tool") or "").strip()
+    # An exact key receipt proves delivery, not a changed selection/focus/UI.
+    # Keep the dispatch audit but require a separate observation for completion.
+    if is_semantic_safe_key(tool_name) or is_semantic_search_submit(tool_name):
+        return False
     event_tool = str(
         source_event.get("tool") or source_event.get("detail") or ""
     ).strip()
@@ -2764,6 +2909,12 @@ def _canonical_observed_payload(
             observed["track_change_verified"] = True
     else:
         state = _canonical_observed_state(observed)
+    source_tool = str(event.get("tool") or event.get("detail") or "").strip()
+    if is_semantic_safe_key(source_tool) or is_semantic_search_submit(source_tool):
+        # Even legacy rows with effectful=False cannot reinterpret a key's
+        # own acknowledgement (or self-reported flags) as an observed UI goal.
+        verification_passed = False
+        state = "dispatched"
     if (
         not state
         and len(matching) == 1

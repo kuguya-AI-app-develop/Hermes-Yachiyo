@@ -15,7 +15,7 @@ from apps.shell.agent.runtime.errors import (
     AgentDirectOutcomeUnverified,
 )
 from apps.shell.agent.runtime.goal_contract import GoalContract, GoalCriterion
-from apps.shell.agent.runtime.goal_runtime import goal_contract_event_payload
+from apps.shell.agent.runtime.goal_runtime import goal_contract_event_payload, planned_goal_contract_payload
 from apps.shell.agent.runtime.main_chat_model_loop import (
     MainChatModelLoopRunner,
     build_runtime_main_chat_model_loop_runner,
@@ -1076,6 +1076,11 @@ def test_main_chat_authoritative_direct_plan_skips_initial_model_assistance_with
     result = runner.execute(
         "run-1",
         [{"role": "user", "content": "打开 Music"}],
+        runtime_execution_metadata={
+            "goal_contract": planned_goal_contract_payload(
+                "打开 Music", allowed_tools=["app.open"],
+            ),
+        },
         **request_kwargs,
     )
 

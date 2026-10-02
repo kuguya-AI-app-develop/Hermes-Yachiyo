@@ -153,7 +153,7 @@ def test_tool_pending_approval_builder_snapshots_private_payloads() -> None:
         "input": {"command": "printf ok", "options": {"timeout": 3}},
     }
     assert pending["remaining_tool_requests"] == remaining
-    assert pending["next_iteration"] == 50
+    assert pending["next_iteration"] == 200
     assert len(pending["approval_request_fingerprint"]) == 64
 
     messages[0]["meta"]["turn"] = 2

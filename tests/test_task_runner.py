@@ -10,8 +10,8 @@ import pytest
 import apps.core.activity_store as activity_store_mod
 import apps.core.chat_store as chat_store_mod
 import apps.core.task_runner as task_runner_mod
-import apps.shell.proactive as proactive_mod
 import apps.shell.chat_api as chat_api_mod
+import apps.shell.proactive as proactive_mod
 from apps.core.activity_store import ActivityStore
 from apps.core.chat_session import ChatSession, MessageStatus
 from apps.core.chat_store import ChatStore
@@ -19,6 +19,7 @@ from apps.core.executor import NativeAgentExecutor, NativeAgentUnavailableExecut
 from apps.core.special_sessions import PROACTIVE_CHAT_SESSION_ID
 from apps.core.state import AppState
 from apps.core.task_runner import TaskRunner
+from apps.shell.agent.runtime.model_intent_planning import MODEL_INTENT_PLANNING_TOOL_NAME
 from apps.shell.agent_runtime import AgentRuntimeService
 from apps.shell.chat_api import ChatAPI
 from apps.shell.config import Live2DModeConfig
@@ -41,14 +42,14 @@ class _FakeDefaultProfileService:
         return {"chat": "profile_default"}
 
     def get_profile_private(self, profile_id):
-        assert profile_id == "profile_default"
+        assert profile_id in {"profile_default", "profile_vision"}
         return {
             "profile_id": profile_id,
             "provider": "openai_compatible",
             "base_url": "https://api.example.test/v1",
             "model": "demo-model",
             "api_key": "sk-secret",
-            "capability": "chat",
+            "capability": "vision" if profile_id == "profile_vision" else "chat",
             "status": "available",
             "enabled": True,
         }
@@ -656,7 +657,7 @@ async def test_task_runner_main_chat_auto_delegation_uses_native_runtime(tmp_pat
     state = AppState()
     task = state.create_task(
         task_type=TaskType.GENERAL,
-        description="请让 Research Agent 回应 Native 委派验证，然后给我结论",
+        description="请让 Research Agent Respond with exactly 'Research Agent native delegation result'，然后给我结论",
         chat_session_id=session.session_id,
     )
     user_message_id = session.add_user_message(task.description)
@@ -667,7 +668,7 @@ async def test_task_runner_main_chat_auto_delegation_uses_native_runtime(tmp_pat
         model_calls.append(messages)
         last_content = str(messages[-1]["content"])
         if "# Agent\nName: Research Agent" in last_content:
-            assert "# User Goal\n请回应 Native 委派链路验证标记" in last_content
+            assert "# User Goal\nRespond with exactly 'Research Agent native delegation result'" in last_content
             return {"role": "assistant", "content": "Research Agent native delegation result"}
         if "[Oha-Yachiyo 自动委派 Run 汇总]" in last_content:
             assert "Research Agent：已完成" in last_content
@@ -682,7 +683,7 @@ async def test_task_runner_main_chat_auto_delegation_uses_native_runtime(tmp_pat
                 {
                     "action": "run_oha_agent",
                     "agent": "Research Agent",
-                    "goal": "请回应 Native 委派链路验证标记",
+                    "goal": "Respond with exactly 'Research Agent native delegation result'",
                 },
                 ensure_ascii=False,
             ),
@@ -767,9 +768,9 @@ async def test_task_runner_main_chat_auto_delegation_uses_native_runtime(tmp_pat
         summary_task = state.get_task(summary_created["task_id"])
         assert summary_task is not None
         assert summary_task.chat_session_id == session.session_id
-        assert "[Oha-Yachiyo 自动委派 Run 汇总]" in summary_task.description
-        assert "Research Agent：已完成" in summary_task.description
-        assert "汇报：Research Agent native delegation result" in summary_task.description
+        assert "[Oha-Yachiyo 自动委派 Run 汇总]" in summary_task.response_context
+        assert "Research Agent：已完成" in summary_task.response_context
+        assert "汇报：Research Agent native delegation result" in summary_task.response_context
 
         await runner._execute_with_state(summary_task.task_id)
 
@@ -833,18 +834,18 @@ async def test_task_runner_group_dispatch_summary_uses_native_runtime(tmp_path, 
             assert "汇报：Coding native dispatch result" in last_content
             return {"role": "assistant", "content": "群组总结：Coding 已完成 Native 群聊派发验证。"}
         if "# Agent\nName: Coding Agent" in last_content:
-            assert "# User Goal\n做真实 Native 群聊派发验证" in last_content
+            assert "# User Goal\nRespond with exactly 'Coding native dispatch result'" in last_content
             assert "[Oha-Yachiyo 群组执行约定]" in last_content
             assert "你在群内身份是：Coding" in last_content
             return {"role": "assistant", "content": "Coding native dispatch result"}
-        assert "请安排 Coding 做真实 Native 群聊派发验证" in last_content
+        assert "请安排 Coding Respond with exactly 'Coding native dispatch result'" in last_content
         assert "oha.group_dispatch" in str(messages[0]["content"])
         return {
             "role": "assistant",
             "content": (
                 "我会让 Coding 处理这件事。\n"
                 '{"tool":"oha.group_dispatch","input":{"tasks":[{"kind":"agent","target":"Coding",'
-                '"goal":"做真实 Native 群聊派发验证"}]}}'
+                '"goal":"Respond with exactly \'Coding native dispatch result\'"}]}}'
             ),
         }
 
@@ -881,7 +882,7 @@ async def test_task_runner_group_dispatch_summary_uses_native_runtime(tmp_path, 
         assert created["session_context"]["conversation_kind"] == "group"
         assert created["session_context"]["participants"][1]["id"] == coding["agent_id"]
 
-        sent = api.send_message("@主模型 请安排 Coding 做真实 Native 群聊派发验证")
+        sent = api.send_message("@主模型 请安排 Coding Respond with exactly 'Coding native dispatch result'")
         assert sent["ok"] is True
         await runner._execute_with_state(sent["task_id"])
 
@@ -909,7 +910,7 @@ async def test_task_runner_group_dispatch_summary_uses_native_runtime(tmp_path, 
         assert parent["metadata"]["group_dispatch_run_group_id"] == agent_message["metadata"]["run_group_id"]
         assert agent_message["metadata"]["runnable_id"] == coding["agent_id"]
         assert agent_message["metadata"]["delegated_by_task_id"] == sent["task_id"]
-        assert agent_message["metadata"]["delegated_goal"] == "做真实 Native 群聊派发验证"
+        assert agent_message["metadata"]["delegated_goal"] == "Respond with exactly 'Coding native dispatch result'"
 
         run_id = agent_message["metadata"]["run_id"]
         run = await _wait_for(
@@ -948,9 +949,9 @@ async def test_task_runner_group_dispatch_summary_uses_native_runtime(tmp_path, 
         assert summary_message["status"] == "processing"
         assert summary_task is not None
         assert summary_task.chat_session_id == session.session_id
-        assert "[Oha-Yachiyo 群组 Agent 汇总]" in summary_task.description
-        assert "Coding：已完成" in summary_task.description
-        assert "汇报：Coding native dispatch result" in summary_task.description
+        assert "[Oha-Yachiyo 群组 Agent 汇总]" in summary_task.response_context
+        assert "Coding：已完成" in summary_task.response_context
+        assert "汇报：Coding native dispatch result" in summary_task.response_context
 
         await runner._execute_with_state(summary_task.task_id)
 
@@ -1024,7 +1025,7 @@ async def test_task_runner_direct_group_agent_summary_uses_native_runtime(tmp_pa
             assert "不要再派发新的 Agent 任务" in last_content
             return {"role": "assistant", "content": "主模型整理：Design 的直接执行结果已归档。"}
         assert "# Agent\nName: Design Agent" in last_content
-        assert "# User Goal\n请回应 Native 验证标记" in last_content
+        assert "# User Goal\nRespond with exactly 'Design native direct result'." in last_content
         assert "[Oha-Yachiyo 群组执行约定]" in last_content
         assert "你在群内身份是：Design" in last_content
         return {"role": "assistant", "content": "Design native direct result"}
@@ -1061,7 +1062,7 @@ async def test_task_runner_direct_group_agent_summary_uses_native_runtime(tmp_pa
         assert created["ok"] is True
         assert created["session_context"]["conversation_kind"] == "group"
 
-        sent = api.send_message("请回应 Native 验证标记", runnable_id=design["agent_id"])
+        sent = api.send_message("Respond with exactly 'Design native direct result'.", runnable_id=design["agent_id"])
         assert sent["ok"] is True
         assert sent["agent_run_id"]
 
@@ -1099,9 +1100,9 @@ async def test_task_runner_direct_group_agent_summary_uses_native_runtime(tmp_pa
         summary_task = state.get_task(summary_message["task_id"])
         assert summary_task is not None
         assert summary_task.chat_session_id == session.session_id
-        assert "[Oha-Yachiyo 群组直接 Agent 汇总]" in summary_task.description
-        assert "Design：已完成" in summary_task.description
-        assert "汇报：Design native direct result" in summary_task.description
+        assert "[Oha-Yachiyo 群组直接 Agent 汇总]" in summary_task.response_context
+        assert "Design：已完成" in summary_task.response_context
+        assert "汇报：Design native direct result" in summary_task.response_context
 
         await runner._execute_with_state(summary_task.task_id)
 
@@ -1165,13 +1166,35 @@ async def test_task_runner_direct_group_agent_rejected_summary_uses_native_runti
     def fake_chat(_base_url, _model, _api_key, messages, *, tools=None):
         model_calls.append(messages)
         last_content = str(messages[-1]["content"])
+        if any(
+            (tool.get("function") or {}).get("name") == MODEL_INTENT_PLANNING_TOOL_NAME
+            for tool in tools or []
+        ):
+            proposal = {
+                "intent_kind": "code_task",
+                "planning_goal": "请执行终端命令 `printf should-not-run`",
+                "action_evidence": "执行终端命令 `printf should-not-run`",
+            }
+            return {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "call_intent",
+                    "type": "function",
+                    "function": {
+                        "name": MODEL_INTENT_PLANNING_TOOL_NAME,
+                        "arguments": json.dumps(proposal, ensure_ascii=False),
+                    },
+                }],
+            }
         if "[Oha-Yachiyo 群组直接 Agent 汇总]" in last_content:
             assert "Design：已取消" in last_content
             assert "汇报：工具审批已拒绝：Rejected by user" in last_content
             assert "不要再派发新的 Agent 任务" in last_content
             return {"role": "assistant", "content": "主模型整理：Design 的审批拒绝已告知用户。"}
-        assert "# Agent\nName: Design Agent" in last_content
-        assert "# User Goal\n完成需要审批的工具验证" in last_content
+        context = "\n".join(str(message.get("content") or "") for message in messages)
+        assert "# Agent\nName: Design Agent" in context
+        assert "# User Goal\n请执行终端命令 `printf should-not-run`" in context
         assert any((tool.get("function") or {}).get("name") == "terminal_run" for tool in tools or [])
         return {
             "role": "assistant",
@@ -1231,17 +1254,18 @@ async def test_task_runner_direct_group_agent_rejected_summary_uses_native_runti
         assert created["ok"] is True
         assert created["session_context"]["conversation_kind"] == "group"
 
-        sent = api.send_message("完成需要审批的工具验证", runnable_id=design["agent_id"])
+        sent = api.send_message("请执行终端命令 `printf should-not-run`", runnable_id=design["agent_id"])
         assert sent["ok"] is True
         assert sent["agent_run_id"]
 
         waiting = await _wait_for(
             lambda: (
                 service.get_run(sent["agent_run_id"])
-                if service.get_run(sent["agent_run_id"])["status"] == "approval_required"
+                if service.get_run(sent["agent_run_id"])["status"] in {"approval_required", "failed", "cancelled"}
                 else None
             )
         )
+        assert waiting["status"] == "approval_required", waiting.get("result")
         assert waiting["kind"] == "agent_run"
         assert waiting["pending_approval"]["tool"] == "terminal.run"
 
@@ -1276,9 +1300,9 @@ async def test_task_runner_direct_group_agent_rejected_summary_uses_native_runti
         summary_task = state.get_task(summary_message["task_id"])
         assert summary_task is not None
         assert summary_task.chat_session_id == session.session_id
-        assert "[Oha-Yachiyo 群组直接 Agent 汇总]" in summary_task.description
-        assert "Design：已取消" in summary_task.description
-        assert "汇报：工具审批已拒绝：Rejected by user" in summary_task.description
+        assert "[Oha-Yachiyo 群组直接 Agent 汇总]" in summary_task.response_context
+        assert "Design：已取消" in summary_task.response_context
+        assert "汇报：工具审批已拒绝：Rejected by user" in summary_task.response_context
 
         await runner._execute_with_state(summary_task.task_id)
 
@@ -1318,7 +1342,8 @@ async def test_task_runner_direct_group_agent_rejected_summary_uses_native_runti
 
 
 @pytest.mark.asyncio
-async def test_task_runner_main_chat_image_attachment_reaches_native_model(tmp_path, monkeypatch):
+@pytest.mark.parametrize("image_route", ["chat", "vision_text"])
+async def test_task_runner_main_chat_image_attachment_reaches_native_model(tmp_path, monkeypatch, image_route):
     from apps.bridge.routes import agents as agent_routes
     from apps.bridge.routes import runs as run_routes
 
@@ -1342,8 +1367,16 @@ async def test_task_runner_main_chat_image_attachment_reaches_native_model(tmp_p
     def fake_chat(_base_url, _model, _api_key, messages, *, tools=None):
         captured_messages.append(messages)
         content = messages[-1]["content"]
+        if image_route == "vision_text" and len(captured_messages) == 2:
+            assert content == "看一下这张图\n\n[图片识别结果]\n这是一张测试图片。"
+            assert tools in (None, [])
+            return {"role": "assistant", "content": "这是一张测试图片。"}
         assert isinstance(content, list)
-        assert content[0] == {"type": "text", "text": "看一下这张图"}
+        expected_text = (
+            "看一下这张图" if image_route == "chat"
+            else "请准确分析这些图片，并输出供另一个对话模型继续回答用户请求的详细文字描述。"
+        )
+        assert content[0] == {"type": "text", "text": expected_text}
         image_parts = [part for part in content if part.get("type") == "image_url"]
         assert len(image_parts) == 1
         assert image_parts[0]["image_url"]["url"] == data_url
@@ -1357,7 +1390,7 @@ async def test_task_runner_main_chat_image_attachment_reaches_native_model(tmp_p
     monkeypatch.setattr(run_routes, "get_native_run_engine", lambda: service)
     monkeypatch.setattr(
         "apps.shell.native_capabilities.get_native_image_input_capability",
-        lambda: {"can_attach_images": True, "route": "chat"},
+        lambda: {"can_attach_images": True, "route": image_route, "profile_id": "profile_vision"},
     )
     monkeypatch.setattr(
         "apps.shell.agent_runtime.get_model_profile_service",
@@ -1386,7 +1419,7 @@ async def test_task_runner_main_chat_image_attachment_reaches_native_model(tmp_p
         assert task.attachments[0]["kind"] == "image"
         await runner._execute_with_state(task.task_id)
 
-        assert len(captured_messages) == 1
+        assert len(captured_messages) == (1 if image_route == "chat" else 2)
         updated = state.get_task(task.task_id)
         assert updated is not None
         assert updated.status == TaskStatus.COMPLETED
@@ -1416,7 +1449,12 @@ async def test_task_runner_main_chat_image_attachment_reaches_native_model(tmp_p
         assert detail["status"] == "completed"
         assert detail["result"] == "这是一张测试图片。"
         assert any(event.get("event") == "run.completed" for event in detail["timeline"])
-        assert [event["sequence"] for event in replay["events"]] == list(range(1, len(replay["events"]) + 1))
+        public_sequences = [event["sequence"] for event in replay["events"]]
+        assert public_sequences == sorted(set(public_sequences))
+        internal_events = service.list_run_events(run["run_id"], include_internal=True)["events"]
+        assert [event["sequence"] for event in internal_events] == list(range(1, len(internal_events) + 1))
+        assert any(event["event_type"] == "agent.input.image.bound" for event in internal_events)
+        assert not any(event["event_type"] == "agent.input.image.bound" for event in replay["events"])
         assert [event["event_type"] for event in replay["events"]] == event_types
         assert page["after_sequence"] == 1
         assert page["limit"] == 1

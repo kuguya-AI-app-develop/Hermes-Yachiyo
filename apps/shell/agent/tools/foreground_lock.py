@@ -57,4 +57,15 @@ class ForegroundActionLock:
         self._lock.release()
 
 
-__all__ = ["ForegroundActionLease", "ForegroundActionLock"]
+_NATIVE_FOREGROUND_ACTION_LOCK = ForegroundActionLock()
+
+
+def shared_native_foreground_lock() -> ForegroundActionLock:
+    """Serialize controlled Native inputs across factories in this process.
+
+    This does not prevent physical user input or actions in other processes.
+    """
+    return _NATIVE_FOREGROUND_ACTION_LOCK
+
+
+__all__ = ["ForegroundActionLease", "ForegroundActionLock", "shared_native_foreground_lock"]

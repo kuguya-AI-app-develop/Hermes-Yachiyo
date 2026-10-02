@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from typing import Any
 from uuid import uuid4
@@ -10,7 +11,21 @@ from uuid import uuid4
 from apps.shell.agent.runtime.errors import AgentRuntimeError
 from apps.shell.agent.tools.policy import TOOL_NAME_ALIASES
 
-MAX_AGENT_TOOL_ITERATIONS = 50
+
+def agent_tool_iteration_limit() -> int:
+    raw = str(
+        os.environ.get("OHA_YACHIYO_AGENT_TOOL_ITERATION_LIMIT")
+        or os.environ.get("HERMES_AGENT_TOOL_ITERATION_LIMIT")
+        or ""
+    ).strip()
+    try:
+        configured = int(raw) if raw else 200
+    except ValueError:
+        configured = 200
+    return max(10, min(configured, 1000))
+
+
+MAX_AGENT_TOOL_ITERATIONS = agent_tool_iteration_limit()
 _BROWSER_TYPE_TEXT_INPUT_KEYS = ("selector", "text")
 
 

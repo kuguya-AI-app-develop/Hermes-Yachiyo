@@ -6,13 +6,19 @@ import fnmatch
 import inspect
 import re
 from collections.abc import Mapping
+from contextlib import ExitStack
 from dataclasses import dataclass
+from functools import wraps
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from apps.shell.agent.runtime.errors import AgentRuntimeError, AgentWorkspaceBoundaryError
 from apps.shell.agent.tools import browser, desktop
-from apps.shell.agent.tools.data_analysis import analyze_data_file, analyze_data_files, analyze_data_text
+from apps.shell.agent.tools.data_analysis import (
+    analyze_data_file,
+    analyze_data_files,
+    analyze_data_text,
+)
 from apps.shell.agent.tools.registry import dispatch_tool_call
 from apps.shell.agent.tools.terminal import (
     _TERMINAL_PROCESS_LOCK,
@@ -22,6 +28,7 @@ from apps.shell.agent.tools.terminal import (
 )
 from apps.shell.agent.tools.workspace import (
     _apply_single_file_unified_diff,
+    _atomic_create_text,
     _atomic_write_text,
     _is_within,
     _safe_rel_path,
@@ -101,6 +108,100 @@ def _app_lifecycle_status_verified(
         and observed_app_name
         and _app_names_match(expected_app_name, observed_app_name)
         and observed_status in accepted_statuses
+    )
+
+
+def _without_supplied_completion_claims(result: dict[str, Any]) -> dict[str, Any]:
+    """Completion comes from native observations, not supplied flags."""
+
+    authority_keys = {
+        "postcondition_verified", "postcondition_ok", "verification_passed",
+        "verified", "verified_observed_state", "verification_context_trusted",
+        "verification_satisfied_by_native_receipt",
+    }
+    cleaned = {key: value for key, value in result.items() if key not in authority_keys}
+    if isinstance(result.get("data"), dict):
+        cleaned["data"] = {
+            key: value for key, value in result["data"].items()
+            if key not in authority_keys
+        }
+    return cleaned
+
+
+def _native_media_result(result: dict[str, Any], expected_tool: str) -> bool:
+    return bool(
+        result.get("ok") is True
+        and result.get("action") == expected_tool
+        and not result.get("fallback_used")
+        and not result.get("permission_error")
+        and isinstance(result.get("data"), dict)
+        and not result["data"].get("playback_state_unverified")
+    )
+
+
+def _apple_music_control_readback_verified(result: dict[str, Any], action: str) -> bool:
+    if not _native_media_result(result, "media.apple_music_control"):
+        return False
+    data = result["data"]
+    expected_action = desktop._clean_music_control_action(action)
+    if data.get("control") != expected_action:
+        return False
+    state = str(data.get("player_state") or "").strip().casefold()
+    if expected_action in {"play", "pause"}:
+        return state == {"play": "playing", "pause": "paused"}[expected_action]
+    if expected_action not in {"next", "previous"} or state not in {
+        "playing", "paused", "stopped",
+    }:
+        return False
+    before = str(data.get("before_track_id") or "").strip()
+    after = str(data.get("after_track_id") or "").strip()
+    source = data.get("track_identity_source")
+    if source == "music_database_id":
+        valid_ids = bool(
+            re.fullmatch(r"[1-9][0-9]*", before)
+            and re.fullmatch(r"[1-9][0-9]*", after)
+        )
+    elif source == "music_persistent_id":
+        valid_ids = bool(
+            re.fullmatch(r"[0-9A-Fa-f]{16}", before)
+            and re.fullmatch(r"[0-9A-Fa-f]{16}", after)
+            and before.strip("0") and after.strip("0")
+        )
+    else:
+        valid_ids = False
+    return bool(
+        valid_ids and before.casefold() != after.casefold()
+        and str(data.get("track_id") or "").strip() == after
+        and data.get("track_identity_conflict") is not True
+    )
+
+
+def _apple_music_play_readback_verified(result: dict[str, Any], query: str) -> bool:
+    if not _native_media_result(result, "media.apple_music_play"):
+        return False
+    data = result["data"]
+    expected_query = str(query or "").strip()
+    identity = data.get("album") if data.get("match_kind") == "album" else data.get("track")
+    return bool(
+        expected_query and str(data.get("query") or "").strip() == expected_query
+        and data.get("status") == "played"
+        and str(data.get("player_state") or "").strip().casefold() == "playing"
+        and data.get("playback_started") is True
+        and data.get("track_identity_verified") is True
+        and desktop._apple_music_identity_matches(expected_query, identity)
+        and str(data.get("track") or "").strip()
+        and str(data.get("artist") or "").strip()
+    )
+
+
+def _apple_music_open_readback_verified(result: dict[str, Any]) -> bool:
+    if not _native_media_result(result, "media.apple_music_open_and_play"):
+        return False
+    data = result["data"]
+    return bool(
+        data.get("app_name") == "Music" and data.get("open_ok") is True
+        and data.get("playback_ok") is True and data.get("control") == "play"
+        and str(data.get("player_state") or "").strip().casefold() == "playing"
     )
 
 
@@ -427,6 +528,19 @@ def _requested_data_analysis_artifact_paths(
     return paths or ["analysis-report.md"]
 
 
+def _foreground_mutation(tool_name: str) -> Any:
+    """Keep a native mutation and its read-back inside the Broker lease."""
+
+    def decorate(action: Any) -> Any:
+        @wraps(action)
+        def guarded(self: Any, *args: Any, **kwargs: Any) -> Any:
+            return self._with_foreground_lock(tool_name, lambda: action(self, *args, **kwargs))
+
+        return guarded
+
+    return decorate
+
+
 @dataclass
 class ToolBroker:
     """Controlled tools exposed to custom API agents."""
@@ -439,6 +553,7 @@ class ToolBroker:
     future_task_store: Any | None = None
     foreground_lock: Any | None = None
     foreground_lock_owner: str = ""
+    foreground_device_lock: Any | None = None
 
     def __post_init__(self) -> None:
         self.artifact_root.mkdir(parents=True, exist_ok=True)
@@ -721,6 +836,20 @@ class ToolBroker:
             "decoding_lossy": decoding_lossy,
         }
 
+    def validate_tool_request(self, name: str, payload: dict[str, Any]) -> None:
+        """Reject invalid workspace writes before presenting an approval.
+
+        This preflight performs no tool effect. The execution adapter repeats
+        its path checks after approval, including current symlink resolution.
+        """
+        if name == "workspace.write_patch":
+            if str(payload.get("content") or "").strip():
+                raise AgentRuntimeError(
+                    "workspace.write_patch 不再支持 content 全量写入；"
+                    "请提供单文件 unified diff patch"
+                )
+            self._resolve_workspace_path(str(payload.get("path") or ""), write=True)
+
     def workspace_write_patch(
         self,
         path: str,
@@ -738,18 +867,24 @@ class ToolBroker:
         target = self._resolve_workspace_path(path, write=True)
         if not approved:
             return {"ok": False, "approval_required": True, "tool": "workspace.write_patch"}
-        mode = "patch"
-        if target.exists() and not target.is_file():
+        creating = any(line == "--- /dev/null" for line in str(patch or "").splitlines())
+        mode = "create" if creating else "patch"
+        if not creating and target.exists() and not target.is_file():
             return {"ok": False, "path": path, "error": "workspace.write_patch 只能写入普通文件"}
-        if not target.exists():
+        if not creating and not target.exists():
             return {
                 "ok": False,
                 "path": path,
                 "error": "workspace.write_patch patch 模式要求目标文件已存在",
             }
-        before_bytes = target.read_bytes() if target.exists() else b""
+        before_bytes = b"" if creating else target.read_bytes()
         before_sha256 = _sha256_bytes(before_bytes)
         clean_expected_sha256 = str(expected_sha256 or "").strip()
+        if creating and clean_expected_sha256 != before_sha256:
+            return {
+                "ok": False, "path": path,
+                "error": "workspace.write_patch create patch 要求明确的空文件 expected_sha256",
+            }
         if clean_expected_sha256 and clean_expected_sha256 != before_sha256:
             return {
                 "ok": False,
@@ -765,12 +900,24 @@ class ToolBroker:
                 "path": path,
                 "error": "workspace.write_patch patch 模式只支持 UTF-8 文本文件",
             }
-        content = _apply_single_file_unified_diff(before_text, str(patch or ""), expected_path=path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write_text(target, content)
-        after_sha256 = _sha256_file(target)
+        content = _apply_single_file_unified_diff(
+            before_text, str(patch or ""), expected_path=path, allow_create=creating
+        )
+        if creating:
+            try:
+                observed_bytes = _atomic_create_text(target, content)
+                after_sha256 = _sha256_bytes(observed_bytes)
+            except OSError as exc:
+                return {
+                    "ok": False, "path": path,
+                    "error": f"workspace_patch_create_failed:{type(exc).__name__}",
+                }
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_write_text(target, content)
+            after_sha256 = _sha256_file(target)
         postcondition_verified = bool(
-            target.is_file()
+            (creating or target.is_file())
             and after_sha256 == _sha256_bytes(content.encode("utf-8"))
         )
         if not postcondition_verified:
@@ -1313,13 +1460,20 @@ class ToolBroker:
         role_filter: str = "",
         limit: Any = 80,
     ) -> dict[str, Any]:
-        return desktop.inspect_app(
-            app_name,
-            open_if_needed=open_if_needed,
-            focus=focus,
-            role_filter=role_filter,
-            limit=limit,
-        )
+        def inspect() -> dict[str, Any]:
+            return desktop.inspect_app(
+                app_name,
+                open_if_needed=open_if_needed,
+                focus=focus,
+                role_filter=role_filter,
+                limit=limit,
+            )
+
+        if desktop._clean_bool(open_if_needed, default=False) or desktop._clean_bool(
+            focus, default=False
+        ):
+            return self._with_foreground_lock("desktop.inspect_app", inspect)
+        return inspect()
 
     def desktop_click_ui_element(
         self,
@@ -1360,6 +1514,7 @@ class ToolBroker:
     def app_status(self, app_name: str) -> dict[str, Any]:
         return desktop.app_status(app_name)
 
+    @_foreground_mutation("app.open")
     def app_open(self, app_name: str) -> dict[str, Any]:
         result = desktop.app_open(app_name)
         data = result.get("data") if isinstance(result.get("data"), dict) else {}
@@ -1368,6 +1523,7 @@ class ToolBroker:
             verified=data.get("launch_verified") is True,
         )
 
+    @_foreground_mutation("app.focus")
     def app_focus(self, app_name: str) -> dict[str, Any]:
         result = desktop.app_focus(app_name)
         data = result.get("data") if isinstance(result.get("data"), dict) else {}
@@ -1376,6 +1532,7 @@ class ToolBroker:
             verified=data.get("focus_verified") is True,
         )
 
+    @_foreground_mutation("app.focus_window")
     def app_focus_window(self, app_name: str, title_contains: str) -> dict[str, Any]:
         result = desktop.app_focus_window(app_name, title_contains)
         data = result.get("data") if isinstance(result.get("data"), dict) else {}
@@ -1736,6 +1893,7 @@ class ToolBroker:
             ),
         )
 
+    @_foreground_mutation("app.show")
     def app_show(self, app_name: str) -> dict[str, Any]:
         result = desktop.app_show(app_name)
         return _with_native_postcondition_receipt(
@@ -1749,6 +1907,7 @@ class ToolBroker:
             ),
         )
 
+    @_foreground_mutation("app.hide")
     def app_hide(self, app_name: str) -> dict[str, Any]:
         result = desktop.app_hide(app_name)
         return _with_native_postcondition_receipt(
@@ -1762,6 +1921,7 @@ class ToolBroker:
             ),
         )
 
+    @_foreground_mutation("app.minimize")
     def app_minimize(self, app_name: str) -> dict[str, Any]:
         result = desktop.app_minimize(app_name)
         return _with_native_postcondition_receipt(
@@ -1775,41 +1935,96 @@ class ToolBroker:
             ),
         )
 
+    @_foreground_mutation("app.quit")
     def app_quit(self, app_name: str) -> dict[str, Any]:
-        return desktop.app_quit(app_name)
+        result = _without_supplied_completion_claims(desktop.app_quit(app_name))
+        data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        return _with_native_postcondition_receipt(
+            result,
+            verified=bool(
+                result.get("ok") is True and result.get("action") == "app.quit"
+                and not result.get("permission_error") and not result.get("fallback_used")
+                and _app_names_match(app_name, str(data.get("app_name") or ""))
+                and data.get("quit_status") in {"quit", "not_running"}
+                and data.get("launch_status") == "not_running"
+                and data.get("running") is False and data.get("quit_verified") is True
+            ),
+        )
 
+    @_foreground_mutation("desktop.reveal_path")
     def desktop_reveal_path(self, path: str) -> dict[str, Any]:
         return desktop.reveal_path(path)
 
+    @_foreground_mutation("desktop.open_path")
     def desktop_open_path(self, path: str) -> dict[str, Any]:
         return desktop.open_path(path)
 
+    @_foreground_mutation("desktop.open_path_with_app")
     def desktop_open_path_with_app(self, path: str, app_name: str) -> dict[str, Any]:
         return desktop.open_path_with_app(path, app_name)
 
+    @_foreground_mutation("media.apple_music_play")
     def media_apple_music_play(self, query: str) -> dict[str, Any]:
-        return desktop.apple_music_play(query)
+        result = _without_supplied_completion_claims(desktop.apple_music_play(query))
+        return _with_native_postcondition_receipt(
+            result, verified=_apple_music_play_readback_verified(result, query)
+        )
 
     def media_apple_music_status(self) -> dict[str, Any]:
         return desktop.apple_music_status()
 
+    @_foreground_mutation("media.apple_music_open_and_play")
     def media_apple_music_open_and_play(self) -> dict[str, Any]:
-        return desktop.apple_music_open_and_play()
+        result = _without_supplied_completion_claims(desktop.apple_music_open_and_play())
+        return _with_native_postcondition_receipt(
+            result, verified=_apple_music_open_readback_verified(result)
+        )
 
+    @_foreground_mutation("media.apple_music_control")
     def media_apple_music_control(self, action: str) -> dict[str, Any]:
-        return desktop.apple_music_control(action)
+        result = _without_supplied_completion_claims(desktop.apple_music_control(action))
+        return _with_native_postcondition_receipt(
+            result, verified=_apple_music_control_readback_verified(result, action)
+        )
 
+    @_foreground_mutation("media.music_app_open_and_play")
     def media_music_app_open_and_play(self, app_name: str) -> dict[str, Any]:
-        return desktop.music_app_open_and_play(app_name)
+        result = _without_supplied_completion_claims(desktop.music_app_open_and_play(app_name))
+        return _with_native_postcondition_receipt(
+            result, verified=str(app_name or "").strip() == "Music"
+            and _apple_music_open_readback_verified(result),
+        )
 
+    @_foreground_mutation("media.music_app_control")
     def media_music_app_control(self, app_name: str, action: str) -> dict[str, Any]:
         return desktop.music_app_control(app_name, action)
 
+    @_foreground_mutation("media.system_control")
     def media_system_control(self, action: str) -> dict[str, Any]:
         return desktop.system_media_control(action)
 
+    @_foreground_mutation("system.settings_open")
     def system_settings_open(self, target: str) -> dict[str, Any]:
-        return desktop.system_settings_open(target)
+        from apps.shell.agent.runtime.system_settings_receipts import observed_settings_pane
+
+        result = _without_supplied_completion_claims(desktop.system_settings_open(target))
+        data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        # The dispatch result cannot supply the independent observation.
+        data = {key: value for key, value in data.items() if key != "settings_readback"}
+        result = {**result, "data": data}
+        if not (
+            result.get("ok") is True and result.get("action") == "system.settings_open"
+            and data.get("target") == str(target).strip()
+            and not result.get("permission_error")
+        ):
+            return result
+        before = desktop.active_window()
+        ui = desktop.ui_elements(app_name="System Settings", role_filter="", limit=80)
+        after = desktop.active_window()
+        observation = observed_settings_pane(target, before, ui, after)
+        if observation:
+            result["data"]["settings_readback"] = observation
+        return _with_native_postcondition_receipt(result, verified=bool(observation))
 
     def system_volume(
         self,
@@ -1818,8 +2033,14 @@ class ToolBroker:
         level: Any = None,
         step: Any = None,
     ) -> dict[str, Any]:
-        return desktop.system_volume(action, level=level, step=step)
+        def change_or_observe() -> dict[str, Any]:
+            return desktop.system_volume(action, level=level, step=step)
 
+        if desktop._clean_system_volume_action(action) == "status":
+            return change_or_observe()
+        return self._with_foreground_lock("system.volume", change_or_observe)
+
+    @_foreground_mutation("system.brightness")
     def system_brightness(
         self,
         action: str,
@@ -1828,18 +2049,22 @@ class ToolBroker:
     ) -> dict[str, Any]:
         return desktop.system_brightness(action, step=step)
 
+    @_foreground_mutation("system.display_sleep")
     def system_display_sleep(self) -> dict[str, Any]:
         return desktop.system_display_sleep()
 
+    @_foreground_mutation("system.screen_saver_start")
     def system_screen_saver_start(self) -> dict[str, Any]:
         return desktop.system_screen_saver_start()
 
+    @_foreground_mutation("clipboard.write")
     def clipboard_write(self, text: str) -> dict[str, Any]:
         return desktop.clipboard_write(text)
 
     def clipboard_read(self, *, max_chars: Any = 2000) -> dict[str, Any]:
         return desktop.clipboard_read(max_chars=max_chars)
 
+    @_foreground_mutation("notes.create")
     def notes_create(
         self,
         body: str,
@@ -1849,6 +2074,7 @@ class ToolBroker:
     ) -> dict[str, Any]:
         return desktop.notes_create(body, title=title, folder_name=folder_name)
 
+    @_foreground_mutation("reminders.create")
     def reminders_create(
         self,
         title: str,
@@ -1858,6 +2084,7 @@ class ToolBroker:
     ) -> dict[str, Any]:
         return desktop.reminders_create(title, due_at=due_at, list_name=list_name)
 
+    @_foreground_mutation("calendar.create_event")
     def calendar_create_event(
         self,
         title: str,
@@ -1896,6 +2123,32 @@ class ToolBroker:
             "desktop.search_submit",
             desktop.desktop_search_submit,
         )
+
+    def runtime_exact_search_input(
+        self, tool_name: str, text: str, *, validate_pre: Any
+    ) -> dict[str, Any]:
+        """Recheck the native search target and input under one foreground lock."""
+        if tool_name not in {"desktop.safe_type_text", "desktop.search_submit"}:
+            raise ValueError("unsupported exact search input")
+
+        def input_under_lock() -> dict[str, Any]:
+            if not validate_pre(desktop.ui_elements(limit=80)):
+                return {
+                    "ok": False,
+                    "action": tool_name,
+                    "status": "blocked",
+                    "reason": "foreground_search_live_target_changed",
+                    "error": "foreground_search_live_target_changed",
+                    "summary": "Search input was not dispatched because its window, field, or query changed.",
+                    "retryable": False,
+                }
+            return (
+                desktop.desktop_safe_type_text(text)
+                if tool_name == "desktop.safe_type_text"
+                else desktop.desktop_search_submit()
+            )
+
+        return self._with_foreground_lock(tool_name, input_under_lock)
 
     def desktop_hide_app(self) -> dict[str, Any]:
         return self._with_foreground_lock(
@@ -2129,6 +2382,7 @@ class ToolBroker:
             "fallback_result": fallback_result,
         }
 
+    @_foreground_mutation("browser.open_url")
     def browser_open_url(
         self,
         url: str,
@@ -2197,6 +2451,7 @@ class ToolBroker:
             },
         }
 
+    @_foreground_mutation("browser.close_target")
     def close_owned_browser_target(self) -> dict[str, Any]:
         """Release this broker's exact CDP target while preserving user tabs."""
 
@@ -2227,6 +2482,7 @@ class ToolBroker:
             browser.current_page,
         )
 
+    @_foreground_mutation("browser.click")
     def browser_click(
         self,
         selector: str,
@@ -2238,10 +2494,8 @@ class ToolBroker:
     ) -> dict[str, Any]:
         foreground_fallback = None
         if allow_foreground_fallback:
-            foreground_fallback = lambda x, y, count: self._with_foreground_lock(
-                "browser.click",
-                lambda: desktop.desktop_click(x, y, click_count=count),
-            )
+            def foreground_fallback(x: Any, y: Any, count: Any) -> dict[str, Any]:
+                return desktop.desktop_click(x, y, click_count=count)
         action = lambda: browser.click(
             selector,
             fallback_x=fallback_x,
@@ -2253,6 +2507,7 @@ class ToolBroker:
             return action()
         return self._with_owned_browser_target("browser.click", action)
 
+    @_foreground_mutation("browser.type_text")
     def browser_type_text(
         self,
         selector: str,
@@ -2263,10 +2518,7 @@ class ToolBroker:
         allow_foreground_fallback: bool = False,
     ) -> dict[str, Any]:
         def foreground_fallback(*args: Any) -> dict[str, Any]:
-            return self._with_foreground_lock(
-                "browser.type_text",
-                lambda: browser._type_text_foreground_fallback(*args),
-            )
+            return browser._type_text_foreground_fallback(*args)
 
         action = lambda: browser.type_text(
             selector,
@@ -2518,20 +2770,26 @@ class ToolBroker:
         return payload
 
     def _with_foreground_lock(self, tool_name: str, action: Any) -> dict[str, Any]:
-        if self.foreground_lock is None:
+        locks = []
+        for lock in (self.foreground_device_lock, self.foreground_lock):
+            if lock is not None and all(lock is not existing for existing in locks):
+                locks.append(lock)
+        if not locks:
             return action()
         holder = str(self.foreground_lock_owner or self.artifact_root).strip()
-        lease = self.foreground_lock.acquire(holder=holder, tool_name=tool_name)
-        if not lease.acquired:
-            return {
-                "ok": False,
-                "tool": tool_name,
-                "action": "foreground_lock",
-                "foreground_lock_busy": True,
-                "locked_by": lease.locked_by,
-                "summary": "Foreground desktop action is already locked by another run.",
-            }
-        try:
+        with ExitStack() as releases:
+            for lock in locks:
+                lease = lock.acquire(holder=holder, tool_name=tool_name)
+                if not lease.acquired:
+                    return {
+                        "ok": False,
+                        "tool": tool_name,
+                        "action": "foreground_lock",
+                        "foreground_lock_busy": True,
+                        "locked_by": lease.locked_by,
+                        "summary": "Foreground desktop action is already locked by another run.",
+                    }
+                releases.callback(lease.release)
             result = action()
             if isinstance(result, dict):
                 return {
@@ -2542,8 +2800,6 @@ class ToolBroker:
                     },
                 }
             return result
-        finally:
-            lease.release()
 
 
 def _foreground_focus_not_verified(step_name: str, result: dict[str, Any]) -> bool:

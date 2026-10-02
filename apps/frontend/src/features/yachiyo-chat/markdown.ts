@@ -239,7 +239,17 @@ function looksLikeResumeDiffTranscript(text: string) {
 function looksLikeUnifiedDiff(text: string) {
   const hasHunk = /(?:^|\n)@@\s+-\d+(?:,\d+)?\s+\+\d+(?:,\d+)?\s+@@/.test(text);
   const hasFileHeader = /(?:^|\n)(?:diff --git|---\s+\S+\n\+\+\+\s+\S+)/.test(text);
-  const hasChangedLines = /(?:^|\n)\+[^+\n]/.test(text) && /(?:^|\n)-[^-\n]/.test(text);
+  // A valid hunk may only add or only remove lines, including empty lines.
+  // Within a hunk, even +++ / --- can be changed content rather than headers.
+  let inHunk = false;
+  const hasChangedLines = text.split('\n').some((line) => {
+    if (/^@@\s+-\d+(?:,\d+)?\s+\+\d+(?:,\d+)?\s+@@/.test(line)) {
+      inHunk = true;
+      return false;
+    }
+    if (line.startsWith('diff --git ')) inHunk = false;
+    return /^[+-]/.test(line) && (inHunk || !/^(?:---|\+\+\+)\s/.test(line));
+  });
   return (hasHunk || hasFileHeader) && hasChangedLines;
 }
 

@@ -27,6 +27,7 @@ from apps.shell.agent.runtime.desktop_tool_labels import (
 )
 from apps.shell.agent.runtime.errors import (
     AgentApprovalRequired,
+    AgentDelegationProposed,
     AgentDirectOutcomeUnverified,
 )
 from apps.shell.agent.runtime.event_scopes import (
@@ -92,6 +93,7 @@ from apps.shell.agent.runtime.model_messages import messages_require_model_first
 from apps.shell.agent.runtime.model_intent_planning import (
     ModelIntentClarificationResolution,
     ModelIntentPlanningError,
+    capture_only_content_read_requires_model,
     direct_tool_selection_from_user_clarification,
     model_intent_planning_tool_schema,
     model_intent_proposal_from_tool_requests,
@@ -1284,6 +1286,7 @@ class RuntimeCustomApiAgentLoop:
         run_id: str = "",
         timeline: list[dict[str, Any]],
         budget: Any,
+        force_planning: bool = False,
     ) -> DirectToolSelection | ModelIntentClarificationResolution | None:
         """Resolve only ambiguous first-turn intent; execution stays Runtime-owned.
 
@@ -1312,7 +1315,7 @@ class RuntimeCustomApiAgentLoop:
             deterministic_selection,
             immutable_goal,
         )
-        if clarification_authority is None and not needs_model_assistance:
+        if clarification_authority is None and not needs_model_assistance and not force_planning:
             return None
         if not _model_intent_plan_may_replace_execution_envelope(
             runtime_execution_envelope,
@@ -1562,12 +1565,16 @@ class RuntimeCustomApiAgentLoop:
         default_messages = messages is None
         normalized_start_iteration = self._normalize_tool_iteration(start_iteration)
         goal_contract = None
-        if original_goal is None:
+        if original_goal is None or any(
+            isinstance(event, Mapping)
+            and str(event.get("event") or event.get("event_type") or "") == "agent.goal.contract"
+            for event in timeline
+        ):
             # Restore before any planner or prompt construction. Continuations
             # must not invoke a new planner merely to rebuild system guidance.
             goal_contract = runtime_goal_contract(
                 run_id=run_id,
-                original_goal=None,
+                original_goal=str(original_goal).strip() if original_goal is not None else None,
                 runtime_execution_envelope=(
                     runtime_execution_envelope
                     if isinstance(runtime_execution_envelope, Mapping)
@@ -2038,6 +2045,15 @@ class RuntimeCustomApiAgentLoop:
                         # Project the precondition failure through the Runner
                         # instead of requesting approval for an impossible action.
                         first_approval_index = -1
+                    validate_request = getattr(broker, "validate_tool_request", None)
+                    if first_approval_index == 0 and callable(validate_request):
+                        try:
+                            validate_request(approval_tool, dict(approval_candidate.get("input") or {}))
+                        except Exception:
+                            # Keep invalid input in the authoritative Runner
+                            # so its denial and recovery hint are recorded.
+                            # No approval can make an out-of-scope path valid.
+                            first_approval_index = -1
                 if first_approval_index == 0:
                     approval_request = execution_tool_requests[0]
                     approval_tool = str(approval_request.get("tool") or "").strip()
@@ -2931,6 +2947,11 @@ class RuntimeCustomApiAgentLoop:
                     )
                     if direct_result:
                         return direct_result
+                explicit_model_followup = explicit_model_followup or (
+                    capture_only_content_read_requires_model(
+                        immutable_original_goal, execution_tool_requests,
+                    )
+                )
                 continue_to_model = bool(replan_payloads) or explicit_model_followup
                 if continue_to_model:
                     followup_selection_payload = _selection_payload_with_timeline_fallback(
@@ -6432,6 +6453,13 @@ class RuntimeCustomApiAgentLoop:
                 metadata=self._model_message_metadata(dict(message)),
                 truncated=truncated,
             )
+        if run_id.startswith("main_chat_run_") and any(criterion.effectful for criterion in contract.criteria):
+            from .main_chat_delegation import is_delegation_proposal
+
+            if is_delegation_proposal(content) and not runtime_goal_assessment(contract, timeline).completed:
+                # No tool effect occurs here. Core must bind this proposal to
+                # the same immutable objective and narrowed child authority.
+                raise AgentDelegationProposed(content)
         semantic_assessments = self._assess_pending_semantic_artifacts(
             contract,
             timeline=timeline,
@@ -8851,6 +8879,14 @@ class RuntimeCustomApiAgentLoop:
         run_id: str = "",
         allow_honest_partial: bool = False,
     ) -> str:
+        contract = runtime_goal_contract(
+            run_id=run_id, runtime_execution_envelope=None,
+            runtime_execution_metadata=None, messages=[], timeline=timeline,
+        ) if any(e.get("event") == "agent.goal.contract" for e in timeline) else None
+        if contract and capture_only_content_read_requires_model(
+            contract.original_goal, planned_tool_requests,
+        ):
+            return ""
         tool_events = [
             event
             for event in timeline[tool_timeline_start:]
@@ -8980,11 +9016,20 @@ class RuntimeCustomApiAgentLoop:
             ):
                 return ""
             presentation = str(planned_tool_request.get("presentation") or "").strip()
+            from .current_page_link_copy import bounded_page_link_copy_goal
+            page_link_preparation = bool(
+                contract
+                and bounded_page_link_copy_goal(contract.original_goal)
+                and planned_tool == "clipboard.read"
+                and str(planned_tool_request.get("step_id") or "")
+                == "read-page-link-pasteboard-before"
+            )
             summary = (
                 ""
                 if (
                     planned_tool in _DIRECT_DAILY_SEQUENCE_CONTEXT_TOOLS
                     or direct_runtime_verification
+                    or page_link_preparation
                 )
                 else self._daily_desktop_summary(
                     planned_tool,
@@ -8997,6 +9042,7 @@ class RuntimeCustomApiAgentLoop:
                 not summary
                 and planned_tool not in _DIRECT_DAILY_SEQUENCE_CONTEXT_TOOLS
                 and not direct_runtime_verification
+                and not page_link_preparation
             ):
                 return ""
             completed_step = {

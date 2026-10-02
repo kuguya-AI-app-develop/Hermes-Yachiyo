@@ -280,7 +280,7 @@ def test_chat_api_direct_generic_app_open_forwards_safe_direct_requests(
             "selection_source": "desktop.list_apps",
             "verification_goal": "app_running",
         }
-        assert captured["direct_tool_requests"][2]["continue_to_model"] is True
+        assert captured["direct_tool_requests"][2]["continue_to_model"] is False
         assert captured["runtime_execution_envelope"]["requests"]
     finally:
         store.close()
@@ -474,7 +474,7 @@ def test_send_message_executes_direct_daily_desktop_music_task(tmp_path, monkeyp
         open_and_play_calls += 1
         return {
             "ok": True,
-            "action": "media.music_app_open_and_play",
+            "action": "media.apple_music_open_and_play",
             "summary": f"Opened {app_name} and started playback",
             "data": {
                 "app_name": app_name,
@@ -1188,7 +1188,7 @@ def test_send_message_executes_main_chat_runnable_daily_desktop_intent_without_m
         open_and_play_calls += 1
         return {
             "ok": True,
-            "action": "media.music_app_open_and_play",
+            "action": "media.apple_music_open_and_play",
             "summary": f"Opened {app_name} and started playback",
             "data": {
                 "app_name": app_name,
@@ -1792,20 +1792,20 @@ def test_send_message_opens_explicit_desktop_client_without_model(
         second_assistant = runtime.chat_session.get_assistant_message_for_task(second["task_id"])
 
         assert second["ok"] is True
-        assert second["status"] == "completed"
+        assert second["status"] == "failed"
         assert calls == [
             ("open", "ChatGPT"),
             ("focus", "Google Chrome"),
             ("shortcut", "find"),
         ]
-        # The combined action fake returns its own Broker read-after-write
-        # receipt, so the runtime must not invent an unrelated generic UI
-        # observation after the postcondition has already been verified.
-        assert ui_verification_calls == []
-        assert second["agent_task"]["status"] == "completed"
+        # Static UI and a supplied flag do not prove the requested search focus.
+        assert ui_verification_calls == ["Google Chrome"]
+        assert second["agent_task"]["status"] == "failed"
         assert second["agent_task"]["needs_user_action"] is False
         assert second["agent_task"]["pending_approvals"] == []
-        expected_dispatch = "已切到 Google Chrome 并发送“打开查找”快捷键。"
+        expected_dispatch = second["agent_task"]["summary"]
+        assert "Google Chrome" in expected_dispatch and "打开查找" in expected_dispatch
+        assert "未能确认" in expected_dispatch and "Profile" not in expected_dispatch
         assert second["agent_task"]["summary"] == expected_dispatch
         assert second["agent_task"]["tool_calls"][-1]["tool_name"] == "app.focus_and_safe_shortcut"
         assert second["agent_task"]["tool_calls"][-1]["input_preview"] == {
@@ -1813,15 +1813,16 @@ def test_send_message_opens_explicit_desktop_client_without_model(
             "action": "find",
         }
         assert second_task is not None
-        assert second_task.status == TaskStatus.COMPLETED
-        assert second_task.result == expected_dispatch
+        assert second_task.status == TaskStatus.FAILED
+        assert second_task.error == expected_dispatch
         assert second_assistant is not None
-        assert second_assistant.status == MessageStatus.COMPLETED
+        assert second_assistant.status == MessageStatus.FAILED
         assert second_assistant.content == expected_dispatch
-        assert second_run["status"] == "completed"
+        assert second_run["status"] == "failed"
         assert "agent.desktop.intent_planned" in second_event_types
         assert "agent.tool.call" in second_event_types
-        assert "agent.desktop.intent_completed" in second_event_types
+        assert "agent.desktop.intent_completed" not in second_event_types
+        assert "agent.desktop.intent_unverified" in second_event_types
         assert "model.request.started" not in second_event_types
         assert "model.requested" not in second_event_types
     finally:
@@ -1944,15 +1945,16 @@ def test_send_message_executes_app_open_new_document_without_model(tmp_path, mon
         assistant = runtime.chat_session.get_assistant_message_for_task(result["task_id"])
 
         assert result["ok"] is True
-        assert result["status"] == "completed"
+        assert result["status"] == "failed"
         assert calls == [
             ("open", "Microsoft Word"),
             ("focus", "Microsoft Word"),
             ("shortcut", "new_document"),
         ]
-        assert result["agent_task"]["status"] == "completed"
+        assert result["agent_task"]["status"] == "failed"
         expected_dispatch = "已打开 Microsoft Word 并发送“新建文档”快捷键。"
-        assert result["agent_task"]["summary"] == expected_dispatch
+        assert "未能确认" in result["agent_task"]["summary"]
+        assert "Profile" not in result["agent_task"]["summary"]
         tool_calls = result["agent_task"]["tool_calls"]
         new_document_call = next(
             tool_call
@@ -1964,15 +1966,16 @@ def test_send_message_executes_app_open_new_document_without_model(tmp_path, mon
             "action": "new_document",
         }
         assert task is not None
-        assert task.status == TaskStatus.COMPLETED
-        assert task.result == expected_dispatch
+        assert task.status == TaskStatus.FAILED
+        assert task.error == result["agent_task"]["summary"]
         assert assistant is not None
-        assert assistant.status == MessageStatus.COMPLETED
-        assert assistant.content == expected_dispatch
-        assert run["status"] == "completed"
+        assert assistant.status == MessageStatus.FAILED
+        assert assistant.content == result["agent_task"]["summary"]
+        assert run["status"] == "failed"
         assert "agent.desktop.intent_planned" in event_types
         assert "agent.tool.call" in event_types
-        assert "agent.desktop.intent_completed" in event_types
+        assert "agent.desktop.intent_completed" not in event_types
+        assert "agent.desktop.intent_unverified" in event_types
         assert "model.request.started" not in event_types
         assert "model.requested" not in event_types
 
@@ -2105,29 +2108,31 @@ def test_send_message_executes_app_open_new_item_without_model(tmp_path, monkeyp
             assistant = runtime.chat_session.get_assistant_message_for_task(result["task_id"])
 
             assert result["ok"] is True
-            assert result["status"] == "completed"
+            assert result["status"] == "failed"
             assert calls == [
                 ("open", app_name),
                 ("focus", app_name),
                 ("shortcut", action),
             ]
-            assert result["agent_task"]["status"] == "completed"
-            assert result["agent_task"]["summary"] == summary
+            assert result["agent_task"]["status"] == "failed"
+            assert "未能确认" in result["agent_task"]["summary"]
+            assert "Profile" not in result["agent_task"]["summary"]
             assert result["agent_task"]["tool_calls"][-1]["tool_name"] == "app.open_and_safe_shortcut"
             assert result["agent_task"]["tool_calls"][-1]["input_preview"] == {
                 "app_name": app_name,
                 "action": action,
             }
             assert task is not None
-            assert task.status == TaskStatus.COMPLETED
-            assert task.result == summary
+            assert task.status == TaskStatus.FAILED
+            assert task.error == result["agent_task"]["summary"]
             assert assistant is not None
-            assert assistant.status == MessageStatus.COMPLETED
-            assert assistant.content == summary
-            assert run["status"] == "completed"
+            assert assistant.status == MessageStatus.FAILED
+            assert assistant.content == result["agent_task"]["summary"]
+            assert run["status"] == "failed"
             assert "agent.desktop.intent_planned" in event_types
             assert "agent.tool.call" in event_types
-            assert "agent.desktop.intent_completed" in event_types
+            assert "agent.desktop.intent_completed" not in event_types
+            assert "agent.desktop.intent_unverified" in event_types
             assert "model.request.started" not in event_types
             assert "model.requested" not in event_types
     finally:
@@ -2675,28 +2680,30 @@ def test_send_message_executes_app_prefix_find_shortcut_without_model(tmp_path, 
         assistant = runtime.chat_session.get_assistant_message_for_task(result["task_id"])
 
         assert result["ok"] is True
-        assert result["status"] == "completed"
+        assert result["status"] == "failed"
         assert calls == [("focus", "Google Chrome"), ("shortcut", "find")]
-        assert result["agent_task"]["status"] == "completed"
+        assert result["agent_task"]["status"] == "failed"
         assert result["agent_task"]["needs_user_action"] is False
         assert result["agent_task"]["pending_approvals"] == []
         expected_dispatch = "已切到 Google Chrome 并发送“打开查找”快捷键。"
-        assert result["agent_task"]["summary"] == expected_dispatch
+        assert "未能确认" in result["agent_task"]["summary"]
+        assert "Profile" not in result["agent_task"]["summary"]
         assert result["agent_task"]["tool_calls"][-1]["tool_name"] == "app.focus_and_safe_shortcut"
         assert result["agent_task"]["tool_calls"][-1]["input_preview"] == {
             "app_name": "Google Chrome",
             "action": "find",
         }
         assert task is not None
-        assert task.status == TaskStatus.COMPLETED
-        assert task.result == expected_dispatch
+        assert task.status == TaskStatus.FAILED
+        assert task.error == result["agent_task"]["summary"]
         assert assistant is not None
-        assert assistant.status == MessageStatus.COMPLETED
-        assert assistant.content == expected_dispatch
-        assert run["status"] == "completed"
+        assert assistant.status == MessageStatus.FAILED
+        assert assistant.content == result["agent_task"]["summary"]
+        assert run["status"] == "failed"
         assert "agent.desktop.intent_planned" in event_types
         assert "agent.tool.call" in event_types
-        assert "agent.desktop.intent_completed" in event_types
+        assert "agent.desktop.intent_completed" not in event_types
+        assert "agent.desktop.intent_unverified" in event_types
         assert "model.request.started" not in event_types
         assert "model.requested" not in event_types
     finally:
@@ -2920,6 +2927,9 @@ def test_send_message_executes_direct_daily_desktop_music_play_task(tmp_path, mo
             "action": "media.apple_music_play",
             "summary": f"Apple Music playing {query}",
             "data": {
+                'status': 'played',
+                'match_kind': 'track',
+                'album': 'Fixture Album',
                 "query": query,
                 "track": query,
                 "artist": "Yachiyo",
@@ -3011,6 +3021,9 @@ def test_send_message_executes_music_followup_song_before_model(tmp_path, monkey
             "action": "media.apple_music_play",
             "summary": f"Apple Music playing {query}",
             "data": {
+                'status': 'played',
+                'match_kind': 'track',
+                'album': 'Fixture Album',
                 "query": query,
                 "track": query,
                 "artist": "Yachiyo",
@@ -3077,6 +3090,7 @@ def test_send_message_executes_app_search_followup_before_model(tmp_path, monkey
     calls: list[tuple[str, str]] = []
     active_app = "WeChat"
     typed_text = ""
+    submitted = False
     runtime.chat_session.add_user_message("打开微信")
     runtime.chat_session.add_assistant_message("已打开 WeChat。")
     monkeypatch.setattr(
@@ -3123,6 +3137,8 @@ def test_send_message_executes_app_search_followup_before_model(tmp_path, monkey
         })
 
     def fake_safe_shortcut(action: str) -> dict:
+        nonlocal submitted
+        submitted = False
         calls.append(("shortcut", action))
         return _native_postcondition_result({
             "ok": True,
@@ -3143,6 +3159,8 @@ def test_send_message_executes_app_search_followup_before_model(tmp_path, monkey
         })
 
     def fake_search_submit() -> dict:
+        nonlocal submitted
+        submitted = True
         return _native_postcondition_result({
             "ok": True,
             "action": "desktop.search_submit",
@@ -3162,16 +3180,7 @@ def test_send_message_executes_app_search_followup_before_model(tmp_path, monkey
         })
 
     def fake_ui_elements(**_kwargs: Any) -> dict:
-        return _native_postcondition_result({
-            "ok": True,
-            "action": "desktop.ui_elements",
-            "data": {
-                "app_name": active_app,
-                "elements": [
-                    {"role": "AXTextField", "name": "Search", "value": typed_text},
-                ],
-            },
-        })
+        return _native_search_ui_result(active_app, typed_text, submitted=submitted)
 
     monkeypatch.setattr("apps.shell.agent.tools.desktop.app_open", fake_app_open)
     monkeypatch.setattr("apps.shell.agent.tools.desktop.app_focus", fake_app_focus)
@@ -3366,11 +3375,132 @@ def test_send_message_executes_browser_prefix_search_field_type_without_browser_
     api, runtime, store = _make_api(tmp_path)
     service = _make_agent_runtime_service(tmp_path)
     runtime.agent_runtime_service = service
-    calls: list[tuple[str, str]] = []
-    inspect_calls: list[tuple[str, bool]] = []
-    click_calls: list[tuple[str, str, int]] = []
-    active_app = "Google Chrome"
-    typed_text = ""
+    calls = []
+    inspect_calls = []
+    state = {
+        "app": "Google Chrome",
+        "query": "",
+        "focused": False,
+        "submitted": False,
+        "target": "搜索框",
+        "running": True,
+        "allow_open": False,
+    }
+
+    def app_action(action, app_name):
+        state["app"] = app_name
+        calls.append((action, app_name))
+        return {"ok": True, "action": f"app.{action}", "data": {"app_name": app_name}}
+
+    def ui(**kwargs):
+        result = _native_search_ui_result(
+            state["app"], state["query"], submitted=state["submitted"], focused=state["focused"]
+        )
+        result["data"]["elements"][0]["name"] = state["target"]
+        if state["focused"]:
+            result["data"]["focused_element"]["name"] = state["target"]
+        return result
+
+    def inspect(app_name, *, open_if_needed=False, **kwargs):
+        # Discovery may read a running app before approval, never launch it.
+        inspect_calls.append((app_name, open_if_needed))
+        assert open_if_needed is state["allow_open"]
+        assert calls == []
+        state["app"] = app_name
+        return {
+            "ok": True,
+            "action": "desktop.inspect_app",
+            "data": {
+                "app_name": app_name,
+                "pid": 100,
+                "window_id": 200,
+                "app_found": state["running"],
+                "running": state["running"],
+                "ui_elements": ui()
+                if state["running"]
+                else {"ok": False, "action": "desktop.ui_elements", "data": {}},
+            },
+        }
+
+    def click(target, *, role_filter="", limit=80, click_count=1, expected_app_name=""):
+        assert target == state["target"] and expected_app_name == state["app"]
+        calls.append(("click", target))
+        state["focused"] = True
+        return {
+            "ok": True,
+            "action": "desktop.click_ui_element",
+            "data": {
+                "app_name": state["app"],
+                "pid": 100,
+                "window_id": 200,
+                "target": target,
+                "role_filter": role_filter,
+                "click_count": click_count,
+                "matched_element": {
+                    "role": "AXTextField",
+                    "name": target,
+                    "center": {"x": 320, "y": 240},
+                },
+            },
+        }
+
+    def type_text(text):
+        assert state["focused"]
+        calls.append(("type", text))
+        state["query"] = text
+        return {
+            "ok": True,
+            "action": "desktop.safe_type_text",
+            "data": {
+                "character_count": len(text),
+                "explicit_user_text": True,
+            },
+        }
+
+    def submit():
+        assert state["focused"] and state["query"]
+        calls.append(("search_submit", ""))
+        state["submitted"] = True
+        return {
+            "ok": True,
+            "action": "desktop.search_submit",
+            "data": {
+                "key": "return",
+                "modifiers": [],
+            },
+        }
+
+    monkeypatch.setattr(
+        "apps.shell.agent.tools.desktop.app_open", lambda name: app_action("open", name)
+    )
+    monkeypatch.setattr(
+        "apps.shell.agent.tools.desktop.app_focus", lambda name: app_action("focus", name)
+    )
+    monkeypatch.setattr(
+        "apps.shell.agent.tools.desktop.active_window",
+        lambda: {
+            "ok": True,
+            "action": "desktop.active_window",
+            "data": {
+                "app_name": state["app"],
+                "pid": 100,
+                "window_id": 200,
+            },
+        },
+    )
+    monkeypatch.setattr("apps.shell.agent.tools.desktop.inspect_app", inspect)
+    monkeypatch.setattr("apps.shell.agent.tools.desktop.ui_elements", ui)
+    monkeypatch.setattr("apps.shell.agent.tools.desktop.click_ui_element", click)
+    monkeypatch.setattr("apps.shell.agent.tools.desktop.desktop_safe_type_text", type_text)
+    monkeypatch.setattr("apps.shell.agent.tools.desktop.desktop_search_submit", submit)
+    monkeypatch.setattr(
+        "apps.shell.agent.tools.desktop.desktop_safe_shortcut",
+        lambda *_a, **_kw: pytest.fail("An explicit field click must not invent Cmd-F"),
+    )
+    monkeypatch.setattr(
+        "apps.shell.agent.tools.browser.click",
+        lambda *_a, **_kw: pytest.fail("Native field input must not take a browser tab"),
+    )
     monkeypatch.setattr(
         "apps.shell.agent_runtime.get_model_profile_service",
         lambda: SimpleNamespace(
@@ -3380,265 +3510,97 @@ def test_send_message_executes_browser_prefix_search_field_type_without_browser_
     )
     monkeypatch.setattr(
         "apps.shell.agent_runtime.openai_compatible_chat_message",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("browser prefix search field task should not call model")
-        ),
+        lambda *_a, **_kw: pytest.fail("Explicit app field input must not call a model"),
     )
     monkeypatch.setattr(
-        "apps.shell.chat_api.desktop_permission_missing_by_capability",
-        lambda use_cache=True: {},
+        "apps.shell.chat_api.desktop_permission_missing_by_capability", lambda use_cache=True: {}
     )
-    monkeypatch.setattr(
-        "apps.shell.agent.tools.browser.click",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("search field typing should not route to browser.click")
-        ),
-    )
-
-    def fake_app_focus(app_name: str) -> dict:
-        nonlocal active_app
-        active_app = app_name
-        calls.append(("focus", app_name))
-        return _native_postcondition_result({
-            "ok": True,
-            "action": "app.focus",
-            "data": {
-                "app_name": app_name,
-                "active_app_name": app_name,
-                "focus_verified": True,
-            },
-        })
-
-    def fake_app_open(app_name: str) -> dict:
-        nonlocal active_app
-        active_app = app_name
-        calls.append(("open", app_name))
-        return _native_postcondition_result({
-            "ok": True,
-            "action": "app.open",
-            "summary": f"Opened {app_name}",
-            "data": {"app_name": app_name, "launch_verified": True},
-        })
-
-    def fake_safe_shortcut(action: str) -> dict:
-        calls.append(("shortcut", action))
-        return _native_postcondition_result({
-            "ok": True,
-            "action": "desktop.safe_shortcut",
-            "summary": "Executed safe shortcut: find",
-            "data": {"shortcut_action": action, "key": "f", "modifiers": ["command"]},
-        })
-
-    def fake_safe_type_text(text: str) -> dict:
-        nonlocal typed_text
-        typed_text = text
-        calls.append(("type", text))
-        return _native_postcondition_result({
-            "ok": True,
-            "action": "desktop.safe_type_text",
-            "summary": "Typed user-provided text into the foreground app",
-            "data": {
-                "app_name": active_app,
-                "active_app_name": active_app,
-                "window_title": "Search",
-                "target_scope": "foreground",
-                "character_count": len(text),
-                "explicit_user_text": True,
-            },
-        })
-
-    def fake_inspect_app(
-        app_name: str,
-        *,
-        open_if_needed: bool = False,
-        focus: bool = False,
-        role_filter: str = "",
-        limit: int = 80,
-    ) -> dict:
-        inspect_calls.append((app_name, open_if_needed))
-        return _native_postcondition_result({
-            "ok": True,
-            "action": "desktop.inspect_app",
-            "summary": f"Inspected {app_name}",
-            "data": {
-                "app_name": app_name,
-                "app_found": True,
-                "running": True,
-                "focus_verified": focus,
-                "ready_for_foreground_action": True,
-                "ui_elements": {
-                    "ok": True,
-                    "action": "desktop.ui_elements",
-                    "data": {
-                        "app_name": app_name,
-                        "count": 1,
-                        "control_like_count": 1,
-                        "elements": [
-                            {
-                                "role": "AXTextField",
-                                "name": "搜索",
-                                "enabled": True,
-                            }
-                        ],
-                        "role_filter": role_filter,
-                        "limit": limit,
-                    },
-                },
-            },
-        })
-
-    def fake_click_ui_element(
-        target: str,
-        *,
-        role_filter: str = "",
-        limit: int = 80,
-        click_count: int = 1,
-    ) -> dict:
-        click_calls.append((target, role_filter, click_count))
-        return _native_postcondition_result({
-            "ok": True,
-            "action": "desktop.click_ui_element",
-            "summary": f"Clicked {target}",
-            "data": {
-                "target": target,
-                "app_name": active_app,
-                "active_app_name": active_app,
-                "role_filter": role_filter,
-                "limit": limit,
-                "click_count": click_count,
-                "clicked": True,
-            },
-        })
-
-    def fake_search_submit() -> dict:
-        calls.append(("search_submit", ""))
-        return _native_postcondition_result({
-            "ok": True,
-            "action": "desktop.search_submit",
-            "summary": "Submitted foreground search query",
-            "data": {"key": "return", "modifiers": []},
-        })
-
-    def fake_active_window() -> dict:
-        return _native_postcondition_result({
-            "ok": True,
-            "action": "desktop.active_window",
-            "data": {
-                "app_name": active_app,
-                "active_app_name": active_app,
-                "title": "Search",
-                "focus_verified": True,
-            },
-        })
-
-    def fake_ui_elements(**_kwargs: Any) -> dict:
-        return _native_postcondition_result({
-            "ok": True,
-            "action": "desktop.ui_elements",
-            "data": {
-                "app_name": active_app,
-                "active_app_name": active_app,
-                "title": "Search",
-                "elements": [
-                    {"role": "AXTextField", "name": "搜索", "value": typed_text},
-                ],
-            },
-        })
-
-    monkeypatch.setattr("apps.shell.agent.tools.desktop.app_open", fake_app_open)
-    monkeypatch.setattr("apps.shell.agent.tools.desktop.app_focus", fake_app_focus)
-    monkeypatch.setattr("apps.shell.agent.tools.desktop.inspect_app", fake_inspect_app)
-    monkeypatch.setattr(
-        "apps.shell.agent.tools.desktop.click_ui_element",
-        fake_click_ui_element,
-    )
-    monkeypatch.setattr("apps.shell.agent.tools.desktop.active_window", fake_active_window)
-    monkeypatch.setattr("apps.shell.agent.tools.desktop.ui_elements", fake_ui_elements)
-    monkeypatch.setattr("apps.shell.agent.tools.desktop.desktop_safe_shortcut", fake_safe_shortcut)
-    monkeypatch.setattr("apps.shell.agent.tools.desktop.desktop_safe_type_text", fake_safe_type_text)
-    monkeypatch.setattr("apps.shell.agent.tools.desktop.desktop_search_submit", fake_search_submit)
     try:
-        result = _send_foreground_message(api, "Chrome 点击搜索框输入 yachiyo")
-        run = service.get_run(result["run_id"])
-        event_types = [
-            event["event_type"]
-            for event in service.list_run_events(run["run_id"], include_internal=True)["events"]
-        ]
-
-        assert result["ok"] is True
-        assert result["status"] == "waiting_approval"
-        assert result["agent_task"]["status"] == "waiting_approval"
-        assert calls == []
-        assert inspect_calls == [("Google Chrome", False)]
-        assert result["agent_task"]["pending_approvals"][0]["tool_name"] == (
-            "app.focus_and_click_ui_element"
-        )
-        _assert_dict_contains(
-            result["agent_task"]["pending_approvals"][0]["input_preview"],
-            {
-                "app_name": "Google Chrome",
-                "target": "搜索",
-                "role_filter": "text",
-                "click_count": 1,
-            },
-        )
-        assert run["status"] == "approval_required"
-        assert "agent.desktop.intent_completed" not in event_types
-        assert "agent.desktop.intent_approval_required" in event_types
-        assert "model.request.started" not in event_types
-        assert "model.requested" not in event_types
-
-        approved = service.approve_run_approval(run["run_id"])
-        assert approved["status"] == "completed"
-        assert calls == [("focus", "Google Chrome"), ("type", "yachiyo")]
-        assert click_calls == [("搜索", "text", 1)]
-        assert approved["result"] == (
-            "已切到 Google Chrome 并点击前台控件：搜索。 "
-            "已向前台输入文字（7 个字符）。"
-        )
-
+        for goal, target, click_tool, expected, expected_status in (
+            (
+                "Chrome 点击搜索框输入 yachiyo",
+                "搜索",
+                "app.focus_and_click_ui_element",
+                [("focus", "Google Chrome"), ("click", "搜索"), ("type", "yachiyo")],
+                "completed",
+            ),
+            (
+                "打开 Chrome 点击搜索栏输入 yachiyo 并搜索",
+                "搜索",
+                "app.open_and_click_ui_element",
+                [
+                    ("open", "Google Chrome"),
+                    ("focus", "Google Chrome"),
+                    ("click", "搜索"),
+                    ("type", "yachiyo"),
+                    ("search_submit", ""),
+                ],
+                "completed",
+            ),
+            # A noncanonical observed alias is not exact frozen input.  It
+            # may dispatch after approval but cannot manufacture completion.
+            (
+                "Chrome 点击搜索框输入 yachiyo",
+                "搜索框",
+                "app.focus_and_click_ui_element",
+                [("focus", "Google Chrome"), ("click", "搜索框"), ("type", "yachiyo")],
+                "failed",
+            ),
+        ):
+            calls.clear()
+            inspect_calls.clear()
+            state.update(
+                query="",
+                focused=False,
+                submitted=False,
+                target=target,
+                allow_open=click_tool.startswith("app.open"),
+            )
+            result = _send_foreground_message(api, goal)
+            run = service.get_run(result["run_id"])
+            assert result["ok"] is True
+            assert result["status"] == result["agent_task"]["status"] == "waiting_approval"
+            assert inspect_calls == [("Google Chrome", state["allow_open"])]
+            assert calls == [] and state["query"] == "" and not state["focused"]
+            assert run["status"] == "approval_required"
+            assert run["pending_approval"]["tool"] == click_tool
+            _assert_dict_contains(
+                run["pending_approval"]["input_preview"],
+                {
+                    "app_name": "Google Chrome",
+                    "target": target,
+                    "role_filter": "text",
+                    "click_count": 1,
+                },
+            )
+            approved = service.approve_run_approval(run["run_id"])
+            assert approved["status"] == expected_status, approved["result"]
+            assert approved["pending_approval"] == {}
+            assert calls == expected
+            assert state["query"] == "yachiyo"
+            events = service.list_run_events(run["run_id"], include_internal=True)["events"]
+            event_types = [event["event_type"] for event in events]
+            assert ("agent.desktop.intent_completed" in event_types) is (
+                expected_status == "completed"
+            )
+            assert "model.request.started" not in event_types
+            assert "model.requested" not in event_types
+            assert service.get_run(run["run_id"])["user_goal"] == goal
+            assert any(
+                event["event_type"] == "agent.tool.call"
+                and event["payload"].get("tool") == "desktop.ui_elements"
+                for event in events
+            )
+        # Without an explicit open verb, a missing app must not be launched
+        # by the pre-approval inspector or by a fallback effect.
         calls.clear()
-        click_calls.clear()
-        second = _send_foreground_message(api, "打开 Chrome 点击搜索栏输入 yachiyo 并搜索")
-        second_run = service.get_run(second["run_id"])
-        second_event_types = [
-            event["event_type"]
-            for event in service.list_run_events(second_run["run_id"], include_internal=True)["events"]
-        ]
-
-        assert second["ok"] is True
-        assert second["status"] == "waiting_approval"
-        assert second["agent_task"]["pending_approvals"][0]["tool_name"] == (
-            "app.open_and_click_ui_element"
-        )
-        _assert_dict_contains(
-            second["agent_task"]["pending_approvals"][0]["input_preview"],
-            {
-                "app_name": "Google Chrome",
-                "target": "搜索",
-                "role_filter": "text",
-                "click_count": 1,
-            },
-        )
-        assert second_run["status"] == "approval_required"
-        assert "agent.desktop.intent_completed" not in second_event_types
-        assert "agent.desktop.intent_approval_required" in second_event_types
-        assert "model.request.started" not in second_event_types
-        assert "model.requested" not in second_event_types
-
-        second_approved = service.approve_run_approval(second_run["run_id"])
-        assert second_approved["status"] == "completed"
-        assert calls == [
-            ("open", "Google Chrome"),
-            ("focus", "Google Chrome"),
-            ("type", "yachiyo"),
-            ("search_submit", ""),
-        ]
-        assert click_calls == [("搜索", "text", 1)]
-        assert second_approved["result"] == (
-            "已打开 Google Chrome 并点击“搜索”。 "
-            "已向前台输入文字（7 个字符）。 已提交前台搜索。"
-        )
+        inspect_calls.clear()
+        state.update(query="", focused=False, submitted=False, running=False, allow_open=False)
+        missing = _send_foreground_message(api, "Chrome 点击搜索框输入 yachiyo")
+        assert missing["status"] == "failed"
+        assert missing["agent_task"]["pending_approvals"] == []
+        assert inspect_calls == [("Google Chrome", False)]
+        assert calls == []
     finally:
         service.close()
         store.close()
@@ -4048,6 +4010,9 @@ def test_send_message_executes_recovery_retry_metadata_without_prompt_reparse(tm
             "action": "media.apple_music_play",
             "summary": f"Apple Music playing {query}",
             "data": {
+                'status': 'played',
+                'match_kind': 'track',
+                'album': 'Fixture Album',
                 "query": query,
                 "track": query,
                 "artist": "Yachiyo",
@@ -5388,10 +5353,13 @@ def test_send_message_executes_common_folder_with_open_path(tmp_path, monkeypatc
 
 
 def test_send_message_executes_system_settings_panes_without_model(tmp_path, monkeypatch):
+    from apps.shell.agent.runtime.system_settings_receipts import canonical_settings_pane
+    from apps.shell.agent.tools import desktop
     api, runtime, store = _make_api(tmp_path)
     service = _make_agent_runtime_service(tmp_path)
     runtime.agent_runtime_service = service
     settings_calls: list[str] = []
+    readback_calls: list[str] = []
     monkeypatch.setattr(
         "apps.shell.agent_runtime.get_model_profile_service",
         lambda: SimpleNamespace(
@@ -5422,6 +5390,25 @@ def test_send_message_executes_system_settings_panes_without_model(tmp_path, mon
         "apps.shell.agent.tools.desktop.system_settings_open",
         fake_system_settings_open,
     )
+    def fake_active_window() -> dict:
+        readback_calls.append("window")
+        return {"ok": True, "action": "desktop.active_window", "data": {
+            "app_name": "System Settings", "pid": 100, "window_id": 200,
+            "title": canonical_settings_pane(settings_calls[-1]),
+        }}
+
+    def fake_ui_elements(*, app_name: str, role_filter: str, limit: int) -> dict:
+        readback_calls.append("ui")
+        assert (app_name, role_filter, limit) == ("System Settings", "", 80)
+        pane = canonical_settings_pane(settings_calls[-1])
+        return {"ok": True, "action": "desktop.ui_elements", "data":
+            desktop._parse_ui_elements_output(
+                f"META\tSystem Settings\t100\t{pane}\t200\n"
+                f"1\tAXHeading\t\t{pane}\t\t\ttrue\t0\t0\t100\t100"
+            )}
+
+    monkeypatch.setattr(desktop, "active_window", fake_active_window)
+    monkeypatch.setattr(desktop, "ui_elements", fake_ui_elements)
     try:
         cases = (
             ("打开声音设置", "声音", "已打开系统设置：声音。"),
@@ -5476,6 +5463,7 @@ def test_send_message_executes_system_settings_panes_without_model(tmp_path, mon
             "软件更新",
             "储存空间",
         ]
+        assert readback_calls == ["window", "ui", "window"] * len(cases)
     finally:
         service.close()
         store.close()
@@ -7215,10 +7203,13 @@ def test_send_message_projects_screen_capture_permission_recovery_actions(tmp_pa
 
 
 def test_send_message_executes_structured_recovery_action_without_model(tmp_path, monkeypatch):
+    from apps.shell.agent.tools import desktop
+
     api, runtime, store = _make_api(tmp_path)
     service = _make_agent_runtime_service(tmp_path)
     runtime.agent_runtime_service = service
     settings_open_calls: list[str] = []
+    settings_readback_calls: list[str] = []
     monkeypatch.setattr(
         "apps.shell.agent_runtime.get_model_profile_service",
         lambda: SimpleNamespace(
@@ -7235,26 +7226,50 @@ def test_send_message_executes_structured_recovery_action_without_model(tmp_path
 
     def fake_system_settings_open(target: str) -> dict:
         settings_open_calls.append(target)
-        return _native_postcondition_result(
-            {
-                "ok": True,
-                "action": "system.settings_open",
-                "summary": f"Opened System Settings: {target}",
-                "data": {
-                    "target": target,
-                    "open_target": "system_settings",
-                },
+        return {
+            "ok": True,
+            "action": "system.settings_open",
+            "summary": f"Opened System Settings: {target}",
+            "data": {
+                "target": target,
+                "open_target": "system_settings",
             },
-            observed_state="open",
-        )
+        }
+
+    def fake_active_window() -> dict:
+        settings_readback_calls.append("active")
+        return {
+            "ok": True,
+            "action": "desktop.active_window",
+            "data": {
+                "app_name": "System Settings",
+                "pid": 100,
+                "window_id": 200,
+                "title": "屏幕录制",
+            },
+        }
+
+    def fake_ui_elements(*, app_name: str, role_filter: str, limit: int) -> dict:
+        settings_readback_calls.append("ui")
+        assert (app_name, role_filter, limit) == ("System Settings", "", 80)
+        return {
+            "ok": True,
+            "action": "desktop.ui_elements",
+            "data": desktop._parse_ui_elements_output(
+                "META\tSystem Settings\t100\t屏幕录制\t200\n"
+                "1\tAXHeading\t\t屏幕录制\t\t\ttrue\t0\t0\t100\t100"
+            ),
+        }
 
     monkeypatch.setattr(
         "apps.shell.agent.tools.desktop.system_settings_open",
         fake_system_settings_open,
     )
+    monkeypatch.setattr(desktop, "active_window", fake_active_window)
+    monkeypatch.setattr(desktop, "ui_elements", fake_ui_elements)
     try:
         result = _send_foreground_message(api,
-            "修复屏幕录制",
+            "打开屏幕录制权限",
             metadata={
                 "source": "chat",
                 "runnable_kind": "main",
@@ -7304,6 +7319,7 @@ def test_send_message_executes_structured_recovery_action_without_model(tmp_path
         assert assistant.status == MessageStatus.COMPLETED
         assert assistant.content == "已打开系统设置：屏幕录制权限。"
         assert settings_open_calls == ["屏幕录制权限"]
+        assert settings_readback_calls == ["active", "ui", "active"]
         assert run["status"] == "completed"
         assert run["pending_approval"] == {}
         assert user_metadata["desktop_permission_recovery"] is True
@@ -7550,32 +7566,29 @@ def test_send_message_executes_structured_control_recovery_actions_without_model
         ),
     )
 
+    from apps.shell.agent.tools import desktop as native_desktop
+    native_play = native_desktop.apple_music_play
+    native_control = native_desktop.apple_music_control
+    native_music_open = native_desktop.music_app_open_and_play
+
+    def fake_music_script(script, args, **kwargs):
+        if args and args[0] in {"play", "pause"}:
+            state = "paused" if args[0] == "pause" else "playing"
+            stdout = (f"controlled|{args[0]}|{state}||" if args[0] == "pause" else f"controlled|{args[0]}|{state}|超时空辉夜姬|Yachiyo")
+        else:
+            stdout = f"played|{args[0]}|Yachiyo|playing|track|Album|identity_verified"
+        return {"ok": True, "stdout": stdout, "stderr": ""}
+
+    monkeypatch.setattr(native_desktop, "_desktop_platform", lambda: "macos")
+    monkeypatch.setattr(native_desktop, "_run_osascript", fake_music_script)
+
     def fake_apple_music_control(action: str) -> dict:
         music_control_calls.append(action)
-        return _native_postcondition_result({
-            "ok": True,
-            "action": "media.apple_music_control",
-            "summary": f"Apple Music {action} executed",
-            "data": {"control": action, "player_state": "paused"},
-        })
+        return native_control(action)
 
     def fake_apple_music_play(query: str) -> dict:
         music_play_calls.append(query)
-        return _native_postcondition_result({
-            "ok": True,
-            "action": "media.apple_music_play",
-            "summary": f"Apple Music playing {query}",
-            "data": {
-                "query": query,
-                "track": query,
-                "artist": "Yachiyo",
-                "player_state": "playing",
-                "playback_started": True,
-                "track_identity_verified": True,
-                "catalog_match_verified": True,
-                "foreground_action_taken": False,
-            },
-        })
+        return native_play(query)
 
     def fake_apple_music_open_and_play() -> dict:
         music_open_calls.append("open")
@@ -7594,24 +7607,12 @@ def test_send_message_executes_structured_control_recovery_actions_without_model
     def fake_music_app_open_and_play(app_name: str) -> dict:
         music_app_calls.append(app_name)
         if app_name == "Music":
-            return _native_postcondition_result({
-                "ok": True,
-                "action": "media.music_app_open_and_play",
-                "summary": "Opened Music and started playback",
-                "data": {
-                    "app_name": app_name,
-                    "playback_ok": True,
-                    "player_state": "playing",
-                    "track": "超时空辉夜姬",
-                    "artist": "Yachiyo",
-                },
-            })
-        return _native_postcondition_result({
-            "ok": True,
-            "action": "media.music_app_open_and_play",
+            return native_music_open(app_name)
+        return {
+            "ok": True, "action": "media.music_app_open_and_play",
             "summary": f"Opened {app_name} and attempted playback with media key",
             "data": {"app_name": app_name, "playback_state_unverified": True},
-        })
+        }
 
     def fake_system_volume(action: str, *, level=None, step=None) -> dict:
         nonlocal current_volume_level
@@ -7635,29 +7636,18 @@ def test_send_message_executes_structured_control_recovery_actions_without_model
 
     def fake_system_brightness(action: str, *, step=None) -> dict:
         brightness_calls.append((action, step))
-        return _native_postcondition_result({
-            "ok": True,
-            "action": "system.brightness",
-            "summary": "Display brightness decreased",
-            "data": {
-                "requested_action": action,
-                "step": step,
-                "key_code": 144,
-            },
-        })
+        return {"ok": True, "action": "system.brightness", "summary": "Display brightness decreased",
+                "data": {"requested_action": action, "step": step, "key_code": 144}}
 
     monkeypatch.setattr("apps.shell.agent.tools.desktop.apple_music_control", fake_apple_music_control)
     monkeypatch.setattr("apps.shell.agent.tools.desktop.apple_music_play", fake_apple_music_play)
-    monkeypatch.setattr(
-        "apps.shell.agent.tools.desktop.apple_music_open_and_play",
-        fake_apple_music_open_and_play,
-    )
     monkeypatch.setattr(
         "apps.shell.agent.tools.desktop.music_app_open_and_play",
         fake_music_app_open_and_play,
     )
     monkeypatch.setattr("apps.shell.agent.tools.desktop.system_volume", fake_system_volume)
     monkeypatch.setattr("apps.shell.agent.tools.desktop.system_brightness", fake_system_brightness)
+    monkeypatch.setattr(native_desktop, "app_open", lambda name: {"ok": True, "action": "app.open", "data": {"app_name": name}})
     try:
         cases = (
             (
@@ -7667,25 +7657,25 @@ def test_send_message_executes_structured_control_recovery_actions_without_model
                 "已暂停 Apple Music。",
             ),
             (
-                "在 Apple Music 播放超时空辉夜姬",
+                "在 Apple Music 中播放 超时空辉夜姬",
                 "media.apple_music_play",
                 {"query": "超时空辉夜姬"},
                 "已在 Apple Music 播放：超时空辉夜姬 - Yachiyo。",
             ),
             (
-                "打开 Apple Music 并播放",
+                "打开Apple Music并播放",
                 "media.music_app_open_and_play",
                 {"app_name": "Music"},
                 "已打开 Apple Music，并开始播放。当前：超时空辉夜姬 - Yachiyo。",
             ),
             (
-                "把系统音量设为 35",
+                "把音量调到 35%",
                 "system.volume",
                 {"action": "set", "level": 35},
                 "已把系统音量调到 35%。",
             ),
             (
-                "调低亮度 2 格",
+                "屏幕暗一点",
                 "system.brightness",
                 {"action": "down", "step": 2},
                 "已调低屏幕亮度（2 格）。",
@@ -7713,25 +7703,35 @@ def test_send_message_executes_structured_control_recovery_actions_without_model
             ]
             assistant = runtime.chat_session.get_assistant_message_for_task(result["task_id"])
 
+            expected_status = "failed" if tool_name == "system.brightness" else "completed"
+            actual_summary = result["agent_task"]["summary"]
             assert result["ok"] is True
-            assert result["status"] == "completed"
-            assert result["agent_task"]["status"] == "completed"
+            assert result["status"] == expected_status
+            assert result["agent_task"]["status"] == expected_status
             assert result["agent_task"]["needs_user_action"] is False
             assert result["agent_task"]["pending_approvals"] == []
-            assert result["agent_task"]["summary"] == expected_summary
+            if expected_status == "failed":
+                assert actual_summary.startswith(expected_summary.rstrip("。"))
+                assert "未能确认" in actual_summary
+            else:
+                assert actual_summary == expected_summary
             assert result["agent_task"]["tool_calls"][-1]["tool_name"] == tool_name
-            assert result["agent_task"]["tool_calls"][-1]["input_preview"] == tool_input
+            assert tool_input.items() <= result["agent_task"]["tool_calls"][-1]["input_preview"].items()
             assert task is not None
-            assert task.status == TaskStatus.COMPLETED
-            assert task.result == expected_summary
+            assert task.status == (TaskStatus.FAILED if expected_status == "failed" else TaskStatus.COMPLETED)
+            assert (task.error if expected_status == "failed" else task.result) == actual_summary
             assert assistant is not None
-            assert assistant.status == MessageStatus.COMPLETED
-            assert assistant.content == expected_summary
-            assert run["status"] == "completed"
+            assert assistant.status == (MessageStatus.FAILED if expected_status == "failed" else MessageStatus.COMPLETED)
+            assert assistant.content == actual_summary
+            assert run["status"] == expected_status
             assert run["pending_approval"] == {}
             assert "agent.desktop.intent_planned" in event_types
             assert "agent.tool.call" in event_types
-            assert "agent.desktop.intent_completed" in event_types
+            if expected_status == "failed":
+                assert "agent.desktop.intent_completed" not in event_types
+                assert "agent.desktop.intent_unverified" in event_types
+            else:
+                assert "agent.desktop.intent_completed" in event_types
             assert "agent.desktop.intent_approval_required" not in event_types
             assert "model.request.started" not in event_types
             assert "model.requested" not in event_types
@@ -7765,7 +7765,7 @@ def test_send_message_executes_structured_control_recovery_actions_without_model
         assert "model.request.started" not in unverified_event_types
         assert "model.requested" not in unverified_event_types
 
-        assert music_control_calls == ["pause"]
+        assert music_control_calls == ["pause", "play"]
         assert music_play_calls == ["超时空辉夜姬"]
         assert music_open_calls == []
         assert music_app_calls == ["Music", "Spotify"]
@@ -7874,7 +7874,7 @@ def test_send_message_executes_structured_diagnostic_recovery_actions_without_mo
     try:
         cases = (
             (
-                "把 hello 写入剪贴板",
+                "把 hello 复制到剪贴板",
                 "clipboard.write",
                 {"text": "hello"},
                 "已复制 5 个字符到剪贴板。",
@@ -7933,7 +7933,7 @@ def test_send_message_executes_structured_diagnostic_recovery_actions_without_mo
             assert result["agent_task"]["pending_approvals"] == []
             assert result["agent_task"]["summary"] == expected_summary
             assert result["agent_task"]["tool_calls"][-1]["tool_name"] == tool_name
-            assert result["agent_task"]["tool_calls"][-1]["input_preview"] == tool_input
+            assert tool_input.items() <= result["agent_task"]["tool_calls"][-1]["input_preview"].items()
             assert task is not None
             assert task.status == TaskStatus.COMPLETED
             assert task.result == expected_summary
@@ -8103,13 +8103,13 @@ def test_send_message_executes_structured_observation_recovery_actions_without_m
     try:
         cases = (
             (
-                "打开 GitHub 并读一下页面",
+                "打开并读取 https://github.com",
                 "browser.open_url_and_extract_text",
                 {"url": "https://github.com"},
                 "Yachiyo desktop agent runtime",
             ),
             (
-                "打开 GitHub 并截图",
+                "打开 https://github.com 并截图",
                 "browser.open_url_and_screenshot",
                 {
                     "url": "https://github.com",
@@ -8118,19 +8118,19 @@ def test_send_message_executes_structured_observation_recovery_actions_without_m
                 "已打开网页并截取当前网页。",
             ),
             (
-                "现在开了哪些应用",
+                "列出当前运行的应用",
                 "desktop.running_apps",
                 {},
                 "正在运行的应用：Finder, Google Chrome, Music。前台是 Google Chrome。",
             ),
             (
-                "列出Chrome窗口",
+                "查看Google Chrome窗口",
                 "desktop.windows",
                 {"app_name": "Google Chrome"},
                 "当前窗口：Google Chrome: ChatGPT。",
             ),
             (
-                "看看当前界面有哪些按钮",
+                "查看当前界面按钮",
                 "desktop.ui_elements",
                 {"role_filter": "button", "limit": 80},
                 "当前 Google Chrome 界面控件：Button Send（640, 720）。",
@@ -8161,7 +8161,7 @@ def test_send_message_executes_structured_observation_recovery_actions_without_m
             assert result["agent_task"]["pending_approvals"] == []
             assert result["agent_task"]["summary"] == expected_summary
             assert result["agent_task"]["tool_calls"][-1]["tool_name"] == tool_name
-            assert result["agent_task"]["tool_calls"][-1]["input_preview"] == tool_input
+            assert tool_input.items() <= result["agent_task"]["tool_calls"][-1]["input_preview"].items()
             assert task is not None
             assert task.status == TaskStatus.COMPLETED
             assert task.result == expected_summary
@@ -8214,17 +8214,17 @@ def test_send_message_executes_structured_safe_foreground_recovery_actions_witho
 
     def fake_safe_shortcut(action: str) -> dict:
         calls.append(("shortcut", action))
-        return _native_postcondition_result({
+        return {
             "ok": True,
             "action": "desktop.safe_shortcut",
             "summary": f"Executed safe shortcut: {action}",
             "data": {"shortcut_action": action},
-        })
+        }
 
     def fake_safe_key(action: str, *, repeat_count: int = 1) -> dict:
         calls.append(("key", action, repeat_count))
         key_label = {"tab": "Tab"}.get(action, action)
-        return _native_postcondition_result({
+        return {
             "ok": True,
             "action": "desktop.safe_key",
             "summary": f"Pressed {action}",
@@ -8233,7 +8233,7 @@ def test_send_message_executes_structured_safe_foreground_recovery_actions_witho
                 "key_label": key_label,
                 "repeat_count": repeat_count,
             },
-        })
+        }
 
     def fake_safe_scroll(direction: str, *, pages: int = 1) -> dict:
         calls.append(("scroll", direction, pages))
@@ -8286,28 +8286,28 @@ def test_send_message_executes_structured_safe_foreground_recovery_actions_witho
                 "failed",
             ),
             (
-                "切到下一个输入框",
+                "按Tab",
                 "desktop.safe_key",
                 {"action": "tab", "repeat_count": 1},
-                "已按Tab。",
-                "completed",
+                "已按Tab，但未能确认界面已按预期变化；请确认后重试。",
+                "failed",
             ),
             (
-                "当前窗口向下滚动 2 页",
+                "向下滚动2页",
                 "desktop.safe_scroll",
                 {"direction": "down", "pages": 2},
                 "已向下滚动前台界面（2 页）。",
                 "completed",
             ),
             (
-                "点 120 240",
+                "点击 120, 240",
                 "desktop.safe_click",
                 {"x": 120, "y": 240},
                 "已点击前台位置：120, 240。",
                 "completed",
             ),
             (
-                "帮我打 hello",
+                "输入hello",
                 "desktop.safe_type_text",
                 {"text": "hello"},
                 "已向前台输入文字（5 个字符），但未能确认界面已按预期变化；请确认后重试。",
@@ -8332,13 +8332,13 @@ def test_send_message_executes_structured_safe_foreground_recovery_actions_witho
             assistant = runtime.chat_session.get_assistant_message_for_task(result["task_id"])
 
             assert result["ok"] is True
-            assert result["status"] == expected_status
+            assert result["status"] == expected_status, result["agent_task"]
             assert result["agent_task"]["status"] == expected_status
             assert result["agent_task"]["needs_user_action"] is False
             assert result["agent_task"]["pending_approvals"] == []
             assert result["agent_task"]["summary"] == expected_summary
             assert result["agent_task"]["tool_calls"][-1]["tool_name"] == tool_name
-            assert result["agent_task"]["tool_calls"][-1]["input_preview"] == tool_input
+            assert tool_input.items() <= result["agent_task"]["tool_calls"][-1]["input_preview"].items()
             assert task is not None
             assert assistant is not None
             assert assistant.content == expected_summary
@@ -8426,26 +8426,26 @@ def test_send_message_executes_structured_app_foreground_recovery_actions_withou
             "ok": True,
             "action": "desktop.safe_type_text",
             "summary": "Typed user-provided text into the foreground app",
-            "data": {"character_count": len(text), "explicit_user_text": True},
+            "data": {"character_count": len(text), "explicit_user_text": True, "app_name": active_app},
         })
 
     def fake_safe_shortcut(action: str) -> dict:
         calls.append(("shortcut", action))
-        return _native_postcondition_result({
+        return {
             "ok": True,
             "action": "desktop.safe_shortcut",
             "summary": f"Executed safe shortcut: {action}",
             "data": {"shortcut_action": action},
-        })
+        }
 
     def fake_safe_key(action: str, *, repeat_count: int = 1) -> dict:
         calls.append(("key", action, repeat_count))
-        return _native_postcondition_result({
+        return {
             "ok": True,
             "action": "desktop.safe_key",
             "summary": f"Pressed {action}",
             "data": {"key_action": action, "repeat_count": repeat_count},
-        })
+        }
 
     def fake_safe_scroll(direction: str, *, pages: int = 1) -> dict:
         calls.append(("scroll", direction, pages))
@@ -8539,25 +8539,25 @@ def test_send_message_executes_structured_app_foreground_recovery_actions_withou
     try:
         cases = (
             (
-                "打开 Notes 并输入文字 hello",
+                "打开Notes并输入hello",
                 "app.open_and_safe_type_text",
                 {"app_name": "Notes", "text": "hello"},
                 "已打开 Notes 并输入文字（5 个字符）。",
             ),
             (
-                "切到 Notes 并输入文字 hello",
+                "切到Notes并输入hello",
                 "app.focus_and_safe_type_text",
                 {"app_name": "Notes", "text": "hello"},
                 "已切到 Notes 并输入文字（5 个字符）。",
             ),
             (
-                "打开 Chrome 并复制",
+                "打开Google Chrome并复制选中内容",
                 "app.open_and_safe_shortcut",
                 {"app_name": "Google Chrome", "action": "copy"},
                 "已打开 Google Chrome 并发送“复制选中内容”快捷键，但未能确认界面已按预期变化；请确认后重试。",
             ),
             (
-                "切到 Chrome 并粘贴",
+                "切到Google Chrome并粘贴",
                 "app.focus_and_safe_shortcut",
                 {"app_name": "Google Chrome", "action": "paste"},
                 "已切到 Google Chrome 并发送“粘贴”快捷键，但未能确认界面已按预期变化；请确认后重试。",
@@ -8575,37 +8575,37 @@ def test_send_message_executes_structured_app_foreground_recovery_actions_withou
                 "已切到 Google Chrome 并发送“切换当前窗口全屏”快捷键，但未能确认界面已按预期变化；请确认后重试。",
             ),
             (
-                "打开 Chrome 并按 Tab",
+                "打开Google Chrome并按Tab",
                 "app.open_and_safe_key",
                 {"app_name": "Google Chrome", "action": "tab", "repeat_count": 1},
                 "已打开 Google Chrome 并按Tab。",
             ),
             (
-                "切到 Chrome 并按下箭头 3 次",
+                "切到Google Chrome并按下箭头3次",
                 "app.focus_and_safe_key",
                 {"app_name": "Google Chrome", "action": "arrow_down", "repeat_count": 3},
                 "已切到 Google Chrome 并按下箭头（3 次）。",
             ),
             (
-                "打开 Chrome 并向上滚动 1 页",
+                "打开Google Chrome并向上滚动",
                 "app.open_and_safe_scroll",
                 {"app_name": "Google Chrome", "direction": "up", "pages": 1},
                 "已打开 Google Chrome 并向上滚动前台界面（1 页）。",
             ),
             (
-                "切到 Chrome 并向下滚动 2 页",
+                "切到Google Chrome并向下滚动2页",
                 "app.focus_and_safe_scroll",
                 {"app_name": "Google Chrome", "direction": "down", "pages": 2},
                 "已切到 Google Chrome 并向下滚动前台界面（2 页）。",
             ),
             (
-                "打开 Chrome 并点击 120, 240",
+                "打开Google Chrome并点击 120, 240",
                 "app.open_and_safe_click",
                 {"app_name": "Google Chrome", "x": 120, "y": 240},
                 "已打开 Google Chrome 并点击前台位置：120, 240。",
             ),
             (
-                "切到 Chrome 并点击 120, 240",
+                "切到Google Chrome并点击 120, 240",
                 "app.focus_and_safe_click",
                 {"app_name": "Google Chrome", "x": 120, "y": 240},
                 "已切到 Google Chrome 并点击前台位置：120, 240。",
@@ -8615,6 +8615,7 @@ def test_send_message_executes_structured_app_foreground_recovery_actions_withou
             expect_unverified = (
                 tool_name in {"app.open_and_safe_shortcut", "app.focus_and_safe_shortcut"}
                 and tool_input.get("action") in {"copy", "paste", "toggle_full_screen"}
+                or tool_name in {"app.open_and_safe_key", "app.focus_and_safe_key"}
             )
             expected_status = "failed" if expect_unverified else "completed"
             result = _send_foreground_message(api,
@@ -8634,13 +8635,23 @@ def test_send_message_executes_structured_app_foreground_recovery_actions_withou
             assistant = runtime.chat_session.get_assistant_message_for_task(result["task_id"])
 
             assert result["ok"] is True
-            assert result["status"] == expected_status
+            assert result["status"] == expected_status, result["agent_task"]
             assert result["agent_task"]["status"] == expected_status
             assert result["agent_task"]["needs_user_action"] is False
             assert result["agent_task"]["pending_approvals"] == []
+            if expect_unverified:
+                expected_summary = result["agent_task"]["summary"]
+                assert "未能确认" in expected_summary
+                assert tool_input["app_name"] in expected_summary
+                action_label = {
+                    "copy": "复制选中内容", "paste": "粘贴",
+                    "toggle_full_screen": "切换当前窗口全屏", "tab": "Tab",
+                    "arrow_down": "下箭头",
+                }[tool_input["action"]]
+                assert action_label in expected_summary
             assert result["agent_task"]["summary"] == expected_summary
             assert result["agent_task"]["tool_calls"][-1]["tool_name"] == tool_name
-            assert result["agent_task"]["tool_calls"][-1]["input_preview"] == tool_input
+            assert tool_input.items() <= result["agent_task"]["tool_calls"][-1]["input_preview"].items()
             assert task is not None
             assert assistant is not None
             assert assistant.content == expected_summary
@@ -8843,23 +8854,21 @@ def test_send_message_prepares_finder_find_open_first_then_waits_for_click_appro
             "data": {
                 "app_name": "Finder",
                 "active_app_name": "Finder",
-                "focus_verified": True,
+                "pid": 100, "window_id": 200,
             },
         }
 
     def fake_ui_elements(**_kwargs: Any) -> dict:
-        return {
-            "ok": True,
-            "action": "desktop.ui_elements",
-            "data": {
-                "app_name": "Finder",
-                "elements": [
-                    {"role": "AXTextField", "value": "Downloads"},
-                    {"role": "AXRow", "name": "第一个结果"},
-                ],
-            },
-        }
+        from tests.test_chat_bridge import _fake_search_ui_result
+        query = next((value for action, value in reversed(calls) if action == "type"), "")
+        submitted = bool(calls and calls[-1][0] == "search_submit")
+        result = _fake_search_ui_result("Finder", query, submitted)
+        if submitted:
+            result["data"]["elements"].append({"role": "AXRow", "name": "第一个结果", "depth": 2})
+        return result
 
+    monkeypatch.setattr("apps.shell.agent.tools.desktop.running_apps", lambda: {"ok": True, "action": "desktop.running_apps", "data": {"apps": [{"name": "Finder", "pid": 100}]}})
+    monkeypatch.setattr("apps.shell.agent.tools.desktop.list_apps", lambda query="", limit=20: {"ok": True, "action": "desktop.list_apps", "data": {"query": query, "apps": [{"name": "Finder", "path": "/System/Library/CoreServices/Finder.app"}], "best_match": {"name": "Finder", "path": "/System/Library/CoreServices/Finder.app"}}})
     monkeypatch.setattr("apps.shell.agent.tools.desktop.app_open", fake_app_open)
     monkeypatch.setattr("apps.shell.agent.tools.desktop.app_focus", fake_app_focus)
     monkeypatch.setattr("apps.shell.agent.tools.desktop.active_window", fake_active_window)
@@ -9541,27 +9550,20 @@ def test_send_message_routes_site_search_play_to_approval_without_model(
             for event in service.list_run_events(run["run_id"], include_internal=True)["events"]
         ]
 
+        # Historical selector name is retained for the release baseline.  The
+        # full goal includes playback; navigation alone cannot fulfil it and
+        # no saved model profile is configured to plan the remaining action.
         assert result["ok"] is True
-        assert result["status"] == "waiting_approval"
-        assert open_calls == ["https://www.youtube.com/results?search_query=lo+fi"]
-        assert result["agent_task"]["status"] == "waiting_approval"
-        assert result["agent_task"]["needs_user_action"] is True
-        assert result["agent_task"]["tool_calls"][0]["tool_name"] == "browser.open_url"
-        assert result["agent_task"]["tool_calls"][0]["status"] == "completed"
-        assert result["agent_task"]["pending_approvals"][0]["tool_name"] == "browser.click"
-        _assert_dict_contains(
-            result["agent_task"]["pending_approvals"][0]["input_preview"],
-            {"selector": "search-result=1", "click_count": 1},
-        )
-        assert run["status"] == "approval_required"
-        assert run["pending_approval"]["tool"] == "browser.click"
-        _assert_dict_contains(
-            run["pending_approval"]["input_preview"],
-            {"selector": "search-result=1", "click_count": 1},
-        )
-        assert "agent.desktop.intent_planned" in event_types
-        assert "agent.desktop.intent_approval_required" in event_types
-        assert "agent.tool.approval_required" in event_types
+        assert result["status"] == result["agent_task"]["status"] == "failed"
+        assert "Chat Profile" in result["agent_task"]["summary"]
+        assert open_calls == []
+        assert result["agent_task"]["pending_approvals"] == []
+        assert result["agent_task"]["tool_calls"] == []
+        assert run["status"] == "failed"
+        assert run["pending_approval"] == {}
+        assert run["user_goal"] == "打开 YouTube 搜索 lo fi 并播放"
+        assert "agent.desktop.intent_completed" not in event_types
+        assert "agent.desktop.intent_approval_required" not in event_types
         assert "model.request.started" not in event_types
         assert "model.requested" not in event_types
     finally:
@@ -9726,6 +9728,8 @@ def test_send_message_executes_direct_safe_shortcut_task(tmp_path, monkeypatch):
     service = _make_agent_runtime_service(tmp_path)
     runtime.agent_runtime_service = service
     shortcut_calls: list[str] = []
+    link_state = {"copied": False, "revision": 100}
+    link_url = "https://example.test/yachiyo?q=exact"
     monkeypatch.setattr(
         "apps.shell.agent_runtime.get_model_profile_service",
         lambda: SimpleNamespace(
@@ -9746,6 +9750,9 @@ def test_send_message_executes_direct_safe_shortcut_task(tmp_path, monkeypatch):
 
     def fake_safe_shortcut(action: str) -> dict:
         shortcut_calls.append(action)
+        if action == "copy_current_page_link":
+            link_state["copied"] = True
+            # Dispatch happened, but the clipboard adapter reports no change.
         key = {
             "copy": "c",
             "new_window": "n",
@@ -9793,6 +9800,25 @@ def test_send_message_executes_direct_safe_shortcut_task(tmp_path, monkeypatch):
         })
 
     monkeypatch.setattr("apps.shell.agent.tools.desktop.desktop_safe_shortcut", fake_safe_shortcut)
+    from tests.test_native_current_page_link_copy import _native_ui
+
+    monkeypatch.setattr("apps.shell.agent.tools.desktop.running_apps", lambda: {
+        "ok": True, "action": "desktop.running_apps", "data": {
+            "apps": [{"name": "Google Chrome", "pid": 100, "frontmost": True}],
+            "frontmost": "Google Chrome",
+        }})
+    monkeypatch.setattr("apps.shell.agent.tools.desktop.ui_elements", lambda **kw: {
+        "ok": True, "action": "desktop.ui_elements", "data":
+            _native_ui(link_url, focused=link_state["copied"]),
+    })
+    def clipboard_read(max_chars=2000):
+        text = "old clipboard"
+        return {"ok": True, "action": "clipboard.read", "data": {
+            "text": text, "text_length": len(text), "truncated": False,
+            "pasteboard_revision": link_state["revision"],
+            "pasteboard_revision_stable": True,
+        }}
+    monkeypatch.setattr("apps.shell.agent.tools.desktop.clipboard_read", clipboard_read)
     try:
         cases = (
             ("打开新窗口", "new_window", "已发送“新建窗口”快捷键。"),
@@ -9839,6 +9865,8 @@ def test_send_message_executes_direct_safe_shortcut_task(tmp_path, monkeypatch):
             ("上一个标签", "previous_tab", "已发送“切到上一个标签页”快捷键。"),
         )
         for text, action, summary in cases:
+            link_state["copied"] = False
+            calls_before = len(shortcut_calls)
             expected_summary = (
                 "已执行复制，但无法确认剪贴板内容来自当前选区；任务已停止。"
                 if action == "copy"
@@ -9848,10 +9876,8 @@ def test_send_message_executes_direct_safe_shortcut_task(tmp_path, monkeypatch):
             task = runtime.state.get_task(result["task_id"])
             link = service.get_task_run_link(result["task_id"])
             run = service.get_run(link["run_id"])
-            event_types = [
-                event["event_type"]
-                for event in service.list_run_events(run["run_id"], include_internal=True)["events"]
-            ]
+            events = service.list_run_events(run["run_id"], include_internal=True)["events"]
+            event_types = [event["event_type"] for event in events]
             assistant = runtime.chat_session.get_assistant_message_for_task(result["task_id"])
 
             assert result["ok"] is True
@@ -9862,7 +9888,38 @@ def test_send_message_executes_direct_safe_shortcut_task(tmp_path, monkeypatch):
                 assert result["agent_task"]["summary"]
             assert result["agent_task"]["needs_user_action"] is False
             assert result["agent_task"]["pending_approvals"] == []
-            assert result["agent_task"]["tool_calls"][-1]["tool_name"] == "desktop.safe_shortcut"
+            source_rows = [
+                call for call in result["agent_task"]["tool_calls"]
+                if call["tool_name"] == "desktop.safe_shortcut"
+                and call["source"] == "runtime_planner"
+                and call["input_preview"] == {"action": action}
+            ]
+            assert len(source_rows) == 1
+            source_row = source_rows[0]
+            source_calls = [
+                event["payload"] for event in events
+                if event["event_type"] == "agent.tool.call"
+                and event["payload"].get("tool") == "desktop.safe_shortcut"
+                and event["payload"].get("source") == "runtime_planner"
+                and event["payload"].get("input_preview") == {"action": action}
+            ]
+            assert len(source_calls) == 1
+            source_call = source_calls[0]
+            assert source_call["actor"] == "native_runtime"
+            assert source_call["execution_authority"] == "runtime_tool_executor"
+            assert source_call["run_id"] == run["run_id"]
+            assert source_row["tool_call_id"] == source_call["tool_call_id"]
+            for key in ("plan_id", "decision_id", "tool_plan_id", "step_id"):
+                assert source_call[key] and source_row[key] == source_call[key]
+            assert source_call["request_id"]
+            assert source_call["result"]["ok"] is True
+            assert source_call["result"]["action"] == "desktop.safe_shortcut"
+            assert source_call["result"]["data"]["shortcut_action"] == action
+            # A successful URL-copy dispatch remains separately visible even
+            # though its independent clipboard verification must reject it.
+            assert source_row["status"] == (
+                "completed" if action == "copy_current_page_link" else "failed"
+            )
             assert task is not None
             assert assistant is not None
             assert assistant.content == result["agent_task"]["summary"]
@@ -9871,14 +9928,54 @@ def test_send_message_executes_direct_safe_shortcut_task(tmp_path, monkeypatch):
             assert "agent.desktop.intent_approval_required" not in event_types
             assert "model.request.started" not in event_types
             assert "model.requested" not in event_types
-            assert shortcut_calls[-1] == action
-            assert result["agent_task"]["tool_calls"][-1]["status"] == "failed"
+            assert shortcut_calls[calls_before:] == [action]
+            expected_status = "failed"
+            assert result["agent_task"]["status"] == run["status"] == expected_status
             assert task.status == TaskStatus.FAILED
             assert assistant.status == MessageStatus.FAILED
-            assert run["status"] == "failed"
-            if action == "copy":
-                assert "agent.desktop.intent_unverified" in event_types
+            unverified = [
+                event["payload"] for event in events
+                if event["event_type"] == "agent.desktop.intent_unverified"
+            ]
+            assert len(unverified) == 1
+            failure = unverified[0]
+            assert failure["status"] == "failed"
             assert "agent.desktop.intent_completed" not in event_types
+            if action == "copy_current_page_link":
+                verifier_calls = [
+                    event["payload"] for event in events
+                    if event["event_type"] == "agent.tool.call"
+                    and event["payload"].get("step_id") == "verify-copied-page-link"
+                ]
+                assert len(verifier_calls) == 1
+                verifier = verifier_calls[0]
+                assert verifier["actor"] == "native_runtime"
+                assert verifier["execution_authority"] == "runtime_tool_executor"
+                assert verifier["source"] == "runtime_verification"
+                assert verifier["tool"] == "clipboard.read"
+                assert verifier["input_preview"] == {"max_chars": 12000}
+                assert verifier["source_step_id"] == source_call["step_id"]
+                assert verifier["source_tool_call_id"] == source_call["tool_call_id"]
+                assert verifier["source_request_id"] == source_call["request_id"]
+                for key in ("run_id", "plan_id", "decision_id", "tool_plan_id"):
+                    assert verifier[key] == source_call[key]
+                assert verifier["result"]["ok"] is True
+                assert verifier["result"]["data"]["text"] == "old clipboard"
+                assert verifier["result"]["data"]["pasteboard_revision"] == 100
+                assert failure["tool"] == verifier["tool"]
+                assert failure["tool_call_id"] == verifier["tool_call_id"]
+                assert failure["input_preview"] == verifier["input_preview"]
+                assert failure["reason"] == "current_page_link_copy_unverified"
+                assert clipboard_read()["data"]["text"] == "old clipboard"
+                assert clipboard_read()["data"]["pasteboard_revision"] == 100
+            else:
+                assert failure["tool"] == source_call["tool"]
+                assert failure["tool_call_id"] == source_call["tool_call_id"]
+                assert failure["input_preview"] == source_call["input_preview"]
+                assert failure["reason"] == (
+                    "desktop_verification_failed" if action == "copy"
+                    else "desktop_verification_missing"
+                )
 
         assert shortcut_calls == [action for _text, action, _summary in cases]
     finally:
@@ -10003,7 +10100,7 @@ def test_send_message_executes_direct_spotlight_search_sequence_without_model(
             "desktop.safe_shortcut",
             "desktop.safe_type_text",
         ]
-        assert observed_ui_values == ["yachiyo"]
+        assert observed_ui_values == ["", "yachiyo"]
         assert task is not None
         assert task.status == TaskStatus.COMPLETED
         assert task.result == expected_summary
@@ -11250,6 +11347,7 @@ def test_send_message_executes_direct_search_submit_task(tmp_path, monkeypatch):
     service = _make_agent_runtime_service(tmp_path)
     runtime.agent_runtime_service = service
     submit_calls: list[str] = []
+    submitted = False
     monkeypatch.setattr(
         "apps.shell.agent_runtime.get_model_profile_service",
         lambda: SimpleNamespace(
@@ -11265,6 +11363,8 @@ def test_send_message_executes_direct_search_submit_task(tmp_path, monkeypatch):
     )
 
     def fake_search_submit() -> dict:
+        nonlocal submitted
+        submitted = True
         submit_calls.append("search_submit")
         return _native_postcondition_result({
             "ok": True,
@@ -11278,34 +11378,12 @@ def test_send_message_executes_direct_search_submit_task(tmp_path, monkeypatch):
             "ok": True,
             "action": "desktop.active_window",
             "summary": "Active Google Chrome",
-            "data": {"app_name": "Google Chrome", "title": "Search Results"},
+            "data": {"app_name": "Google Chrome", "pid": 100, "window_id": 200, "title": "Search"},
         })
 
-    def fake_ui_elements(
-        role_filter: str = "",
-        limit: int = 80,
-        app_name: str = "",
-    ) -> dict:
-        return _native_postcondition_result({
-            "ok": True,
-            "action": "desktop.ui_elements",
-            "summary": "Read visible search results",
-            "data": {
-                "app_name": app_name or "Google Chrome",
-                "title": "Search Results",
-                "count": 1,
-                "elements": [
-                    {
-                        "role": "AXLink",
-                        "name": "Yachiyo desktop agent runtime",
-                        "value": "Yachiyo desktop agent runtime",
-                    }
-                ],
-                "visibility_status": "visible",
-                "role_filter": role_filter,
-                "limit": limit,
-            },
-        })
+    def fake_ui_elements(role_filter="", limit=80, app_name="") -> dict:
+        assert app_name in {"", "Google Chrome"}
+        return _native_search_ui_result("Google Chrome", "yachiyo", submitted=submitted)
 
     monkeypatch.setattr(
         "apps.shell.agent.tools.desktop.desktop_search_submit",
@@ -11313,9 +11391,15 @@ def test_send_message_executes_direct_search_submit_task(tmp_path, monkeypatch):
     )
     monkeypatch.setattr("apps.shell.agent.tools.desktop.active_window", fake_active_window)
     monkeypatch.setattr("apps.shell.agent.tools.desktop.ui_elements", fake_ui_elements)
+    monkeypatch.setattr("apps.shell.agent.tools.desktop.running_apps", lambda: {
+        "ok": True, "action": "desktop.running_apps", "data": {
+            "apps": [{"name": "Google Chrome", "pid": 100, "frontmost": True}],
+            "frontmost": "Google Chrome",
+        }})
     try:
         cases = ("提交当前搜索", "press enter to search")
         for text in cases:
+            submitted = False
             result = _send_foreground_message(api, text)
             task = runtime.state.get_task(result["task_id"])
             run = service.get_run(result["run_id"])
@@ -11357,13 +11441,14 @@ def test_send_message_prepares_comm_find_message_then_waits_for_send_approval(
     active_app = ""
     recipient_value = ""
     compose_value = ""
+    searched = False
     target_pid = 4401
     target_window_id = 77
     recipient_element = {
         "pid": target_pid,
         "window_id": target_window_id,
         "identifier": "wechat.recipient-search",
-        "name": "Recipient",
+        "name": "Search",
         "role": "AXTextField",
     }
     compose_element = {
@@ -11422,6 +11507,8 @@ def test_send_message_prepares_comm_find_message_then_waits_for_send_approval(
         })
 
     def fake_safe_shortcut(action: str) -> dict:
+        nonlocal searched
+        searched = False
         calls.append(("shortcut", action))
         return _native_postcondition_result({
             "ok": True,
@@ -11462,6 +11549,8 @@ def test_send_message_prepares_comm_find_message_then_waits_for_send_approval(
         })
 
     def fake_search_submit() -> dict:
+        nonlocal searched
+        searched = True
         calls.append(("search_submit", ""))
         return _native_postcondition_result({
             "ok": True,
@@ -11492,29 +11581,24 @@ def test_send_message_prepares_comm_find_message_then_waits_for_send_approval(
         })
 
     def fake_ui_elements(**_kwargs: Any) -> dict:
-        return _native_postcondition_result({
-            "ok": True,
-            "action": "desktop.ui_elements",
-            "data": {
-                "app_name": active_app,
-                "active_app_name": active_app,
-                "pid": target_pid,
-                "window_id": target_window_id,
-                "elements": [
-                    {
-                        **recipient_element,
-                        "value": recipient_value,
-                        "enabled": True,
-                    },
-                    {
-                        **compose_element,
-                        "value": compose_value,
-                        "enabled": True,
-                        "focused": True,
-                    },
-                ],
-            },
-        })
+        from apps.shell.agent.tools import desktop
+        title = "张三" if searched else "Search"
+        lines = [
+            f"META\t{active_app}\t{target_pid}\t{title}\t{target_window_id}",
+            f"1\tAXTextField\t\tSearch\t\t{recipient_value}\ttrue\t0\t0\t100\t100",
+            f"1\tAXTextArea\t\tMessage\t\t{compose_value}\ttrue\t0\t100\t100\t100",
+        ]
+        if searched:
+            lines.extend([
+                "1\tAXTable\t\tSearch Results\t\t\ttrue\t0\t0\t100\t100",
+                f"2\tAXRow\t\t{recipient_value}\t\t\ttrue\t0\t0\t100\t100",
+            ])
+        focused = dict(compose_element if searched else recipient_element)
+        focused.update(app_name=active_app, value=compose_value if searched else recipient_value,
+                       focused=True, enabled=True)
+        lines.append("FOCUSED\t" + json.dumps(focused, ensure_ascii=False))
+        return {"ok": True, "action": "desktop.ui_elements", "data":
+                desktop._parse_ui_elements_output("\n".join(lines))}
 
     monkeypatch.setattr("apps.shell.agent.tools.desktop.app_open", fake_app_open)
     monkeypatch.setattr("apps.shell.agent.tools.desktop.app_focus", fake_app_focus)
@@ -11532,10 +11616,8 @@ def test_send_message_prepares_comm_find_message_then_waits_for_send_approval(
     try:
         result = _send_foreground_message(api, "打开微信发消息给张三你好")
         run = service.get_run(result["run_id"])
-        event_types = [
-            event["event_type"]
-            for event in service.list_run_events(run["run_id"], include_internal=True)["events"]
-        ]
+        events = service.list_run_events(run["run_id"], include_internal=True)["events"]
+        event_types = [event["event_type"] for event in events]
 
         assert result["ok"] is True
         assert result["status"] == "waiting_approval"
@@ -11548,7 +11630,13 @@ def test_send_message_prepares_comm_find_message_then_waits_for_send_approval(
         ]
         assert result["agent_task"]["status"] == "waiting_approval"
         assert result["agent_task"]["needs_user_action"] is True
-        assert result["agent_task"]["pending_approvals"][0]["tool_name"] == "desktop.submit_foreground"
+        assert len(result["agent_task"]["pending_approvals"]) == 1
+        pending = result["agent_task"]["pending_approvals"][0]
+        assert pending["tool_name"] == "desktop.submit_foreground"
+        assert pending["status"] == "pending"
+        assert pending["approval_id"]
+        assert pending["risk_level"] == "high"
+        assert pending["step_id"] == "send-communication-message"
         _assert_dict_contains(
             result["agent_task"]["pending_approvals"][0]["input_preview"],
             {"action": "send"},
@@ -11560,8 +11648,42 @@ def test_send_message_prepares_comm_find_message_then_waits_for_send_approval(
             {"action": "send"},
         )
         assert "agent.desktop.intent_planned" in event_types
-        assert "agent.desktop.intent_approval_required" in event_types
-        assert "agent.tool.approval_required" in event_types
+        assert "tool.requested" in event_types
+        send_rows = [
+            call for call in result["agent_task"]["tool_calls"]
+            if call["tool_name"] == "desktop.submit_foreground"
+            and call["source"] == "runtime_planner"
+            and call["input_preview"] == {"action": "send"}
+        ]
+        assert len(send_rows) == 1
+        send_row = send_rows[0]
+        assert send_row["status"] == "waiting_approval"
+        _assert_dict_contains(send_row["output_preview"], {
+            "ok": False,
+            "status": "approval_required",
+            "approval_required": True,
+            "tool": "desktop.submit_foreground",
+            "step_id": "send-communication-message",
+            "risk_level": "high",
+        })
+        assert send_row["output_preview"]["policy_reason"]
+        requested = [
+            event["payload"] for event in events
+            if event["event_type"] == "tool.requested"
+            and event["payload"].get("tool") == "desktop.submit_foreground"
+        ]
+        assert len(requested) == 1
+        assert requested[0]["actor"] == "native_runtime"
+        assert requested[0]["execution_authority"] == "runtime_tool_executor"
+        assert requested[0]["run_id"] == run["run_id"]
+        assert requested[0]["tool_call_id"] == send_row["tool_call_id"]
+        assert requested[0]["step_id"] == pending["step_id"]
+        assert requested[0]["input_preview"] == {"action": "send"}
+        assert not any(
+            event["event_type"] == "agent.tool.call"
+            and event["payload"].get("tool") == "desktop.submit_foreground"
+            for event in events
+        )
         assert "model.request.started" not in event_types
         assert "model.requested" not in event_types
     finally:
@@ -11694,6 +11816,7 @@ def test_send_message_executes_direct_foreground_find_text_task(tmp_path, monkey
 
 
 def test_send_message_executes_direct_safe_arrow_key_task(tmp_path, monkeypatch):
+    # Raw key delivery does not prove changed focus, selection, or desktop state.
     api, runtime, store = _make_api(tmp_path)
     service = _make_agent_runtime_service(tmp_path)
     runtime.agent_runtime_service = service
@@ -11719,7 +11842,7 @@ def test_send_message_executes_direct_safe_arrow_key_task(tmp_path, monkeypatch)
             "escape": "Escape",
             "show_desktop": "Show Desktop",
         }.get(action, action)
-        return _native_postcondition_result({
+        return {
             "ok": True,
             "action": "desktop.safe_key",
             "summary": f"Pressed {key_label}",
@@ -11728,7 +11851,7 @@ def test_send_message_executes_direct_safe_arrow_key_task(tmp_path, monkeypatch)
                 "key_label": key_label,
                 "repeat_count": repeat_count,
             },
-        })
+        }
 
     monkeypatch.setattr("apps.shell.agent.tools.desktop.desktop_safe_key", fake_safe_key)
     try:
@@ -11747,24 +11870,28 @@ def test_send_message_executes_direct_safe_arrow_key_task(tmp_path, monkeypatch)
             assistant = runtime.chat_session.get_assistant_message_for_task(result["task_id"])
 
             assert result["ok"] is True
-            assert result["status"] == "completed"
-            assert result["agent_task"]["status"] == "completed"
+            assert result["status"] == "failed"
+            assert result["agent_task"]["status"] == "failed"
             assert result["agent_task"]["needs_user_action"] is False
             assert result["agent_task"]["pending_approvals"] == []
-            assert result["agent_task"]["summary"] == summary
+            expected_summary = result["agent_task"]["summary"]
+            assert "未能确认" in expected_summary or "无法确认" in expected_summary
+            assert result["agent_task"]["tool_calls"][-1]["output_preview"]["ok"] is True
+            assert result["agent_task"]["tool_calls"][-1]["output_preview"]["data"]["key_action"] == action
+            assert result["agent_task"]["tool_calls"][-1]["output_preview"]["data"]["repeat_count"] == repeat_count
             assert result["agent_task"]["tool_calls"][-1]["tool_name"] == "desktop.safe_key"
             assert result["agent_task"]["tool_calls"][-1]["input_preview"] == {
                 "action": action,
                 "repeat_count": repeat_count,
             }
             assert task is not None
-            assert task.status == TaskStatus.COMPLETED
-            assert task.result == summary
+            assert task.status == TaskStatus.FAILED
+            assert task.error == expected_summary
             assert assistant is not None
-            assert assistant.status == MessageStatus.COMPLETED
-            assert assistant.content == summary
-            assert run["status"] == "completed"
-            assert "agent.desktop.intent_completed" in event_types
+            assert assistant.status == MessageStatus.FAILED
+            assert assistant.content == expected_summary
+            assert run["status"] == "failed"
+            assert "agent.desktop.intent_completed" not in event_types
             assert "model.request.started" not in event_types
             assert pressed[-1] == (action, repeat_count)
 
@@ -11856,6 +11983,7 @@ def test_send_message_executes_next_input_focus_as_safe_tab_key(tmp_path, monkey
 
 
 def test_send_message_executes_app_prefix_safe_tab_key_without_model(tmp_path, monkeypatch):
+    # Raw key delivery does not prove changed focus, selection, or desktop state.
     api, runtime, store = _make_api(tmp_path)
     service = _make_agent_runtime_service(tmp_path)
     runtime.agent_runtime_service = service
@@ -11885,7 +12013,7 @@ def test_send_message_executes_app_prefix_safe_tab_key_without_model(tmp_path, m
 
     def fake_safe_key(action: str, *, repeat_count: int = 1) -> dict:
         calls.append(("key", action, repeat_count))
-        return _native_postcondition_result({
+        return {
             "ok": True,
             "action": "desktop.safe_key",
             "summary": "Pressed Tab",
@@ -11894,7 +12022,7 @@ def test_send_message_executes_app_prefix_safe_tab_key_without_model(tmp_path, m
                 "key_label": "Tab",
                 "repeat_count": repeat_count,
             },
-        })
+        }
 
     def fake_active_window() -> dict:
         return _native_postcondition_result({
@@ -11930,12 +12058,15 @@ def test_send_message_executes_app_prefix_safe_tab_key_without_model(tmp_path, m
         assistant = runtime.chat_session.get_assistant_message_for_task(result["task_id"])
 
         assert result["ok"] is True
-        assert result["status"] == "completed"
+        assert result["status"] == "failed"
         assert calls == [("focus", "Google Chrome"), ("key", "tab", 1)]
-        assert result["agent_task"]["status"] == "completed"
+        assert result["agent_task"]["status"] == "failed"
         assert result["agent_task"]["needs_user_action"] is False
         assert result["agent_task"]["pending_approvals"] == []
-        assert result["agent_task"]["summary"] == "已切到 Google Chrome 并按Tab。"
+        expected_summary = result["agent_task"]["summary"]
+        assert "未能确认" in expected_summary or "无法确认" in expected_summary
+        assert result["agent_task"]["tool_calls"][-1]["output_preview"]["ok"] is True
+        assert result["agent_task"]["tool_calls"][-1]["output_preview"]["data"]["key_action"] == "tab"
         assert result["agent_task"]["tool_calls"][-1]["tool_name"] == "app.focus_and_safe_key"
         assert result["agent_task"]["tool_calls"][-1]["input_preview"] == {
             "app_name": "Google Chrome",
@@ -11943,13 +12074,13 @@ def test_send_message_executes_app_prefix_safe_tab_key_without_model(tmp_path, m
             "repeat_count": 1,
         }
         assert task is not None
-        assert task.status == TaskStatus.COMPLETED
-        assert task.result == "已切到 Google Chrome 并按Tab。"
+        assert task.status == TaskStatus.FAILED
+        assert task.error == expected_summary
         assert assistant is not None
-        assert assistant.status == MessageStatus.COMPLETED
-        assert assistant.content == "已切到 Google Chrome 并按Tab。"
-        assert run["status"] == "completed"
-        assert "agent.desktop.intent_completed" in event_types
+        assert assistant.status == MessageStatus.FAILED
+        assert assistant.content == expected_summary
+        assert run["status"] == "failed"
+        assert "agent.desktop.intent_completed" not in event_types
         assert "model.request.started" not in event_types
         assert "model.requested" not in event_types
     finally:
@@ -12642,13 +12773,13 @@ def test_send_message_prepares_app_safe_type_text_then_waits_for_send_approval(
         })
 
     def fake_ui_elements(**_kwargs: Any) -> dict:
-        return _native_postcondition_result({
+        return _with_native_focused_ui_element(_native_postcondition_result({
             "ok": True,
             "action": "desktop.ui_elements",
             "data": {
-                "app_name": active_app,
-                "pid": target_pid,
-                "window_id": target_window_id,
+                "app_name": active_app if foreground_verified else "ChatGPT",
+                "pid": target_pid if foreground_verified else 9901,
+                "window_id": target_window_id if foreground_verified else 88,
                 "elements": [
                     {
                         **target_element,
@@ -12658,7 +12789,7 @@ def test_send_message_prepares_app_safe_type_text_then_waits_for_send_approval(
                     }
                 ],
             },
-        })
+        }))
 
     monkeypatch.setattr("apps.shell.agent.tools.desktop.app_open", fake_app_open)
     monkeypatch.setattr("apps.shell.agent.tools.desktop.app_focus", fake_app_focus)
@@ -12726,7 +12857,8 @@ def test_send_message_prepares_app_safe_type_text_then_waits_for_send_approval(
             else:
                 assert calls == expected_calls
                 assert any(
-                    tool_call["tool_name"] == first_tool
+                    tool_call["tool_name"] == "desktop.safe_type_text"
+                    and tool_call["input_preview"] == {"text": "hello"}
                     and tool_call["status"] == "completed"
                     for tool_call in result["agent_task"]["tool_calls"]
                 )
@@ -12745,7 +12877,10 @@ def test_send_message_prepares_app_safe_type_text_then_waits_for_send_approval(
             assert submit_request["plan_id"] == authority["plan_id"]
             assert submit_request["decision_id"] == authority["decision_id"]
             assert submit_request["step_id"] == "submit-foreground-ui"
-            assert submit_request["depends_on"] == ["operate-foreground-ui"]
+            assert submit_request["depends_on"] == (
+                ["operate-foreground-ui"] if first_tool == "app.open_and_safe_type_text"
+                else ["operate-foreground-ui", "verify-typed-draft-operate-foreground-ui"]
+            )
             _assert_dict_contains(
                 submit_request["action_target"],
                 {
@@ -12991,28 +13126,48 @@ def test_send_message_prepares_paste_then_waits_for_send_approval(
             "action": "desktop.active_window",
             "data": {
                 "app_name": active_app,
+                "pid": 100, "window_id": 200,
                 "active_app_name": active_app,
                 "focus_verified": True,
             },
         }
 
-    def fake_ui_elements(**_kwargs: Any) -> dict:
-        return {
-            "ok": True,
-            "action": "desktop.ui_elements",
-            "data": {
-                "app_name": active_app,
-                "elements": [
-                    {"role": "AXTextField", "value": "文件传输助手"},
-                    {"role": "AXTextArea", "value": "clipboard content"},
-                ],
-            },
-        }
-
+    def fake_ui_elements(**kwargs) -> dict:
+        app = kwargs.get("app_name") or next((value for action, value in reversed(calls) if action in {"open", "focus"}), "WeChat")
+        typed = [(i, value) for i, (action, value) in enumerate(calls) if action == "type"]
+        submits = [i for i, (action, _) in enumerate(calls) if action == "search_submit"]
+        submitted = submits[-1] if submits else -1
+        query = next((value for i, value in reversed(typed) if submitted < 0 or i < submitted), "")
+        message = next((value for i, value in reversed(typed) if i > submitted and submitted >= 0), "")
+        pasted = any(action == "shortcut" and value == "paste" for action, value in calls)
+        if pasted:
+            message = "clipboard content"
+        search_active = any(action == "shortcut" and value == "find" for action, value in calls)
+        elements = [{"role": "AXTextField", "name": "Search", "value": query, "depth": 1, "editable": True, "focused": submitted < 0 and search_active, "center": {"x": 320, "y": 240}}]
+        if submitted >= 0:
+            elements += [{"role": "AXTable", "name": "Search Results", "depth": 1}, {"role": "AXRow", "name": query, "depth": 2}]
+            elements.append({"role": "AXStaticText", "name": query, "value": query, "description": "Conversation header", "depth": 1})
+        if not search_active:
+            elements = []
+        # A simple body-only goal types straight into the message composer.
+        if not submits and typed and not any(action == "shortcut" and value == "find" for action, value in calls):
+            message = typed[-1][1]
+        elements.append({"role": "AXTextArea", "name": "Message", "value": message,
+                         "focused": not search_active or submitted >= 0, "editable": True, "depth": 1, "center": {"x": 320, "y": 480}})
+        return _with_native_focused_ui_element({"ok": True, "action": "desktop.ui_elements", "data": {"app_name": app, "pid": 100, "window_id": 200, "elements": elements}})
+    monkeypatch.setattr("apps.shell.agent.tools.desktop.running_apps", lambda **_kw: {
+        "ok": True, "action": "desktop.running_apps", "data": {"apps": [{"name": "WeChat", "app_name": "WeChat", "running": True}]}
+    })
+    monkeypatch.setattr("apps.shell.agent.tools.desktop.list_apps", lambda query="", limit=20: {
+        "ok": True, "action": "desktop.list_apps", "data": {"query": query, "apps": [{"name": "WeChat", "app_name": "WeChat", "path": "/Applications/WeChat.app", "match_score": 1.0}], "best_match": {"name": "WeChat", "app_name": "WeChat", "path": "/Applications/WeChat.app", "match_score": 1.0}}
+    })
     monkeypatch.setattr("apps.shell.agent.tools.desktop.app_open", fake_app_open)
     monkeypatch.setattr("apps.shell.agent.tools.desktop.app_focus", fake_app_focus)
     monkeypatch.setattr("apps.shell.agent.tools.desktop.active_window", fake_active_window)
     monkeypatch.setattr("apps.shell.agent.tools.desktop.ui_elements", fake_ui_elements)
+    monkeypatch.setattr("apps.shell.agent.tools.desktop.clipboard_read", lambda max_chars=2000: {
+        "ok": True, "action": "clipboard.read", "data": {"text": "clipboard content", "text_length": 17, "truncated": False, "max_chars": max_chars}
+    })
     monkeypatch.setattr("apps.shell.agent.tools.desktop.desktop_safe_shortcut", fake_safe_shortcut)
     monkeypatch.setattr("apps.shell.agent.tools.desktop.desktop_safe_type_text", fake_safe_type_text)
     monkeypatch.setattr("apps.shell.agent.tools.desktop.desktop_search_submit", fake_search_submit)
@@ -13027,7 +13182,7 @@ def test_send_message_prepares_paste_then_waits_for_send_approval(
             (
                 "打开微信粘贴后发送",
                 [("open", "WeChat"), ("focus", "WeChat"), ("shortcut", "paste")],
-                "app.open_and_safe_shortcut",
+                "app.open",
             ),
                 (
                     "微信给文件传输助手粘贴并发送",
@@ -13071,7 +13226,7 @@ def test_send_message_prepares_paste_then_waits_for_send_approval(
                     "app.focus",
                 ),
         )
-        for prompt, expected_calls, first_tool in cases:
+        for case_index, (prompt, expected_calls, first_tool) in enumerate(cases):
             calls.clear()
             result = _send_foreground_message(api, prompt)
             task = runtime.state.get_task(result["task_id"])
@@ -13083,29 +13238,37 @@ def test_send_message_prepares_paste_then_waits_for_send_approval(
             assistant = runtime.chat_session.get_assistant_message_for_task(result["task_id"])
 
             assert result["ok"] is True
-            assert result["status"] == "failed"
             assert calls == expected_calls
-            assert result["agent_task"]["status"] == "failed"
-            assert result["agent_task"]["needs_user_action"] is False
-            assert result["agent_task"]["pending_approvals"] == []
-            assert not any(
-                tool_call["tool_name"] == "desktop.submit_foreground"
-                and tool_call["status"] == "waiting_approval"
-                for tool_call in result["agent_task"]["tool_calls"]
-            )
             assert task is not None
-            assert task.status == TaskStatus.FAILED
             assert assistant is not None
-            assert assistant.status == MessageStatus.FAILED
-            assert assistant.content == result["agent_task"]["summary"]
-            assert run["status"] == "failed"
-            assert run["pending_approval"] == {}
-            assert "agent.desktop.intent_unverified" in event_types
-            assert "agent.desktop.intent_approval_required" not in event_types
-            assert "agent.tool.approval_required" not in event_types
             assert "agent.desktop.intent_completed" not in event_types
             assert "model.request.started" not in event_types
             assert "model.requested" not in event_types
+            if case_index < 4:
+                assert result["status"] == result["agent_task"]["status"] == "waiting_approval"
+                assert result["agent_task"]["needs_user_action"] is True
+                assert result["agent_task"]["pending_approvals"][0]["tool_name"] == "desktop.submit_foreground"
+                assert run["status"] == "approval_required"
+                assert run["pending_approval"]["tool"] == "desktop.submit_foreground"
+                assert run["pending_approval"]["input_preview"] == {"action": "send"}
+                assert task.status == TaskStatus.RUNNING
+                assert assistant.status == MessageStatus.PROCESSING
+                assert "审批" in assistant.content
+                assert not any(
+                    call["tool_name"] == "desktop.submit_foreground" and call["status"] == "completed"
+                    for call in result["agent_task"]["tool_calls"]
+                )
+            else:
+                # A bare copy does not prove the selected/page-link source.
+                assert result["status"] == result["agent_task"]["status"] == "failed"
+                assert result["agent_task"]["needs_user_action"] is False
+                assert result["agent_task"]["pending_approvals"] == []
+                assert task.status == TaskStatus.FAILED
+                assert assistant.status == MessageStatus.FAILED
+                assert assistant.content == result["agent_task"]["summary"]
+                assert run["status"] == "failed"
+                assert run["pending_approval"] == {}
+                assert "agent.tool.approval_required" not in event_types
     finally:
         service.close()
         store.close()
@@ -13990,7 +14153,7 @@ def test_agent_mention_creates_agent_run_without_general_task(tmp_path, monkeypa
     monkeypatch.setattr(chat_api_mod, "get_agent_runtime_service", lambda: service)
     monkeypatch.setattr("apps.shell.agent_runtime.openai_compatible_chat_message", lambda *_args, **_kwargs: {"content": "Agent result"})
     try:
-        result = api.send_message("@Helper 做个总结")
+        result = api.send_message("@Helper Respond with exactly \"Agent result\".")
         assert result["ok"] is True
         assert result["runnable_command"] is True
         assert result["agent_run_id"]
@@ -14044,12 +14207,12 @@ def test_agent_scoped_session_continues_without_new_mention(tmp_path, monkeypatc
         lambda *_args, **_kwargs: {"content": next(responses)},
     )
     try:
-        first = api.send_message("@Helper 第一轮")
+        first = api.send_message("@Helper Respond with exactly \"First agent result\".")
         # 等待第一个 Agent Run 完成
         _wait_for_agent_run(service, first["agent_run_id"])
         _wait_for_assistant_content(runtime, "First agent result")
 
-        second = api.send_message("继续处理")
+        second = api.send_message("Respond with exactly \"Second agent result\".")
         # 等待第二个 Agent Run 完成
         _wait_for_agent_run(service, second["agent_run_id"])
         _wait_for_assistant_content(runtime, "Second agent result")
@@ -15277,7 +15440,7 @@ def test_selected_runnable_creates_agent_run_without_mention(tmp_path, monkeypat
     monkeypatch.setattr("apps.shell.agent_runtime.openai_compatible_chat_message", lambda *_args, **_kwargs: {"content": "Agent result"})
     try:
         result = api.send_message(
-            "整理需求",
+            "Respond with exactly \"Agent result\".",
             runnable_id=agent["agent_id"],
             client_message_id="client-runnable-1",
         )
@@ -15331,7 +15494,7 @@ def test_selected_runnable_executes_daily_desktop_intent_before_model(tmp_path, 
         open_and_play_calls += 1
         return {
             "ok": True,
-            "action": "media.music_app_open_and_play",
+            "action": "media.apple_music_open_and_play",
             "summary": f"Opened {app_name} and started playback",
             "data": {
                 "app_name": app_name,
@@ -15703,7 +15866,7 @@ def test_manual_group_agent_mention_executes_daily_desktop_intent_before_model(
         open_and_play_calls += 1
         return {
             "ok": True,
-            "action": "media.music_app_open_and_play",
+            "action": "media.apple_music_open_and_play",
             "summary": f"Opened {app_name} and started playback",
             "data": {
                 "app_name": app_name,
@@ -15888,10 +16051,10 @@ def test_manual_group_session_keeps_context_for_agent_mentions(tmp_path, monkeyp
         )
         first_summary_task = runtime.state.get_task(first_summary["task_id"])
         assert first_summary_task is not None
-        assert "[Oha-Yachiyo 群组直接 Agent 汇总]" in first_summary_task.description
-        assert "用户原始请求：@Design 做一版视觉方向" in first_summary_task.description
-        assert "Design：已完成" in first_summary_task.description
-        assert "汇报：Design result" in first_summary_task.description
+        assert "[Oha-Yachiyo 群组直接 Agent 汇总]" in first_summary_task.response_context
+        assert "用户原始请求：@Design 做一版视觉方向" in first_summary_task.response_context
+        assert "Design：已完成" in first_summary_task.response_context
+        assert "汇报：Design result" in first_summary_task.response_context
         runtime.state.update_task_status(first_summary["task_id"], TaskStatus.COMPLETED, result="Design summary done")
         updated_first_agent = next(
             message
@@ -15932,9 +16095,9 @@ def test_manual_group_session_keeps_context_for_agent_mentions(tmp_path, monkeyp
         )
         second_summary_task = runtime.state.get_task(second_summary["task_id"])
         assert second_summary_task is not None
-        assert "用户原始请求：@Code 实现它" in second_summary_task.description
-        assert "Code：已完成" in second_summary_task.description
-        assert "汇报：Code result" in second_summary_task.description
+        assert "用户原始请求：@Code 实现它" in second_summary_task.response_context
+        assert "Code：已完成" in second_summary_task.response_context
+        assert "汇报：Code result" in second_summary_task.response_context
         runtime.state.update_task_status(second_summary["task_id"], TaskStatus.FAILED, error="主模型整理超时")
         updated_second_agent = next(
             message
@@ -16143,16 +16306,16 @@ def test_direct_group_agent_summary_includes_user_followups(tmp_path, monkeypatc
         summary_task = runtime.state.get_task(summary_message["task_id"])
 
         assert summary_task is not None
-        assert "用户原始请求：@Design 做一版视觉方向" in summary_task.description
-        assert "用户后续补充/纠偏：" in summary_task.description
-        assert "- 补充：这版先按移动端优先，颜色不要太亮" in summary_task.description
-        assert "- @主模型 把最终说明改成按移动端验收点输出" in summary_task.description
-        assert "另一个目标：再做一个 logo 方向" not in summary_task.description
-        assert "安排第二轮视觉目标" not in summary_task.description
-        assert "汇报：设计方向已经整理完成。" in summary_task.description
-        assert "执行线索：" in summary_task.description
-        assert "工具调用：artifact.write" in summary_task.description
-        assert "design/mobile-direction.md" in summary_task.description
+        assert "用户原始请求：@Design 做一版视觉方向" in summary_task.response_context
+        assert "用户后续补充/纠偏：" in summary_task.response_context
+        assert "- 补充：这版先按移动端优先，颜色不要太亮" in summary_task.response_context
+        assert "- @主模型 把最终说明改成按移动端验收点输出" in summary_task.response_context
+        assert "另一个目标：再做一个 logo 方向" not in summary_task.response_context
+        assert "安排第二轮视觉目标" not in summary_task.response_context
+        assert "汇报：设计方向已经整理完成。" in summary_task.response_context
+        assert "执行线索：" in summary_task.response_context
+        assert "工具调用：artifact.write" in summary_task.response_context
+        assert "design/mobile-direction.md" in summary_task.response_context
     finally:
         store.close()
 
@@ -16274,7 +16437,7 @@ def test_direct_group_agent_followup_targets_latest_active_agent(tmp_path, monke
         assert design_summary is not None
         assert coding_summary is not None
         assert "补充：这条只给 Coding 的汇总" not in design_summary.description
-        assert "- 补充：这条只给 Coding 的汇总" in coding_summary.description
+        assert "- 补充：这条只给 Coding 的汇总" in coding_summary.response_context
     finally:
         store.close()
 
@@ -16372,9 +16535,9 @@ def test_direct_group_agent_command_flushes_previous_completed_agent_summary(tmp
         )
         summary_task = runtime.state.get_task(summary.task_id)
         assert summary_task is not None
-        assert "用户原始请求：@Design 做一版视觉方向" in summary_task.description
-        assert "汇报：设计方向完成。" in summary_task.description
-        assert "写一个验证脚本" not in summary_task.description
+        assert "用户原始请求：@Design 做一版视觉方向" in summary_task.response_context
+        assert "汇报：设计方向完成。" in summary_task.response_context
+        assert "写一个验证脚本" not in summary_task.response_context
 
         coding_message = next(
             message
@@ -16528,9 +16691,9 @@ def test_manual_group_agent_error_flushes_previous_completed_agent_summary(tmp_p
         )
         summary_task = runtime.state.get_task(summary["task_id"])
         assert summary_task is not None
-        assert "用户原始请求：@Design 做一版视觉方向" in summary_task.description
-        assert "汇报：设计方向完成。" in summary_task.description
-        assert "实现它" not in summary_task.description
+        assert "用户原始请求：@Design 做一版视觉方向" in summary_task.response_context
+        assert "汇报：设计方向完成。" in summary_task.response_context
+        assert "实现它" not in summary_task.response_context
     finally:
         store.close()
 
@@ -16639,9 +16802,9 @@ def test_manual_group_workflow_run_flushes_previous_completed_agent_summary(tmp_
         )
         summary_task = runtime.state.get_task(summary["task_id"])
         assert summary_task is not None
-        assert "用户原始请求：@Design 做一版视觉方向" in summary_task.description
-        assert "汇报：设计方向完成。" in summary_task.description
-        assert "@Flow 跑一下流程" not in summary_task.description
+        assert "用户原始请求：@Design 做一版视觉方向" in summary_task.response_context
+        assert "汇报：设计方向完成。" in summary_task.response_context
+        assert "@Flow 跑一下流程" not in summary_task.response_context
     finally:
         store.close()
 
@@ -16929,9 +17092,9 @@ def test_manual_group_agent_creation_failure_reports_to_main_model(tmp_path, mon
         )
         summary_task = runtime.state.get_task(summary_message["task_id"])
         assert summary_task is not None
-        assert "用户原始请求：@Design 做一版视觉方向" in summary_task.description
-        assert "Design：执行失败" in summary_task.description
-        assert "汇报：工具配置缺失" in summary_task.description
+        assert "用户原始请求：@Design 做一版视觉方向" in summary_task.response_context
+        assert "Design：执行失败" in summary_task.response_context
+        assert "汇报：工具配置缺失" in summary_task.response_context
     finally:
         store.close()
 
@@ -17005,9 +17168,9 @@ def test_manual_group_agent_run_failure_reports_to_main_model(tmp_path, monkeypa
         )
         summary_task = runtime.state.get_task(summary_message["task_id"])
         assert summary_task is not None
-        assert "用户原始请求：@Design 做一版视觉方向" in summary_task.description
-        assert "Design：执行失败" in summary_task.description
-        assert "汇报：模型调用超时。" in summary_task.description
+        assert "用户原始请求：@Design 做一版视觉方向" in summary_task.response_context
+        assert "Design：执行失败" in summary_task.response_context
+        assert "汇报：模型调用超时。" in summary_task.response_context
     finally:
         store.close()
 
@@ -17093,8 +17256,8 @@ def test_manual_group_agent_completion_after_session_switch_writes_back_original
         assert summary_message.status == MessageStatus.PROCESSING.value
         assert summary_task is not None
         assert summary_task.chat_session_id == original_session_id
-        assert "用户原始请求：@Design 做一版视觉方向" in summary_task.description
-        assert "汇报：视觉方向已经完成。" in summary_task.description
+        assert "用户原始请求：@Design 做一版视觉方向" in summary_task.response_context
+        assert "汇报：视觉方向已经完成。" in summary_task.response_context
     finally:
         store.close()
 
@@ -17205,9 +17368,9 @@ def test_manual_group_agent_approval_completion_reports_to_main_model(tmp_path, 
         )
         summary_task = runtime.state.get_task(summary_message["task_id"])
         assert summary_task is not None
-        assert "用户原始请求：@Design 做一版视觉方向" in summary_task.description
-        assert "Design：已完成" in summary_task.description
-        assert "汇报：视觉方向已经完成。" in summary_task.description
+        assert "用户原始请求：@Design 做一版视觉方向" in summary_task.response_context
+        assert "Design：已完成" in summary_task.response_context
+        assert "汇报：视觉方向已经完成。" in summary_task.response_context
     finally:
         store.close()
 
@@ -17317,9 +17480,9 @@ def test_manual_group_agent_approval_rejection_reports_to_main_model(tmp_path, m
         )
         summary_task = runtime.state.get_task(summary_message["task_id"])
         assert summary_task is not None
-        assert "用户原始请求：@Design 做一版视觉方向" in summary_task.description
-        assert "Design：已取消" in summary_task.description
-        assert "汇报：工具审批已拒绝：不需要写文件。" in summary_task.description
+        assert "用户原始请求：@Design 做一版视觉方向" in summary_task.response_context
+        assert "Design：已取消" in summary_task.response_context
+        assert "汇报：工具审批已拒绝：不需要写文件。" in summary_task.response_context
     finally:
         store.close()
 
@@ -17509,12 +17672,12 @@ def test_group_main_model_dispatch_result_creates_agent_run_messages(tmp_path, m
         assert assistant_messages[0]["metadata"]["group_agent_summary_pending"] is True
         summary_task = runtime.state.get_task(summary_message["task_id"])
         assert summary_task is not None
-        assert "[Oha-Yachiyo 群组 Agent 汇总]" in summary_task.description
-        assert "不要再派发新的 Agent 任务" in summary_task.description
-        assert "汇报：Design done" in summary_task.description
-        assert "产物：design-01.md (tool_artifact)" in summary_task.description
-        assert "另有 2 个产物见 Run Detail" in summary_task.description
-        assert "汇报：Code done" in summary_task.description
+        assert "[Oha-Yachiyo 群组 Agent 汇总]" in summary_task.response_context
+        assert "不要再派发新的 Agent 任务" in summary_task.response_context
+        assert "汇报：Design done" in summary_task.response_context
+        assert "产物：design-01.md (tool_artifact)" in summary_task.response_context
+        assert "另有 2 个产物见 Run Detail" in summary_task.response_context
+        assert "汇报：Code done" in summary_task.response_context
 
         runtime.state.update_task_status(
             summary_message["task_id"],
@@ -17803,9 +17966,9 @@ def test_plain_group_message_can_dispatch_agents_via_main_model_result(tmp_path,
         )
         summary_task = runtime.state.get_task(summary_message["task_id"])
         assert summary_task is not None
-        assert "用户原始请求：我想让群里合适的 Agent 做个视觉测试" in summary_task.description
-        assert "Design：已完成" in summary_task.description
-        assert "汇报：视觉方案已经整理好。" in summary_task.description
+        assert "用户原始请求：我想让群里合适的 Agent 做个视觉测试" in summary_task.response_context
+        assert "Design：已完成" in summary_task.response_context
+        assert "汇报：视觉方案已经整理好。" in summary_task.response_context
     finally:
         store.close()
 
@@ -17931,12 +18094,12 @@ def test_plain_group_goal_dispatches_two_agents_and_summarizes(tmp_path, monkeyp
         summary_task = runtime.state.get_task(summary_message["task_id"])
         assert summary_task is not None
         assert summary_message["status"] == "processing"
-        assert "用户原始请求：我想让群里合适的 Agent 分别做 UI 验收和验证脚本方案" in summary_task.description
-        assert "Design：已完成" in summary_task.description
-        assert "Coding：已完成" in summary_task.description
-        assert "汇报：设计验收点已经整理好。" in summary_task.description
-        assert "汇报：验证脚本方案已经整理好。" in summary_task.description
-        assert "不要再派发新的 Agent 任务" in summary_task.description
+        assert "用户原始请求：我想让群里合适的 Agent 分别做 UI 验收和验证脚本方案" in summary_task.response_context
+        assert "Design：已完成" in summary_task.response_context
+        assert "Coding：已完成" in summary_task.response_context
+        assert "汇报：设计验收点已经整理好。" in summary_task.response_context
+        assert "汇报：验证脚本方案已经整理好。" in summary_task.response_context
+        assert "不要再派发新的 Agent 任务" in summary_task.response_context
 
         runtime.state.update_task_status(
             summary_message["task_id"],
@@ -18148,16 +18311,16 @@ def test_plain_group_goal_mixed_agent_outcomes_waits_and_summarizes(tmp_path, mo
         assert final_payload["approval_count"] == 0
         assert final_delegated["Design"]["metadata"]["agent_report_status"] == "completed"
         assert final_delegated["Coding"]["metadata"]["agent_report_status"] == "failed"
-        assert "用户原始请求：请让群里合适的 Agent 分别整理 UI 验收点和运行验证脚本" in summary_task.description
-        assert "Design：已完成" in summary_task.description
-        assert "汇报：UI 验收点已经整理完成。" in summary_task.description
-        assert "Coding：执行失败" in summary_task.description
-        assert "汇报：验证脚本失败：plain group verify failed" in summary_task.description
-        assert "执行线索：" in summary_task.description
-        assert "terminal.run" in summary_task.description
-        assert "python3 verify_plain_group.py" in summary_task.description
-        assert "plain group verify failed" in summary_task.description
-        assert "回复必须明确区分：成功项、失败/取消/拒绝项、失败原因、未执行派活、可验收内容/产物、用户下一步可选动作。" in summary_task.description
+        assert "用户原始请求：请让群里合适的 Agent 分别整理 UI 验收点和运行验证脚本" in summary_task.response_context
+        assert "Design：已完成" in summary_task.response_context
+        assert "汇报：UI 验收点已经整理完成。" in summary_task.response_context
+        assert "Coding：执行失败" in summary_task.response_context
+        assert "汇报：验证脚本失败：plain group verify failed" in summary_task.response_context
+        assert "执行线索：" in summary_task.response_context
+        assert "terminal.run" in summary_task.response_context
+        assert "python3 verify_plain_group.py" in summary_task.response_context
+        assert "plain group verify failed" in summary_task.response_context
+        assert "回复必须明确区分：成功项、失败/取消/拒绝项、失败原因、未执行派活、可验收内容/产物、用户下一步可选动作。" in summary_task.response_context
 
         runtime.state.update_task_status(
             summary_message["task_id"],
@@ -18466,10 +18629,10 @@ def test_group_dispatch_reports_skipped_agent_not_in_group(tmp_path, monkeypatch
         )
         summary_task = runtime.state.get_task(summary_message["task_id"])
         assert summary_task is not None
-        assert "未执行派活" in summary_task.description
-        assert "未执行派活：" in summary_task.description
-        assert "- Ghost: 不在当前群组中" in summary_task.description
-        assert "汇报：Design done" in summary_task.description
+        assert "未执行派活" in summary_task.response_context
+        assert "未执行派活：" in summary_task.response_context
+        assert "- Ghost: 不在当前群组中" in summary_task.response_context
+        assert "汇报：Design done" in summary_task.response_context
     finally:
         store.close()
 
@@ -18531,9 +18694,9 @@ def test_group_dispatch_all_skipped_still_creates_main_summary(tmp_path, monkeyp
         assert summary_message["status"] == "processing"
         summary_task = runtime.state.get_task(summary_message["task_id"])
         assert summary_task is not None
-        assert "未执行派活：" in summary_task.description
-        assert "- Ghost: 不在当前群组中" in summary_task.description
-        assert "没有 Agent 实际执行" in summary_task.description
+        assert "未执行派活：" in summary_task.response_context
+        assert "- Ghost: 不在当前群组中" in summary_task.response_context
+        assert "没有 Agent 实际执行" in summary_task.response_context
     finally:
         store.close()
 
@@ -18599,8 +18762,8 @@ def test_group_dispatch_workflow_request_guides_to_studio(tmp_path, monkeypatch)
         )
         summary_task = runtime.state.get_task(summary_message["task_id"])
         assert summary_task is not None
-        assert "Workflow Studio" in summary_task.description
-        assert "没有 Agent 实际执行" in summary_task.description
+        assert "Workflow Studio" in summary_task.response_context
+        assert "没有 Agent 实际执行" in summary_task.response_context
     finally:
         store.close()
 
@@ -18661,9 +18824,9 @@ def test_group_dispatch_run_creation_failure_reports_to_main_summary(tmp_path, m
         assert summary_message["status"] == "processing"
         summary_task = runtime.state.get_task(summary_message["task_id"])
         assert summary_task is not None
-        assert "Code：执行失败" in summary_task.description
-        assert "任务：写一个测试脚本" in summary_task.description
-        assert "汇报：Agent 模型配置不可用" in summary_task.description
+        assert "Code：执行失败" in summary_task.response_context
+        assert "任务：写一个测试脚本" in summary_task.response_context
+        assert "汇报：Agent 模型配置不可用" in summary_task.response_context
     finally:
         store.close()
 
@@ -20071,111 +20234,321 @@ def test_group_dispatch_partial_request_falls_back_to_missing_explicit_agent(tmp
 
 
 def test_group_explicit_agent_goal_dispatches_directly_without_main_model(tmp_path, monkeypatch):
+    _exercise_real_group_project_dispatch(tmp_path, monkeypatch, decision="approve")
+
+
+def _exercise_real_group_project_dispatch(tmp_path, monkeypatch, *, decision):
+    import hashlib
+    import subprocess
+    import sys
+
+    from apps.shell.agent.runtime.goal_runtime import runtime_goal_assessment, runtime_goal_contract
+    from apps.shell.agent.runtime.model_intent_planning import MODEL_INTENT_PLANNING_TOOL_NAME
+    from apps.shell.model_profiles import ModelProfileService
+
     api, runtime, store = _make_api(tmp_path)
     activity_store = ActivityStore(db_path=str(tmp_path / "activity.db"))
+    service = _make_agent_runtime_service(tmp_path)
+    profiles = ModelProfileService(
+        db_path=tmp_path / "profiles.db",
+        workspace_dir=tmp_path / "profiles",
+        credential_store=MemoryCredentialStore(),
+    )
     monkeypatch.setattr(chat_api_mod, "get_activity_store", lambda: activity_store)
-    design = {
-        "id": "agent_design",
-        "name": "Design Agent",
-        "nickname": "Design",
-        "kind": "agent",
-        "enabled": True,
-        "category": "design",
-        "description": "负责设计说明。",
-    }
-    coding = {
-        "id": "agent_coding",
-        "name": "Coding Agent",
-        "nickname": "furina",
-        "kind": "agent",
-        "enabled": True,
-        "category": "coding",
-        "description": "负责实现代码。",
-    }
-
-    class FakeRunnableService:
-        def __init__(self):
-            self.calls = []
-            self.runs = {}
-
-        def resolve_runnable(self, *, runnable_id="", name=""):
-            for runnable in (design, coding):
-                if runnable_id == runnable["id"] or name in {runnable["name"], runnable["nickname"]}:
-                    return runnable
-            return None
-
-        def create_run_for_runnable_async(
-            self,
-            *,
-            runnable_id="",
-            name="",
-            user_goal="",
-            run_group_id="",
-            upstream="",
-            on_complete=None,
-        ):
-            self.calls.append({
-                "runnable_id": runnable_id,
-                "name": name,
-                "user_goal": user_goal,
-                "run_group_id": run_group_id,
-                "upstream": upstream,
-            })
-            run = {
-                "run_id": f"agent_run_{runnable_id}",
-                "run_group_id": run_group_id or "run_group_direct",
-                "status": "completed",
-                "result": f"{runnable_id} 完成。",
-                "runnable": design if runnable_id == design["id"] else coding,
-            }
-            self.runs[run["run_id"]] = run
-            if on_complete:
-                on_complete(run)
-            return run
-
-        def get_run(self, run_id):
-            return self.runs[run_id]
-
-    service = FakeRunnableService()
     monkeypatch.setattr(chat_api_mod, "get_agent_runtime_service", lambda: service)
-    try:
-        created = api.create_group_session(name="demo Channel", participant_ids=[design["id"], coding["id"]])
-        assert created["ok"] is True
-        sent = api.send_message("请 Design Agent 和 Coding Agent 一起做一个小项目")
-        assert sent["ok"] is True
-        assert sent["status"] == "completed"
+    monkeypatch.setattr("apps.core.chat_store.get_chat_store", lambda: store)
+    monkeypatch.setattr("apps.shell.agent_runtime.get_model_profile_service", lambda: profiles)
+    monkeypatch.setattr("apps.shell.model_profiles.openai_compatible_chat", lambda *_a, **_k: "OK")
+    runtime.agent_runtime_service = service
+    goal = "请 Design Agent 和 Coding Agent 一起做一个小项目"
+    design_content = (
+        "# Greeting project\n\n"
+        "A small Python CLI prints Hello, World! with a reusable greet function."
+    )
+    source = 'def greet(name):\n    return f"Hello, {name}!"\n\nprint(greet("World"))\n'
+    patch = "--- /dev/null\n+++ app.py\n@@ -0,0 +1,4 @@\n" + "".join(
+        "+" + line for line in source.splitlines(keepends=True)
+    )
+    model_calls = []
+    model_state = {"second_patch_requested": False}
+    workdirs = {}
+    agents = []
 
-        parent_task = runtime.state.get_task(sent["task_id"])
-        assert parent_task.status == TaskStatus.COMPLETED
-        assert [call["runnable_id"] for call in service.calls] == [design["id"], coding["id"]]
-        assert service.calls[0]["run_group_id"] == ""
-        assert service.calls[1]["run_group_id"] == "run_group_direct"
-        assert "这是群组用户消息的直接派发" in service.calls[0]["user_goal"]
-        assert "请 Design Agent 和 Coding Agent 一起做一个小项目" in service.calls[1]["user_goal"]
+    def tool_response(name, arguments):
+        return {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": name,
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": json.dumps(arguments, ensure_ascii=False),
+                    },
+                }
+            ],
+        }
 
-        messages = api.get_messages()["messages"]
-        parent = next(
-            message
+    def model(_base, model_name, _key, messages, *, tools=None):
+        assert model_name in {"design-fixture", "coding-fixture"}
+        tool_names = {(tool.get("function") or {}).get("name") for tool in tools or []}
+        model_calls.append((model_name, tool_names))
+        if MODEL_INTENT_PLANNING_TOOL_NAME in tool_names:
+            planning_context = json.loads(messages[-1]["content"])
+            assert planning_context["original_goal"] == goal
+            return tool_response(
+                MODEL_INTENT_PLANNING_TOOL_NAME,
+                {
+                    "intent_kind": "report_generation"
+                    if model_name == "design-fixture"
+                    else "code_task",
+                    "planning_goal": goal
+                    + ("，生成项目设计说明文档" if model_name == "design-fixture" else ""),
+                    "action_evidence": "做一个小项目",
+                },
+            )
+        context = "\n".join(str(message.get("content") or "") for message in messages)
+        agent_name = "Design Agent" if model_name == "design-fixture" else "Coding Agent"
+        assert f"# Agent\nName: {agent_name}" in context
+        if model_name == "design-fixture":
+            if "Runtime follow-up context:" in messages[-1].get("content", ""):
+                return {"role": "assistant", "content": design_content}
+            if any(
+                message.get("role") == "tool" and "artifact.write" in str(message.get("content"))
+                for message in messages
+            ):
+                return {"role": "assistant", "content": "设计文档已实际写入并验证。"}
+            assert "artifact_write" in tool_names
+            return tool_response("artifact_write", {"path": "report.md", "content": design_content})
+        if any(
+            message.get("role") == "tool" and "sha256_after" in str(message.get("content"))
             for message in messages
-            if message["role"] == "assistant" and message["task_id"] == sent["task_id"]
+        ):
+            if decision == "second_approval" and not model_state["second_patch_requested"]:
+                model_state["second_patch_requested"] = True
+                return tool_response(
+                    "workspace_write_patch",
+                    {
+                        "path": "app.py",
+                        "patch": (
+                            '--- app.py\n+++ app.py\n@@ -4 +4 @@\n'
+                            '-print(greet("World"))\n+print(greet("Team"))\n'
+                        ),
+                        "expected_sha256": hashlib.sha256(source.encode()).hexdigest(),
+                    },
+                )
+            return {"role": "assistant", "content": "Python 项目源码已实际写入并验证。"}
+        assert "workspace_write_patch" in tool_names
+        return tool_response(
+            "workspace_write_patch",
+            {"path": "app.py", "patch": patch, "expected_sha256": hashlib.sha256(b"").hexdigest()},
+        )
+
+    monkeypatch.setattr("apps.shell.agent_runtime.openai_compatible_chat_message", model)
+    try:
+        for name, nickname, model_name, description, allowed in (
+            (
+                "Design Agent",
+                "Design",
+                "design-fixture",
+                "负责设计说明。",
+                ["workspace.list", "artifact.write"],
+            ),
+            (
+                "Coding Agent",
+                "furina",
+                "coding-fixture",
+                "负责实现代码。",
+                ["workspace.list", "workspace.read", "workspace.write_patch"],
+            ),
+        ):
+            profile = profiles.create_profile(
+                {
+                    "name": name + " profile",
+                    "capability": "chat",
+                    "base_url": "https://model.example.test/v1",
+                    "model": model_name,
+                    "api_key": "test-only",
+                }
+            )
+            assert profiles.test_profile(profile["profile_id"])["ok"]
+            assert profiles.get_profile(profile["profile_id"])["status"] == "available"
+            workspace = tmp_path / model_name
+            workspace.mkdir()
+            agent = service.create_agent(
+                {
+                    "name": name,
+                    "nickname": nickname,
+                    "description": description,
+                    "model_mode": "profile",
+                    "model_profile_id": profile["profile_id"],
+                    "tool_policy": {
+                        "allowed_tools": allowed,
+                        "approval_required": {"workspace.write_patch": True},
+                    },
+                    "workspace_policy": {
+                        "default_workdir": str(workspace),
+                        "readable_scopes": ["."],
+                        "writable_scopes": ["."],
+                    },
+                }
+            )
+            agents.append(agent)
+            workdirs[agent["agent_id"]] = workspace
+        created = api.create_group_session(
+            name="demo Channel", participant_ids=[a["agent_id"] for a in agents]
+        )
+        assert created["ok"]
+        sent = api.send_message(goal)
+        assert sent["ok"] and sent["status"] == "processing", sent
+        parent_id = service.get_task_run_link(sent["task_id"])["run_id"]
+
+        def children():
+            return [r for r in service.list_runs(limit=20)["runs"] if r["kind"] == "agent_run"]
+
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            runs = children()
+            if len(runs) == 2 and all(
+                r["status"] in {"completed", "approval_required", "failed"} for r in runs
+            ):
+                break
+            time.sleep(0.02)
+        assert len(runs) == 2, runs
+        coding = next(r for r in runs if r["runnable_id"] == agents[1]["agent_id"])
+        design = next(r for r in runs if r["runnable_id"] == agents[0]["agent_id"])
+        assert design["status"] == "completed", design["result"]
+        assert coding["status"] == "approval_required", coding["result"]
+        assert not (workdirs[agents[1]["agent_id"]] / "app.py").exists()
+        api.get_messages()
+        assert service.get_run(parent_id)["status"] == "running"
+        assert runtime.state.get_task(sent["task_id"]).status == TaskStatus.RUNNING
+        assert design["user_goal"] == coding["user_goal"] == goal
+        approval = coding["pending_approval"]
+        assert approval["tool"] == "workspace.write_patch"
+        if decision in {"reject", "cancel"}:
+            if decision == "reject":
+                service.reject_run_approval(
+                    coding["run_id"], expected_approval_id=approval["approval_id"]
+                )
+            else:
+                service.cancel_run(parent_id)
+            api.get_messages()
+            assert service.get_run(parent_id)["status"] == (
+                "failed" if decision == "reject" else "cancelled"
+            )
+            assert runtime.state.get_task(sent["task_id"]).status == (
+                TaskStatus.FAILED if decision == "reject" else TaskStatus.CANCELLED
+            )
+            assert not (workdirs[agents[1]["agent_id"]] / "app.py").exists()
+            return
+        service.approve_run_approval(coding["run_id"], expected_approval_id=approval["approval_id"])
+        if decision == "second_approval":
+            second = service.get_run(coding["run_id"])
+            assert second["status"] == "approval_required", second["result"]
+            assert second["pending_approval"]["approval_id"] != approval["approval_id"]
+            api.get_messages()
+            assert service.get_run(parent_id)["status"] == "running"
+            assert runtime.state.get_task(sent["task_id"]).status == TaskStatus.RUNNING
+            contract = runtime_goal_contract(
+                run_id=second["run_id"],
+                original_goal=goal,
+                runtime_execution_envelope=None,
+                runtime_execution_metadata=None,
+                messages=[],
+                timeline=second["timeline"],
+            )
+            assert runtime_goal_assessment(contract, second["timeline"]).completed
+            assert (workdirs[agents[1]["agent_id"]] / "app.py").read_text() == source
+            service.reject_run_approval(
+                second["run_id"], expected_approval_id=second["pending_approval"]["approval_id"]
+            )
+            api.get_messages()
+            assert service.get_run(parent_id)["status"] == "failed"
+            assert runtime.state.get_task(sent["task_id"]).status == TaskStatus.FAILED
+            assert (workdirs[agents[1]["agent_id"]] / "app.py").read_text() == source
+            return
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            messages = api.get_messages()["messages"]
+            if service.get_run(parent_id)["status"] in {"completed", "failed", "cancelled"} and any(
+                m["role"] == "assistant"
+                and m["task_id"] == sent["task_id"]
+                and m["status"] in {"completed", "failed"}
+                for m in messages
+            ):
+                break
+            time.sleep(0.02)
+        final = service.get_run(parent_id)
+        assert final["status"] == "completed", (
+            final["result"],
+            [(r["status"], r["result"], r["pending_approval"]) for r in children()],
+        )
+        assert runtime.state.get_task(sent["task_id"]).status == TaskStatus.COMPLETED
+        parent_contract = runtime_goal_contract(
+            run_id=parent_id,
+            original_goal=goal,
+            runtime_execution_envelope=None,
+            runtime_execution_metadata=None,
+            messages=[],
+            timeline=final["timeline"],
+        )
+        assert parent_contract.original_goal == goal
+        assert runtime_goal_assessment(parent_contract, final["timeline"]).completed
+        runs = children()
+        assert {r["runnable_id"] for r in runs} == {a["agent_id"] for a in agents}
+        group_id = design["run_group_id"]
+        assert group_id and all(r["run_group_id"] == group_id for r in runs)
+        for run in runs:
+            assert run["status"] == "completed", run["result"]
+            assert run["user_goal"] == goal
+            contract = runtime_goal_contract(
+                run_id=run["run_id"],
+                original_goal=goal,
+                runtime_execution_envelope=None,
+                runtime_execution_metadata=None,
+                messages=[],
+                timeline=run["timeline"],
+            )
+            assert runtime_goal_assessment(contract, run["timeline"]).completed
+        artifact = service.read_run_artifact(design["run_id"], "report.md")
+        assert artifact["content"] == design_content
+        assert (
+            hashlib.sha256(artifact["content"].encode()).hexdigest()
+            == hashlib.sha256(design_content.encode()).hexdigest()
+        )
+        code_path = workdirs[agents[1]["agent_id"]] / "app.py"
+        assert code_path.read_text() == source
+        compile(code_path.read_text(), str(code_path), "exec")
+        executed = subprocess.run(
+            [sys.executable, str(code_path)], capture_output=True, text=True, check=True
+        )
+        assert executed.stdout == "Hello, World!\n"
+        parent = next(
+            m for m in messages if m["role"] == "assistant" and m["task_id"] == sent["task_id"]
         )
         delegated = [
-            message
-            for message in messages
-            if message["metadata"].get("delegated_by_task_id") == sent["task_id"]
+            m for m in messages if m["metadata"].get("delegated_by_task_id") == sent["task_id"]
         ]
         assert parent["status"] == "completed"
         assert parent["metadata"]["group_dispatch_direct"] is True
         assert parent["metadata"]["group_dispatch_count"] == 2
-        assert parent["metadata"]["group_dispatch_run_group_id"] == "run_group_direct"
+        assert parent["metadata"]["group_dispatch_run_group_id"] == group_id
         assert "用户已明确点名群内 Agent" in parent["content"]
         assert "我把 2 个任务分别派给 Design、furina 了。" in parent["content"]
         assert len(delegated) == 2
-        assert {message["metadata"]["run_id"] for message in delegated} == {
-            "agent_run_agent_design",
-            "agent_run_agent_coding",
-        }
+        assert {m["metadata"]["run_id"] for m in delegated} == {r["run_id"] for r in runs}
+        assert len([c for c in model_calls if MODEL_INTENT_PLANNING_TOOL_NAME in c[1]]) == 2
+        assert not parent["metadata"].get("group_agent_summary_pending")
+        assert not parent["metadata"].get("group_agent_summary_task_id")
+        assert not any(
+            m["metadata"].get("group_agent_summary_for_task_id") == sent["task_id"]
+            for m in messages
+        )
     finally:
+        service.close()
+        profiles.close()
         activity_store.close()
         store.close()
 
@@ -20458,7 +20831,7 @@ def test_group_dispatch_agent_completion_after_session_switch_writes_back_origin
         assert summary_message.status == MessageStatus.PROCESSING.value
         assert summary_task is not None
         assert summary_task.chat_session_id == original_session_id
-        assert "汇报：视觉测试已经完成。" in summary_task.description
+        assert "汇报：视觉测试已经完成。" in summary_task.response_context
     finally:
         store.close()
 
@@ -20766,7 +21139,7 @@ def test_group_agent_approval_completion_creates_main_summary(tmp_path, monkeypa
         assert summary_message["metadata"]["group_agent_summary_for_task_id"] == sent["task_id"]
         summary_task = runtime.state.get_task(summary_message["task_id"])
         assert summary_task is not None
-        assert "汇报：测试已经通过，覆盖群组派发和审批恢复。" in summary_task.description
+        assert "汇报：测试已经通过，覆盖群组派发和审批恢复。" in summary_task.response_context
         assert payload["is_processing"] is True
     finally:
         store.close()
@@ -20929,8 +21302,8 @@ def test_plain_group_goal_approval_flow_continues_to_main_summary(tmp_path, monk
             "验证脚本运行通过。"
         )
         assert summary_task is not None
-        assert "Coding：已完成" in summary_task.description
-        assert "汇报：验证脚本运行通过。" in summary_task.description
+        assert "Coding：已完成" in summary_task.response_context
+        assert "汇报：验证脚本运行通过。" in summary_task.response_context
 
         runtime.state.update_task_status(
             summary_message["task_id"],
@@ -21025,8 +21398,8 @@ def test_group_direct_agent_summary_concurrent_calls_create_one_followup(tmp_pat
         assert agent_message.metadata["group_agent_summary_pending"] is True
         assert summary_task is not None
         assert summary_task.chat_session_id == runtime.chat_session.session_id
-        assert "[Oha-Yachiyo 群组直接 Agent 汇总]" in summary_task.description
-        assert "用户原始请求：@Design 做并发整理" in summary_task.description
+        assert "[Oha-Yachiyo 群组直接 Agent 汇总]" in summary_task.response_context
+        assert "用户原始请求：@Design 做并发整理" in summary_task.response_context
     finally:
         runtime.state.create_task = original_create_task
         release_create_task.set()
@@ -21043,7 +21416,7 @@ def test_group_dispatch_uses_runtime_native_service_end_to_end(tmp_path, monkeyp
         context = str(messages[-1]["content"])
         captured_contexts.append(context)
         assert "# Agent\nName: Coding Agent" in context
-        assert "# User Goal\n做真实 Native 群聊派发验证" in context
+        assert "# User Goal\nRespond with exactly Coding native dispatch result." in context
         assert "[Oha-Yachiyo 群组执行约定]" in context
         assert "你在群内身份是：Coding" in context
         return {"content": "Coding native dispatch result"}
@@ -21069,7 +21442,7 @@ def test_group_dispatch_uses_runtime_native_service_end_to_end(tmp_path, monkeyp
         assert created["session_context"]["conversation_kind"] == "group"
         assert created["session_context"]["participants"][1]["id"] == coding["agent_id"]
 
-        sent = api.send_message("@主模型 请安排 Coding 做真实 Native 群聊派发验证")
+        sent = api.send_message("@主模型 请安排 Coding Respond with exactly Coding native dispatch result.")
         assert sent["ok"] is True
         runtime.state.update_task_status(
             sent["task_id"],
@@ -21077,7 +21450,7 @@ def test_group_dispatch_uses_runtime_native_service_end_to_end(tmp_path, monkeyp
             result=(
                 "我会让 Coding 处理这件事。\n"
                 '{"tool":"oha.group_dispatch","input":{"tasks":[{"kind":"agent","target":"Coding",'
-                '"goal":"做真实 Native 群聊派发验证"}]}}'
+                '"goal":"Respond with exactly Coding native dispatch result."}]}}'
             ),
         )
 
@@ -21099,7 +21472,7 @@ def test_group_dispatch_uses_runtime_native_service_end_to_end(tmp_path, monkeyp
         assert agent_message["status"] == "processing"
         assert agent_message["metadata"]["runnable_id"] == coding["agent_id"]
         assert agent_message["metadata"]["delegated_by_task_id"] == sent["task_id"]
-        assert agent_message["metadata"]["delegated_goal"] == "做真实 Native 群聊派发验证"
+        assert agent_message["metadata"]["delegated_goal"] == "Respond with exactly Coding native dispatch result."
 
         run = _wait_for_agent_run(service, run_id)
         assert run["status"] == "completed"
@@ -21122,8 +21495,8 @@ def test_group_dispatch_uses_runtime_native_service_end_to_end(tmp_path, monkeyp
         assert summary_message["status"] == "processing"
         assert summary_task is not None
         assert summary_task.chat_session_id == runtime.chat_session.session_id
-        assert "Coding：已完成" in summary_task.description
-        assert "汇报：Coding native dispatch result" in summary_task.description
+        assert "Coding：已完成" in summary_task.response_context
+        assert "汇报：Coding native dispatch result" in summary_task.response_context
     finally:
         service.close()
         store.close()
@@ -21313,7 +21686,7 @@ def test_group_direct_agent_completion_keeps_full_goal_in_chat(tmp_path, monkeyp
         )
         summary_task = runtime.state.get_task(summary_message["task_id"])
         assert summary_task is not None
-        assert long_goal in summary_task.description
+        assert long_goal in summary_task.response_context
     finally:
         store.close()
 
@@ -21508,8 +21881,8 @@ def test_group_agent_approval_rejection_creates_main_summary(tmp_path, monkeypat
         assert summary_message["status"] == "processing"
         summary_task = runtime.state.get_task(summary_message["task_id"])
         assert summary_task is not None
-        assert "Design：已取消" in summary_task.description
-        assert "汇报：工具审批已拒绝：Rejected from chat" in summary_task.description
+        assert "Design：已取消" in summary_task.response_context
+        assert "汇报：工具审批已拒绝：Rejected from chat" in summary_task.response_context
     finally:
         store.close()
 
@@ -21621,8 +21994,8 @@ def test_group_agent_approval_waits_for_all_delegates_before_summary(tmp_path, m
         assert summary_message["status"] == "processing"
         summary_task = runtime.state.get_task(summary_message["task_id"])
         assert summary_task is not None
-        assert "汇报：设计稿已经完成。" in summary_task.description
-        assert "汇报：字符计数脚本已经完成。" in summary_task.description
+        assert "汇报：设计稿已经完成。" in summary_task.response_context
+        assert "汇报：字符计数脚本已经完成。" in summary_task.response_context
     finally:
         store.close()
 
@@ -21832,21 +22205,21 @@ def test_group_multiple_agent_approvals_wait_until_every_delegate_terminal(tmp_p
         )
         summary_task = runtime.state.get_task(summary_message["task_id"])
         assert summary_task is not None
-        assert "回复必须明确区分：成功项、失败/取消/拒绝项、失败原因、未执行派活、可验收内容/产物、用户下一步可选动作。" in summary_task.description
-        assert "如果有的 Agent 成功、有的 Agent 失败或被拒绝，不要把整轮任务说成单纯成功或单纯失败" in summary_task.description
-        assert "用户后续补充/纠偏：" in summary_task.description
-        assert "- 补充：最终整理时请把失败项和可验收项分开说" in summary_task.description
-        assert "- @主模型 把验收说明改成按成功、失败、待确认三段输出" in summary_task.description
-        assert "另一个目标：再开一个按钮动效方案" not in summary_task.description
-        assert "安排第二轮测试目标" not in summary_task.description
-        assert "Design：已完成" in summary_task.description
-        assert "汇报：UI 验收点已经整理完成。" in summary_task.description
-        assert "Coding：执行失败" in summary_task.description
-        assert "汇报：验证脚本失败：缺少依赖。" in summary_task.description
-        assert "执行线索：" in summary_task.description
-        assert "terminal.run" in summary_task.description
-        assert "python3 verify.py" in summary_task.description
-        assert "Missing dependency" in summary_task.description
+        assert "回复必须明确区分：成功项、失败/取消/拒绝项、失败原因、未执行派活、可验收内容/产物、用户下一步可选动作。" in summary_task.response_context
+        assert "如果有的 Agent 成功、有的 Agent 失败或被拒绝，不要把整轮任务说成单纯成功或单纯失败" in summary_task.response_context
+        assert "用户后续补充/纠偏：" in summary_task.response_context
+        assert "- 补充：最终整理时请把失败项和可验收项分开说" in summary_task.response_context
+        assert "- @主模型 把验收说明改成按成功、失败、待确认三段输出" in summary_task.response_context
+        assert "另一个目标：再开一个按钮动效方案" not in summary_task.response_context
+        assert "安排第二轮测试目标" not in summary_task.response_context
+        assert "Design：已完成" in summary_task.response_context
+        assert "汇报：UI 验收点已经整理完成。" in summary_task.response_context
+        assert "Coding：执行失败" in summary_task.response_context
+        assert "汇报：验证脚本失败：缺少依赖。" in summary_task.response_context
+        assert "执行线索：" in summary_task.response_context
+        assert "terminal.run" in summary_task.response_context
+        assert "python3 verify.py" in summary_task.response_context
+        assert "Missing dependency" in summary_task.response_context
 
         runtime.state.update_task_status(
             summary_message["task_id"],
@@ -22007,8 +22380,8 @@ def test_group_followup_targets_latest_active_delegated_batch(tmp_path, monkeypa
         )
         first_summary_task = runtime.state.get_task(first_summary["task_id"])
         assert first_summary_task is not None
-        assert "图标方案完成。" in first_summary_task.description
-        assert "这条只给第二批汇总" not in first_summary_task.description
+        assert "图标方案完成。" in first_summary_task.response_context
+        assert "这条只给第二批汇总" not in first_summary_task.response_context
 
         service.runs["agent_run_coding"] = {
             **service.runs["agent_run_coding"],
@@ -22028,8 +22401,8 @@ def test_group_followup_targets_latest_active_delegated_batch(tmp_path, monkeypa
         )
         second_summary_task = runtime.state.get_task(second_summary["task_id"])
         assert second_summary_task is not None
-        assert "- 补充：这条只给第二批汇总" in second_summary_task.description
-        assert "验证脚本完成。" in second_summary_task.description
+        assert "- 补充：这条只给第二批汇总" in second_summary_task.response_context
+        assert "验证脚本完成。" in second_summary_task.response_context
     finally:
         store.close()
 
@@ -22150,8 +22523,8 @@ def test_group_followup_after_unsynced_completed_dispatch_enters_summary(tmp_pat
         )
         summary_task = runtime.state.get_task(second_summary["task_id"])
         assert summary_task is not None
-        assert "验证脚本完成。" in summary_task.description
-        assert "- 补充：第二批汇总时请说明怎么验收" in summary_task.description
+        assert "验证脚本完成。" in summary_task.response_context
+        assert "- 补充：第二批汇总时请说明怎么验收" in summary_task.response_context
     finally:
         store.close()
 
@@ -22272,8 +22645,8 @@ def test_group_followup_dispatch_payload_is_ignored_and_stays_in_current_summary
         )
         summary_task = runtime.state.get_task(summary_message["task_id"])
         assert summary_task is not None
-        assert "- 补充：最终整理时请强调不要暴露 JSON" in summary_task.description
-        assert "补充不要暴露 JSON" not in summary_task.description
+        assert "- 补充：最终整理时请强调不要暴露 JSON" in summary_task.response_context
+        assert "补充不要暴露 JSON" not in summary_task.response_context
     finally:
         store.close()
 
@@ -22393,13 +22766,13 @@ def test_plain_group_followup_during_running_agent_enters_main_summary(tmp_path,
         )
         summary_task = runtime.state.get_task(summary_message["task_id"])
         assert summary_task is not None
-        assert "用户原始请求：请让群里合适的 Agent 做移动端验收方案" in summary_task.description
-        assert "用户后续补充/纠偏：" in summary_task.description
-        assert "- 补充：最终整理时请优先列出移动端验收风险" in summary_task.description
-        assert "另一个目标：再做桌面端验收方案" not in summary_task.description
-        assert "Design：已完成" in summary_task.description
-        assert "任务：整理移动端验收方案" in summary_task.description
-        assert "汇报：移动端验收方案已经完成。" in summary_task.description
+        assert "用户原始请求：请让群里合适的 Agent 做移动端验收方案" in summary_task.response_context
+        assert "用户后续补充/纠偏：" in summary_task.response_context
+        assert "- 补充：最终整理时请优先列出移动端验收风险" in summary_task.response_context
+        assert "另一个目标：再做桌面端验收方案" not in summary_task.response_context
+        assert "Design：已完成" in summary_task.response_context
+        assert "任务：整理移动端验收方案" in summary_task.response_context
+        assert "汇报：移动端验收方案已经完成。" in summary_task.response_context
     finally:
         store.close()
 
@@ -22616,7 +22989,7 @@ def test_agent_mention_supports_multiword_names(tmp_path, monkeypatch):
     monkeypatch.setattr(chat_api_mod, "get_agent_runtime_service", lambda: service)
     monkeypatch.setattr("apps.shell.agent_runtime.openai_compatible_chat_message", lambda *_args, **_kwargs: {"content": "Agent result"})
     try:
-        result = api.send_message("@Draft Agent 整理需求")
+        result = api.send_message("@Draft Agent Respond with exactly \"Agent result\".")
         assert result["ok"] is True
         assert result["agent_run_id"]
         # 等待异步执行完成
@@ -22655,7 +23028,7 @@ def test_agent_mention_can_appear_inline_without_catching_email(tmp_path, monkey
         assert runtime.state.get_task(normal["task_id"]) is not None
 
         runtime.start_new_session()
-        result = api.send_message("请 @Design 做一版视觉方向")
+        result = api.send_message("Respond with @Design exactly \"Design result\".")
 
         assert result["ok"] is True
         assert result["agent_run_id"]
@@ -22664,7 +23037,7 @@ def test_agent_mention_can_appear_inline_without_catching_email(tmp_path, monkey
         _wait_for_assistant_content(runtime, "Design result")
         run = service.get_run(result["agent_run_id"])
         assert run["runnable_id"] == agent["agent_id"]
-        assert run["user_goal"] == "请 做一版视觉方向"
+        assert run["user_goal"] == "Respond with exactly \"Design result\"."
     finally:
         service.close()
         store.close()
@@ -22815,17 +23188,17 @@ def test_summarize_delegated_run_creates_main_followup_task(tmp_path, monkeypatc
         assert summary_message.metadata["sender"]["kind"] == "main"
         assert summary_message.metadata["delegated_run_source_task_id"] == task_id
         assert summary_task is not None
-        assert "[Oha-Yachiyo 自动委派 Run 汇总]" in summary_task.description
-        assert "用户原始请求：帮我派一个 Agent 写脚本" in summary_task.description
-        assert "我会交给 Coding Agent 处理。" in summary_task.description
-        assert "run_oha_agent" not in summary_task.description
-        assert "Coding Agent：已完成" in summary_task.description
-        assert "任务：写一个 CLI 工具" in summary_task.description
-        assert "汇报：CLI 工具已经完成。" in summary_task.description
-        assert "执行线索：" in summary_task.description
-        assert "artifact.write" in summary_task.description
-        assert "scripts/tool.py" in summary_task.description
-        assert "产物：scripts/tool.py (code)" in summary_task.description
+        assert "[Oha-Yachiyo 自动委派 Run 汇总]" in summary_task.response_context
+        assert "用户原始请求：帮我派一个 Agent 写脚本" in summary_task.response_context
+        assert "我会交给 Coding Agent 处理。" in summary_task.response_context
+        assert "run_oha_agent" not in summary_task.response_context
+        assert "Coding Agent：已完成" in summary_task.response_context
+        assert "任务：写一个 CLI 工具" in summary_task.response_context
+        assert "汇报：CLI 工具已经完成。" in summary_task.response_context
+        assert "执行线索：" in summary_task.response_context
+        assert "artifact.write" in summary_task.response_context
+        assert "scripts/tool.py" in summary_task.response_context
+        assert "产物：scripts/tool.py (code)" in summary_task.response_context
     finally:
         activity_store.close()
         store.close()
@@ -22914,17 +23287,17 @@ def test_summarize_delegated_run_uses_native_run_projection(tmp_path, monkeypatc
         assert summary_message.metadata["run_group_id"] == run_group["run_group_id"]
         assert summary_message.metadata["delegated_run_source_task_id"] == task_id
         assert summary_task is not None
-        assert "[Oha-Yachiyo 自动委派 Run 汇总]" in summary_task.description
-        assert "用户原始请求：请自动委派一个 Agent 整理 evidence" in summary_task.description
-        assert "run_oha_agent" not in summary_task.description
-        assert "agent_native_coding：已完成" in summary_task.description
-        assert "任务：整理 NativeRunEngine evidence" in summary_task.description
-        assert "汇报：NativeRunEngine delegation finished." in summary_task.description
-        assert "执行线索：" in summary_task.description
-        assert "artifact.write" in summary_task.description
-        assert "reports/native-summary.md" in summary_task.description
-        assert "产物：reports/native-summary.md (report)" in summary_task.description
-        assert "agent-context.md" not in summary_task.description
+        assert "[Oha-Yachiyo 自动委派 Run 汇总]" in summary_task.response_context
+        assert "用户原始请求：请自动委派一个 Agent 整理 evidence" in summary_task.response_context
+        assert "run_oha_agent" not in summary_task.response_context
+        assert "agent_native_coding：已完成" in summary_task.response_context
+        assert "任务：整理 NativeRunEngine evidence" in summary_task.response_context
+        assert "汇报：NativeRunEngine delegation finished." in summary_task.response_context
+        assert "执行线索：" in summary_task.response_context
+        assert "artifact.write" in summary_task.response_context
+        assert "reports/native-summary.md" in summary_task.response_context
+        assert "产物：reports/native-summary.md (report)" in summary_task.response_context
+        assert "agent-context.md" not in summary_task.response_context
     finally:
         native_service.close()
         activity_store.close()
@@ -23097,8 +23470,8 @@ def test_summarize_delegated_run_uses_runtime_injected_activity_store(tmp_path, 
         assert result["run_group_id"] == run["run_group_id"]
         assert result["source_task_id"] == task_id
         assert summary_task is not None
-        assert "Injected Agent：已完成" in summary_task.description
-        assert "Injected activity store was used." in summary_task.description
+        assert "Injected Agent：已完成" in summary_task.response_context
+        assert "Injected activity store was used." in summary_task.response_context
     finally:
         activity_store.close()
         store.close()
@@ -25321,3 +25694,55 @@ def test_message_sorting_does_not_duplicate_untracked_assistant():
     sorted_msgs = ChatAPI._sort_messages_by_task([system, assistant])
 
     assert [msg.message_id for msg in sorted_msgs] == ["s1", "a1"]
+
+
+def _native_search_ui_result(
+    app_name: str, query: str, *, submitted: bool = False, focused: bool = True
+) -> dict:
+    """Use the native parser for a stable search field and independent results."""
+    from apps.shell.agent.tools import desktop
+
+    lines = [
+        f"META\t{app_name}\t100\tSearch\t200",
+        f"1\tAXTextField\t\tSearch\t\t{query}\ttrue\t0\t0\t100\t100",
+    ]
+    if focused:
+        lines.append(
+            "FOCUSED\t"
+            + json.dumps(
+                {
+                    "app_name": app_name,
+                    "pid": 100,
+                    "window_id": 200,
+                    "role": "AXTextField",
+                    "name": "Search",
+                    "identifier": "search",
+                    "value": query,
+                    "focused": True,
+                },
+                ensure_ascii=False,
+            )
+        )
+    if submitted:
+        lines.extend(
+            [
+                "1\tAXTable\t\tSearch Results\t\t\ttrue\t0\t0\t100\t100",
+                f"2\tAXRow\t\t{query}\t\t\ttrue\t0\t0\t100\t100",
+            ]
+        )
+    return {
+        "ok": True,
+        "action": "desktop.ui_elements",
+        "data": desktop._parse_ui_elements_output("\n".join(lines)),
+    }
+
+
+def _with_native_focused_ui_element(result: dict) -> dict:
+    data = result.get("data") or {}
+    focused = [element for element in data.get("elements", [])
+               if element.get("focused") is True
+               and element.get("role") in {"AXTextField", "AXTextArea", "AXComboBox"}]
+    if len(focused) == 1:
+        data["focused_element"] = {key: value for key, value in focused[0].items()
+            if key in {"role", "name", "identifier", "description", "value", "focused", "editable", "enabled"}}
+    return result

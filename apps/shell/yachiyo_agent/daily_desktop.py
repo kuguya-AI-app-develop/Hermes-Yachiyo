@@ -387,6 +387,13 @@ def _deferred_request_is_direct_verification(request: Mapping[str, Any]) -> bool
     if runtime_stage == "verify" or runtime_role == "verify_result":
         if bool(request.get("approval_required")):
             return False
+        if tool_name == "browser.current_page":
+            return bool(
+                request.get("source") == "runtime_verification"
+                and request.get("step_id") == "verify-web-search-navigation"
+                and request.get("input") == {}
+                and request.get("depends_on") == ["click-web-search-result"]
+            )
         if tool_name == "system.volume":
             payload = request.get("input") if isinstance(request.get("input"), Mapping) else {}
             return str(payload.get("action") or "").strip() == "status"
@@ -2654,6 +2661,10 @@ def _structured_recovery_request_runtime_binding(
             envelope = original_envelope
             matches = original_matches
         else:
+            if direct_tool in {"system.volume", "system.brightness"}:
+                # Concrete system controls must already belong to the user's
+                # compiled goal; recovery metadata cannot supply that authority.
+                return None
             recovery_goal = daily_desktop_recovery_prompt(metadata)
             if not recovery_goal:
                 return None

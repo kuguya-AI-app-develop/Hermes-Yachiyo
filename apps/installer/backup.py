@@ -11,7 +11,7 @@ import sqlite3
 import tempfile
 import uuid
 import zipfile
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -31,6 +31,14 @@ DEFAULT_RETENTION_COUNT = 10
 MAX_BACKUP_IMPORT_ENTRY_BYTES = 512 * 1024 * 1024
 MAX_BACKUP_IMPORT_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
 _ZIP_COPY_CHUNK_BYTES = 1024 * 1024
+_RUNTIME_SQLITE_DATABASES = frozenset({
+    "chat.db", "activity.db", "agent-runtime.db", "model-profiles.db",
+})
+_RUNTIME_SQLITE_SIDECARS = frozenset(
+    f"{name}{suffix}"
+    for name in _RUNTIME_SQLITE_DATABASES
+    for suffix in ("-wal", "-shm")
+)
 _BACKUP_ARCHIVE_NAME_RE = re.compile(
     rf"^{re.escape(BACKUP_FILE_PREFIX)}\d{{8}}-\d{{6}}(?:-(\d+))?\.zip$"
 )
@@ -232,13 +240,17 @@ def _unique_backup_archive(root: Path) -> Path:
 
 def _copy_sqlite_database(source: Path, target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        with sqlite3.connect(source.resolve().as_uri() + "?mode=ro", uri=True) as source_conn:
-            with sqlite3.connect(target) as target_conn:
-                source_conn.backup(target_conn)
-        shutil.copystat(source, target, follow_symlinks=False)
-    except sqlite3.Error:
+    with source.open("rb") as stream:
+        is_sqlite = stream.read(16) == b"SQLite format 3\x00"
+    if not is_sqlite:
+        # Preserve compatibility with legacy non-database files, but never
+        # silently raw-copy a real database after a failed consistent snapshot.
         shutil.copy2(source, target, follow_symlinks=False)
+        return
+    with closing(sqlite3.connect(source.resolve().as_uri() + "?mode=ro", uri=True)) as source_conn:
+        with closing(sqlite3.connect(target)) as target_conn:
+            source_conn.backup(target_conn)
+    shutil.copystat(source, target, follow_symlinks=False)
 
 
 def _copy_file(source: str, target: str) -> str:
@@ -247,7 +259,7 @@ def _copy_file(source: str, target: str) -> str:
     if source_path.is_symlink():
         logger.warning("跳过符号链接备份项: %s", source_path)
         return target
-    if source_path.name == "chat.db":
+    if source_path.name in _RUNTIME_SQLITE_DATABASES:
         _copy_sqlite_database(source_path, target_path)
     else:
         target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -256,7 +268,9 @@ def _copy_file(source: str, target: str) -> str:
 
 
 def _copy_ignore(_directory: str, names: list[str]) -> set[str]:
-    ignored = {name for name in names if name in {"chat.db-wal", "chat.db-shm"}}
+    # Each database is copied through SQLite's online backup API. Copying its
+    # live WAL afterwards could overwrite the snapshot with a different state.
+    ignored = set(names) & _RUNTIME_SQLITE_SIDECARS
     directory = Path(_directory)
     for name in names:
         if name in ignored:

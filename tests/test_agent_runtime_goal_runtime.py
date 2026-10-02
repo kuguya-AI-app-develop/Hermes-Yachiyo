@@ -1533,11 +1533,11 @@ def test_final_evaluator_preserves_authoritative_provider_blocker_message() -> N
 @pytest.mark.parametrize(
     ("observed_action", "expected_completed"),
     [
-        pytest.param("arrow_down", True, id="exact-key"),
+        pytest.param("arrow_down", False, id="exact-key-without-observation"),
         pytest.param("escape", False, id="wrong-key"),
     ],
 )
-def test_verified_safe_key_receipt_binds_exact_semantic_goal_target(
+def test_safe_key_receipt_cannot_complete_without_independent_observation(
     observed_action: str,
     expected_completed: bool,
 ) -> None:

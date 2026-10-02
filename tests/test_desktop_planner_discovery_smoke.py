@@ -54,6 +54,12 @@ def test_desktop_planner_discovery_smoke_covers_discover_operate_verify():
         "selection_source": "desktop.list_apps",
         "query": "pdf",
     }
+    assert cases["capability_app_discovery_open"]["requests"][2]["input"] == {
+        "app_name": "<selected app from desktop.list_apps>",
+        "selection_source": "desktop.list_apps",
+        "query": "pdf",
+        "verification_goal": "app_running",
+    }
     assert [step["id"] for step in cases["capability_app_discovery_open"]["steps"]] == [
         "discover_apps-desktop-state",
         "open-selected-discovered-app",

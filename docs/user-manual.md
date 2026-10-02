@@ -201,6 +201,10 @@ GPT-SoVITS 音色包导入后，页面会填入权重、参考音频、语言、
 - terminal 超时会终止进程组。
 - stdout、stderr、artifact、日志、crash 和 UI 错误会清洗明显 secret。
 
+单次 Run 默认允许 50 次模型调用、100 次工具调用、50 次实际 terminal 执行，时长预算为 600 秒。审批等待和实际执行分别计数，同一对话的新 Run 使用新的预算。
+
+需要调整 terminal 预算时，在启动应用前设置 `OHA_YACHIYO_AGENT_MAX_TERMINAL_CALLS`，接受 0–1000；0 禁止 terminal 实际执行。工具循环上限默认 200，可用 `OHA_YACHIYO_AGENT_TOOL_ITERATION_LIMIT` 设置为 10–1000。非整数值使用默认值，超出范围的整数值按上下界限制。即使提高其中一项，其余模型、工具、时长、workspace 和审批限制仍生效。
+
 工具失败会进入 Run projection 和 RunEvent replay，但不会把明显 secret 写入用户可见输出。
 
 长期记忆使用确认后召回：Agent 工具提取的内容先成为不可召回候选，只有与原 Run、用户消息、内容哈希和作用域完全匹配的用户确认才会启用。手动创建的记忆视为用户明确操作。删除与停用会立即阻止 Agent、Chat 和 Workflow 召回。当前“删除”是保留审计事件的软删除；不会重写所有历史聊天、RunEvent 或备份中的原始文本。如需介质级彻底擦除，还需按数据保留策略删除相关聊天/运行记录与备份。

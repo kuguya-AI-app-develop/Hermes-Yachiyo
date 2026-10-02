@@ -186,12 +186,14 @@ export const RUNTIME_TOOL_RECOVERY_TASK_METADATA_KEYS = [
 export function runtimeToolRecoveryActionPrompt(action: RuntimeToolRecoveryAction): string {
   const tool = String(action.tool || '').trim();
   const input = objectValue(action.input);
+  // The selected inputs own the executable request. A saved label can be
+  // incomplete or stale after the user edits a recovery parameter.
+  const fallbackPrompt = runtimeToolRecoveryExecutableLabel(tool, input);
+  if (fallbackPrompt) return fallbackPrompt;
   const prompt = String(action.prompt || '').trim();
   if (isExecutableRecoveryPrompt(prompt)) return prompt;
   const label = String(action.label || '').trim();
   if (isExecutableRecoveryPrompt(label)) return label;
-  const fallbackPrompt = runtimeToolRecoveryExecutableLabel(tool, input);
-  if (fallbackPrompt) return fallbackPrompt;
   return prompt || label || tool;
 }
 
@@ -587,27 +589,35 @@ function runtimeToolRecoveryExecutableLabel(tool: string, input: Record<string, 
   if (foregroundPrompt) return foregroundPrompt;
   if (tool === 'browser.open_url' && url) return `打开 ${url}`;
   if (tool === 'browser.open_url_and_extract_text' && url) return `打开并读取 ${url}`;
-  if (tool === 'browser.open_url_and_screenshot' && url) return `打开并截取 ${url}`;
+  if (tool === 'browser.open_url_and_screenshot' && url) return `打开 ${url} 并截图`;
   if (tool === 'browser.screenshot') return '截取当前网页';
   if (tool === 'system.settings_open' && target) return `打开${target}`;
   if (tool === 'desktop.open_path' && path) return `打开 ${path}`;
   if (tool === 'desktop.open_path_with_app' && appName && path) return `用${appName}打开 ${path}`;
-  if (tool === 'media.apple_music_play' && query) return `播放${query}`;
+  if (tool === 'media.apple_music_play' && query) return `在 Apple Music 中播放 ${query}`;
+  if (tool === 'media.apple_music_status') return '查看Apple Music播放状态';
   if (tool === 'media.apple_music_open_and_play') return '打开Apple Music并播放';
   if (tool === 'media.apple_music_control') return appleMusicControlRetryPrompt(String(input.action || '').trim());
-  if (tool === 'media.music_app_open_and_play' && appName) return `打开${appName}并播放`;
+  if (tool === 'media.music_app_open_and_play' && appName) return musicAppOpenAndPlayPrompt(appName);
   if (tool === 'system.volume') return systemVolumeRetryPrompt(String(input.action || '').trim(), input);
   if (tool === 'system.brightness') return systemBrightnessRetryPrompt(String(input.action || '').trim());
   if (tool === 'clipboard.read') return '读取剪贴板';
-  if (tool === 'clipboard.write' && typeof input.text === 'string') return `复制${input.text}到剪贴板`;
+  if (tool === 'clipboard.write' && typeof input.text === 'string') return `把 ${input.text} 复制到剪贴板`;
   if (tool === 'screen.capture') return '截图当前屏幕';
   if (tool === 'desktop.permissions') return '检查桌面权限';
   if (tool === 'desktop.inspect_app') return appName ? `检查${appName}界面` : '检查应用界面';
   if (tool === 'desktop.active_window') return '查看当前窗口';
   if (tool === 'desktop.list_apps') return '发现已安装应用';
-  if (tool === 'desktop.running_apps') return '查看正在运行的应用';
+  if (tool === 'desktop.running_apps') return '列出当前运行的应用';
   if (tool === 'desktop.windows') return appName ? `查看${appName}窗口` : '查看桌面窗口';
-  if (tool === 'desktop.ui_elements') return '查看当前界面控件';
+  if (tool === 'desktop.ui_elements') {
+    const role = String(input.role_filter || '').trim().toLowerCase();
+    const labels: Record<string, string> = {
+      button: '按钮', text: '文本', menu: '菜单', checkbox: '复选框',
+    };
+    const label = labels[role];
+    return `查看当前界面${label || '控件'}`;
+  }
   if (tool === 'desktop.click_ui_element') return desktopUiClickPrompt(input);
   if (tool === 'desktop.type_into_ui_element') return desktopUiTypePrompt(input);
   if (tool === 'desktop.safe_shortcut') return desktopSafeShortcutPrompt(String(input.action || '').trim());
@@ -615,7 +625,7 @@ function runtimeToolRecoveryExecutableLabel(tool: string, input: Record<string, 
   if (tool === 'desktop.safe_scroll') return desktopSafeScrollPrompt(input);
   if (tool === 'desktop.safe_click') return desktopSafeClickPrompt(input);
   if (tool === 'desktop.safe_type_text') return desktopSafeTypeTextPrompt(input);
-  if (tool === 'browser.current_page') return '查看当前网页';
+  if (tool === 'browser.current_page') return '读取当前网页标题和地址';
   if (tool === 'browser.extract_text') return '读取当前网页正文';
   return '';
 }
@@ -693,7 +703,7 @@ function runtimeToolRecoveryRetryPrompt(tool: string, input: Record<string, unkn
   if (tool === 'app.status' && appName) return `检查${appName}是否打开`;
   if (tool === 'browser.open_url' && url) return `打开 ${url}`;
   if (tool === 'browser.open_url_and_extract_text' && url) return `打开并读取 ${url}`;
-  if (tool === 'browser.open_url_and_screenshot' && url) return `打开并截取 ${url}`;
+  if (tool === 'browser.open_url_and_screenshot' && url) return `打开 ${url} 并截图`;
   if (tool === 'browser.current_page') return '查看当前网页';
   if (tool === 'browser.extract_text') return '读取当前网页正文';
   if (tool === 'browser.screenshot') return '截取当前网页';
@@ -717,7 +727,7 @@ function runtimeToolRecoveryRetryPrompt(tool: string, input: Record<string, unkn
   if (tool === 'media.apple_music_play' && query) return `播放${query}`;
   if (tool === 'media.apple_music_open_and_play') return '打开Apple Music并播放';
   if (tool === 'media.apple_music_control') return appleMusicControlRetryPrompt(action);
-  if (tool === 'media.music_app_open_and_play' && appName) return `打开${appName}并播放`;
+  if (tool === 'media.music_app_open_and_play' && appName) return musicAppOpenAndPlayPrompt(appName);
   if (tool === 'system.settings_open') return target ? `打开${target}` : '打开系统设置';
   if (tool === 'system.volume') return systemVolumeRetryPrompt(action, input);
   if (tool === 'system.brightness') return systemBrightnessRetryPrompt(action);
@@ -725,12 +735,17 @@ function runtimeToolRecoveryRetryPrompt(tool: string, input: Record<string, unkn
   return '';
 }
 
+function musicAppOpenAndPlayPrompt(appName: string): string {
+  const displayName = appName.toLowerCase() === 'music' ? 'Apple Music' : appName;
+  return `打开${displayName}并播放`;
+}
+
 function appleMusicControlRetryPrompt(action: string): string {
-  if (action === 'play') return '播放音乐';
-  if (action === 'pause') return '暂停音乐';
-  if (action === 'next') return '下一首';
-  if (action === 'previous') return '上一首';
-  if (action === 'toggle') return '播放暂停';
+  if (action === 'play') return 'Apple Music 继续播放';
+  if (action === 'pause') return '暂停 Apple Music';
+  if (action === 'next') return 'Apple Music 下一首';
+  if (action === 'previous') return 'Apple Music 上一首';
+  if (action === 'toggle') return 'Apple Music 播放暂停';
   return '';
 }
 
@@ -851,8 +866,8 @@ function desktopUiClickPrompt(input: Record<string, unknown>): string {
 
 function desktopUiTypePrompt(input: Record<string, unknown>): string {
   const target = String(input.target || '').trim();
-  const text = typeof input.text === 'string' ? input.text.trim() : '';
-  if (target && text) return `在前台控件${target}输入文字`;
+  const text = typeof input.text === 'string' ? input.text : '';
+  if (target && text) return `在前台控件${JSON.stringify(target)}输入${JSON.stringify(text)}`;
   return target ? `在前台控件${target}输入文字` : '';
 }
 

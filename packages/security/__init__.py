@@ -6,6 +6,7 @@ dependency-free so every persistence boundary can use the same scrubber.
 
 from __future__ import annotations
 
+import ast
 import logging
 import os
 import re
@@ -19,13 +20,35 @@ _ORIGINAL_LOG_RECORD_FACTORY: Any = None
 _EXCEPTHOOK_INSTALLED = False
 _ORIGINAL_EXCEPTHOOK: Any = None
 
-_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
+_SECRET_FIELD = (
+    r"(?:[a-z0-9]+[_-])*(?:api[_-]?key|token|password|passwd|secret|authorization)"
+)
+# Provider errors and log messages often contain JSON, Python repr, or quoted
+# environment assignments. Keep their quotes/delimiters intact and consume the
+# entire escaped value, rather than leaking the tail after its first space.
+_QUOTED_SECRET_PATTERNS = tuple(
+    re.compile(
+        rf"(?i)(?P<prefix>\b{_SECRET_FIELD}\b[\"']?\s*[:=]\s*)"
+        rf"(?P<quote>{quote})(?P<secret>(?:\\.|[^{quote}\\])*)(?P=quote)"
+    )
+    for quote in ('"', "'")
+)
+_SOURCE_SECRET_LABEL_RE = re.compile(rf"(?i){_SECRET_FIELD}\s*[:=]\s*")
+_SOURCE_STRING_OPERAND_PATTERNS = {
+    quote: re.compile(rf"{quote}(?:\\.|[^{quote}\\\r\n])*{quote}")
+    for quote in ('"', "'")
+}
+_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = _QUOTED_SECRET_PATTERNS + (
     re.compile(
         r"(?i)\b(authorization)\b\s*[:=]\s*(?:bearer\s+)?([^\s,;\"']{6,})"
     ),
     re.compile(
         r"(?i)\b(api[_-]?key|token|password|passwd|secret)\b"
         r"\s*[:=]\s*([^\s,;\"']{6,})"
+    ),
+    re.compile(
+        r"(?i)\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:API_KEY|TOKEN|SECRET|PASSWORD|PASSWD))"
+        r"\s*=\s*([^\s,;\"']{6,})"
     ),
     re.compile(r"(?i)\b(bearer)\s+([A-Za-z0-9._\-]{8,})\b"),
     re.compile(r"\b(sk-[A-Za-z0-9._\-]{8,})\b"),
@@ -35,7 +58,9 @@ _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
 _SENSITIVE_ENV_KEY_RE = re.compile(
     r"(?i)(^SSH_AUTH_SOCK$|^GITHUB_TOKEN$|^(AWS|GOOGLE|AZURE)_|(_API_KEY|_TOKEN|_SECRET|_PASSWORD)$)"
 )
-_SENSITIVE_KEY_RE = re.compile(r"(?i)(api[_-]?key|token|password|passwd|secret|authorization|bearer)")
+_SENSITIVE_KEY_RE = re.compile(
+    r"(?i)(api[_-]?key|token|password|passwd|secret|authorization|bearer)"
+)
 _SAFE_TOKEN_COUNT_KEYS = {
     "prompt_tokens",
     "completion_tokens",
@@ -101,7 +126,11 @@ def contains_sensitive_text(value: Any, *, hide_tool_calls: bool = True) -> bool
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     if hide_tool_calls and "<tool_call" in text.lower():
         return True
-    return any(_sensitive_match_is_unredacted(match) for pattern in _SECRET_PATTERNS for match in pattern.finditer(text))
+    return any(
+        _sensitive_match_is_unredacted(match)
+        for pattern in _SECRET_PATTERNS
+        for match in pattern.finditer(text)
+    )
 
 
 def sanitize_sensitive_value(
@@ -277,13 +306,67 @@ def install_secret_excepthook(*, stream: Any | None = None, force: bool = False)
     _EXCEPTHOOK_INSTALLED = True
 
 
+def _is_source_secret_label_concatenation(match: re.Match[str]) -> bool:
+    """Recognize a closing label quote followed by a source string addition.
+
+    In ``"API_KEY=" + "part"``, the assignment regex mistakes the label's
+    closing quote for a value's opening quote and captures `` + ``. Require
+    two complete string literals and a pure key label before preserving it;
+    an actual assignment such as ``API_KEY=" + "`` still gets redacted.
+    """
+
+    if match.group("secret").strip() != "+":
+        return False
+    prefix = match.group("prefix")
+    if not _SOURCE_SECRET_LABEL_RE.fullmatch(prefix):
+        return False
+    quote = match.group("quote")
+    label_start = match.start("prefix") - 1
+    if label_start < 0 or match.string[label_start] != quote:
+        return False
+    if label_start > 0 and match.string[label_start - 1] == "\\":
+        return False
+    operand_start = match.end() - 1
+    if operand_start - label_start > 256:
+        return False
+    operand = _SOURCE_STRING_OPERAND_PATTERNS[quote].match(
+        match.string[operand_start : operand_start + 4096]
+    )
+    if operand is None:
+        return False
+    expression = match.string[label_start : operand_start + operand.end()]
+    try:
+        node = ast.parse(expression, mode="eval").body
+    except (SyntaxError, ValueError, RecursionError):
+        return False
+    return (
+        isinstance(node, ast.BinOp)
+        and isinstance(node.op, ast.Add)
+        and isinstance(node.left, ast.Constant)
+        and node.left.value == prefix
+        and isinstance(node.right, ast.Constant)
+        and isinstance(node.right.value, str)
+    )
+
+
 def _secret_replacement(match: re.Match[str]) -> str:
+    if "secret" in match.re.groupindex:
+        if not match.group("secret") or _is_source_secret_label_concatenation(match):
+            return match.group(0)
+        return f'{match.group("prefix")}{match.group("quote")}{REDACTED}{match.group("quote")}'
     if match.lastindex and match.lastindex > 1:
         return f"{match.group(1)}={REDACTED}"
     return REDACTED
 
 
 def _sensitive_match_is_unredacted(match: re.Match[str]) -> bool:
+    if "secret" in match.re.groupindex:
+        secret = match.group("secret")
+        return (
+            bool(secret)
+            and secret != REDACTED
+            and not _is_source_secret_label_concatenation(match)
+        )
     if match.lastindex and match.lastindex > 1:
         return not str(match.group(2) or "").strip().startswith(REDACTED)
     return str(match.group(0) or "").strip() != REDACTED

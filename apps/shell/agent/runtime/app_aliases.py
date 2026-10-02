@@ -148,6 +148,7 @@ APP_ALIASES: dict[str, str] = {
     "notion": "Notion",
     "obsidian": "Obsidian",
     "chatgpt": "ChatGPT",
+    "chatgpt客户端": "ChatGPT",
     "claude": "Claude",
     "vscode": "Visual Studio Code",
     "vsc": "Visual Studio Code",

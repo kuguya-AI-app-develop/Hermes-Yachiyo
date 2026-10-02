@@ -16,10 +16,13 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote_plus
 
-from apps.shell.agent.runtime.dispatch_semantics import is_semantic_safe_shortcut
 from apps.shell.agent.runtime.action_targets import (
     canonical_action_name,
     canonical_action_target,
+)
+from apps.shell.agent.runtime.dispatch_semantics import (
+    is_semantic_safe_key,
+    is_semantic_safe_shortcut,
 )
 from apps.shell.agent.runtime.verification_receipts import (
     EXACT_FILE_CONTENT_PRESENT_PREDICATE,
@@ -512,9 +515,52 @@ class TaskIntentRouter:
         text: str,
         metadata: Mapping[str, Any],
     ) -> TaskIntentSnapshot:
+        readonly_discovery = _pure_desktop_discovery_question(text)
         app_control_text = _authorized_app_control_text(
             _speech_act_strip_unauthorized_contextual_tails(text)
         )
+        named_media = media_playback_hint(app_control_text)
+        web_search = _web_search_hint(app_control_text, "")
+        if (
+            web_search.get("followup_action") == "click_search_result"
+            and _desktop_operation_hint(app_control_text) == "open"
+            and _text_has_authorized_family_action(text, re.compile(r"搜索|检索|\b(?:search|find)\b", re.I))
+            and _text_has_authorized_family_action(text, re.compile(
+                r"(?:打开|点击|点一下|点按|进入|访问|选择|选中)\s*"
+                r"(?:第?一个|第一条|首个|第1个|第1条|1)\s*(?:搜索结果|结果|链接|条目)"
+                r"|\b(?:open|click|visit|select|choose)\s+(?:the\s+)?"
+                r"(?:first|1st)\s+(?:search\s+)?(?:result|link|item)\b", re.I,
+            ))
+        ):
+            # The browser plan already opens the requested browser search
+            # and selects its first result; an app-open rival adds no action.
+            return _empty_intent("desktop_operation", text)
+        if (
+            named_media.get("action") == "play"
+            and named_media.get("app_name")
+            and named_media.get("query")
+            and _desktop_operation_hint(app_control_text) == "play"
+        ):
+            return _empty_intent("desktop_operation", text)
+        if (
+            metadata.get("daily_desktop_intent")
+            and named_media.get("action") == "play"
+            and named_media.get("query")
+            and (
+                not _desktop_operation_hint(app_control_text)
+                or (
+                    _desktop_operation_hint(app_control_text) == "click"
+                    and re.fullmatch(r"(?:请|帮我)?(?:放|播)点[^，,。.!！?？；;]+", app_control_text)
+                    and _text_has_authorized_family_action(
+                        text, re.compile(r"(?:放|播)点"),
+                    )
+                )
+            )
+            and not _app_name_hint(app_control_text)
+        ):
+            # Daily metadata cannot invent a rival desktop action for a
+            # media query. The 点 in 放点/播点 is a quantity, not a click.
+            return _empty_intent("desktop_operation", text)
         if (
             _APP_CONTROL_AUTHORITY_ACTION_RE.search(text)
             and not _APP_CONTROL_AUTHORITY_ACTION_RE.search(app_control_text)
@@ -522,9 +568,14 @@ class TaskIntentRouter:
                 text,
                 _DESKTOP_NON_APP_AUTHORITY_ACTION_RE,
             )
+            and not readonly_discovery
         ):
             return _empty_intent("desktop_operation", text)
-        if not app_control_text and _negated_app_control_clause(text):
+        if (
+            not app_control_text
+            and _negated_app_control_clause(text)
+            and not readonly_discovery
+        ):
             return _empty_intent("desktop_operation", text)
         if _looks_like_non_action_desktop_validation_task(text):
             return _empty_intent("desktop_operation", text)
@@ -812,6 +863,20 @@ class TaskIntentRouter:
         if foreground_paste and safe_shortcut is None:
             safe_shortcut = {"action": "paste"}
         desktop_discovery = _desktop_discovery_hint(text)
+        if (
+            desktop_discovery is None
+            and "搜一下" in text
+            and not readonly_discovery
+            and not _text_has_authorized_family_action(
+                text, _APP_CONTROL_AUTHORITY_ACTION_RE
+            )
+            and not _text_has_authorized_family_action(
+                text, _DESKTOP_NON_APP_AUTHORITY_ACTION_RE
+            )
+        ):
+            # Quoted response data must not select the generic app-discovery
+            # fallback merely because it contains an observation verb.
+            return _empty_intent("desktop_operation", text)
         affirmative_operation = _desktop_operation_hint(app_control_text)
         if (
             desktop_discovery is None
@@ -1758,12 +1823,7 @@ class TaskIntentRouter:
                 "QQ 音乐",
             ],
         )
-        operand_hint = media_playback_hint(operand_text)
-        hint = (
-            operand_hint
-            if operand_hint.get("action") or operand_hint.get("query")
-            else media_playback_hint(text)
-        )
+        hint = media_playback_hint(operand_text)
         system_hint = system_control_hint(operand_text)
         if str(system_hint.get("kind") or "").strip() in {"volume", "brightness"}:
             return _empty_intent("media_playback", text)
@@ -1799,7 +1859,11 @@ class TaskIntentRouter:
         text: str,
         metadata: Mapping[str, Any],
     ) -> TaskIntentSnapshot:
-        if metadata.get("desktop_permission_recovery") and metadata.get("recovery_tool"):
+        if (
+            metadata.get("desktop_permission_recovery")
+            and metadata.get("recovery_tool")
+            and metadata.get("recovery_tool") not in {"system.volume", "system.brightness"}
+        ):
             return _empty_intent("system_control", text)
         if _finder_special_location_hint(text):
             return _empty_intent("system_control", text)
@@ -1809,7 +1873,10 @@ class TaskIntentRouter:
             return _empty_intent("system_control", text)
         if _desktop_ui_field_edit_hint(text):
             return _empty_intent("system_control", text)
-        hint = system_control_hint(affirmative_desktop_action_text(text, "focus"))
+        control_text = _speech_act_strip_unauthorized_contextual_tails(text)
+        hint = system_control_hint(affirmative_desktop_action_text(control_text, "focus"))
+        if str(hint.get("kind") or "") in {"volume", "brightness"}:
+            hint = _authorized_system_adjustment_hint(text)
         if not hint:
             return _empty_intent("system_control", text)
         hint_kind = str(hint.get("kind") or "").strip()
@@ -1847,6 +1914,12 @@ class TaskIntentRouter:
         metadata: Mapping[str, Any],
     ) -> TaskIntentSnapshot:
         clean_text = _clean_prompt(text)
+        from apps.shell.agent.runtime.current_page_link_copy import bounded_page_link_copy_goal
+
+        if bounded_page_link_copy_goal(clean_text):
+            # A whole-goal native URL copy is not a request to research the
+            # address or navigate to it.  Keep its verified clipboard plan.
+            return _empty_intent("web_research", text)
         note_capture = capture_note_hint(text)
         note_target = _dynamic_context_transfer_app_name_hint(text)
         if (
@@ -2278,8 +2351,21 @@ class TaskIntentRouter:
             )
         ):
             return _empty_intent("report_generation", text)
+        # A recipient name is an operand of a communication request. Words
+        # such as 文件 in 文件传输助手 must not manufacture a competing report
+        # action. Keep every action outside that parsed recipient intact.
+        report_action_text = text
+        direct_context = _direct_context_communication_hint(
+            text, _communication_context_source_hint(text)
+        )
+        recipient = str(direct_context.get("recipient") or "").strip()
+        recipient_index = text.rfind(recipient) if recipient else -1
+        if recipient_index >= 0:
+            report_action_text = (
+                text[:recipient_index] + text[recipient_index + len(recipient):]
+            )
         score = _score_terms(
-            text,
+            report_action_text,
             [
                 "report",
                 "summarize",
@@ -2369,7 +2455,7 @@ class TaskIntentRouter:
         if _looks_like_non_desktop_content_task(text):
             score = max(score, 0.24)
         if score <= 0 and context_source == "visible_text" and _contains_any(
-            text,
+            report_action_text,
             [
                 "整理",
                 "写",
@@ -2395,7 +2481,7 @@ class TaskIntentRouter:
         ):
             score = 0.18
         if score <= 0 and context_source in {"selection", "clipboard"} and _contains_any(
-            text,
+            report_action_text,
             [
                 "整理",
                 "写",
@@ -2679,6 +2765,7 @@ class TaskIntentRouter:
                 "开发",
             ],
         )
+        project_creation_requested = _authorized_project_creation_requested(text)
         workspace_context_request = _looks_like_workspace_code_context_request(text)
         workspace_file_edit_request = _looks_like_workspace_file_edit_request(text)
         workspace_ui_development_request = _looks_like_workspace_ui_development_request(text)
@@ -2687,12 +2774,13 @@ class TaskIntentRouter:
             or workspace_file_edit_request
             or workspace_ui_development_request
             or explicit_workspace_file_read_target
+            or project_creation_requested
         ):
             score = 0.22
         if score <= 0:
             return _empty_intent("code_task", text)
         diagnostic_command = _code_task_diagnostic_command_hint(text)
-        write_requested = _code_task_write_requested(text)
+        write_requested = _code_task_write_requested(text) or project_creation_requested
         explicit_workspace_file_read_only = bool(
             explicit_workspace_file_read_target
             and not diagnostic_command
@@ -2712,7 +2800,7 @@ class TaskIntentRouter:
             inputs["code_area_context_hints"] = code_area_hints
         if write_requested:
             inputs["code_change_hint"] = {
-                "mode": _code_task_change_mode(text),
+                "mode": "create" if project_creation_requested else _code_task_change_mode(text),
             }
         if explicit_workspace_file_read_only:
             inputs.update(
@@ -3305,13 +3393,15 @@ _MODEL_INTENT_AUTHORITY_ACTION_KEYS = frozenset(
 _MODEL_INTENT_ACTION_EVIDENCE_RE = re.compile(
     r"(?:"
     r"打开|启动|运行|执行|读取|提取|查看|看看|看一下|看下|"
-    r"搜索(?!框|栏|按钮)|查找|找到|找出|播放|创建|新建|写入?|"
-    r"记录|记下|做成|安排|加入|产出|协作|分工|评审|复盘|组建|"
+    r"搜索(?!框|栏|按钮)|查找|找到|找出|播放|(?:放|播)点|创建|新建|写入?|"
+    r"记录|记下|做成|做(?:一个|个)(?:小)?项目|安排|加入|产出|协作|分工|评审|复盘|组建|"
     r"开(?=会|(?:一个|个).{0,16}(?:小组|团队|群组))|保存|发送|发给|"
     r"发(?=消息|邮件|一封)|回复|"
     r"删除|移动|复制|粘贴|改成|改为|更新为|置为|重命名|整理|分析|"
     r"生成|输出|提醒(?!事项|应用|列表)|预约|"
-    r"关闭|调整|设置(?!按钮|项|页面|界面)|下载|上传|安装|卸载|导入|导出|"
+    r"关闭|调整|调到|调大|调小|调高|调低|调亮|调暗|提高|降低|"
+    r"取消静音|解除静音|静音|恢复声音|设置(?!按钮|项|页面|界面)|"
+    r"下载|上传|安装|卸载|导入|导出|"
     r"点击|点开|输入(?!框|栏|按钮)|填入|填到|填进|选择|切换|切到|切回|"
     r"聚焦|滚动|提交|确认|截(?:图|屏)|录屏|总结|汇总|翻译|"
     r"调研|调查|研究|比较|转换|列出|列举|检查|发现|探测|起草|草拟|"
@@ -3320,7 +3410,8 @@ _MODEL_INTENT_ACTION_EVIDENCE_RE = re.compile(
     r"output|remind|schedule|close|adjust|set|download|upload|click|type|select|"
     r"switch|focus|scroll|capture|summari[sz]e|translate|research|compare|"
     r"convert|list|check|inspect|discover|draft|record|export|import|install|"
-    r"uninstall|submit|confirm|arrange|add|produce|collaborate|review|form)\b"
+    r"uninstall|submit|confirm|arrange|add|produce|collaborate|review|form|"
+    r"mute|unmute|increase|decrease)\b"
     r")",
     flags=re.IGNORECASE,
 )
@@ -3329,6 +3420,17 @@ _MODEL_INTENT_ACTION_REQUEST_PREFIX_RE = re.compile(
     r"\b(?:can|could|would)\s+you|\bplease)\s*$",
     flags=re.IGNORECASE,
 )
+_PROJECT_CREATION_ACTION_RE = re.compile(r"做(?:一个|个)(?:小)?项目")
+
+
+def _authorized_project_creation_requested(text: str) -> bool:
+    normalized = _normalized_speech_act_text(text)
+    return any(
+        _speech_act_action_occurrence_is_authorized(normalized, match.start(), match.end())
+        for match in _PROJECT_CREATION_ACTION_RE.finditer(normalized)
+    )
+
+
 _SPEECH_ACT_NEGATION_RE = re.compile(
     r"(?:不要|不用|不必|(?<!能)不能|不该|(?<!可)不可|无需|"
     r"(?:^|[，,。！!？?；;\s]|请|千万|可)别|禁止|停止|切勿|请勿|勿)|"
@@ -3354,6 +3456,7 @@ _SPEECH_ACT_DIAGNOSTIC_PREFIX_RE = re.compile(
 )
 _SPEECH_ACT_REPORTED_PREFIX_RE = re.compile(
     r"(?:他说|她说|有人说|文档(?:说|写|写着)|命令是|例如|比如|示例|"
+    r"(?:解释|说明|翻译)(?:这(?:句话|个示例|段话)|以下(?:内容|示例|命令))\s*[:：]|"
     r"(?:消息|内容|正文)(?:(?:是|为)\s*|[:：]\s*)|"
     r"(?:发|发送)(?:消息|邮件).{0,48}(?:说|称|[:：])|翻译)|"
     r"\b(?:he|she|they|the\s+document)\s+(?:said|says)\b|"
@@ -3882,6 +3985,41 @@ def _speech_act_strip_unauthorized_contextual_tails(value: str) -> str:
     return sanitized.strip(" ，,;；")
 
 
+def _authorized_system_adjustment_hint(value: str) -> dict[str, Any]:
+    """Parse each concrete adjustment from its own authorized, unquoted clause."""
+
+    text = unicodedata.normalize("NFKC", str(value or ""))
+    characters = list(text)
+    for start, end in _speech_act_quote_spans(text):
+        characters[start:end] = " " * (end - start)
+    text = _speech_act_strip_unauthorized_contextual_tails("".join(characters))
+    for match in re.finditer(r"[^，,。；;！!？?\n]+", text):
+        clause = re.sub(r"^(?:并且|并|再)\s*", "", match.group(0).strip())
+        hint = system_control_hint(clause)
+        if str(hint.get("kind") or "") not in {"volume", "brightness"}:
+            continue
+        actions = tuple(_MODEL_INTENT_ACTION_EVIDENCE_RE.finditer(clause))
+        if actions and not any(
+            _speech_act_action_occurrence_is_authorized(
+                clause, action.start(), action.end(),
+            )
+            for action in actions
+        ):
+            continue
+        context = re.search(
+            r"音量|声音|亮度|静音|大声|大点声|大一点声|小声|小点声|小一点声|"
+            r"太暗|太亮|亮一点|暗一点|volume|sound|brightness|louder|quieter|"
+            r"brighter|dimmer|turn it up",
+            clause, re.I,
+        )
+        if not actions and context and not _speech_act_action_occurrence_is_authorized(
+            clause, context.start(), context.end(),
+        ):
+            continue
+        return hint
+    return {}
+
+
 def _authorized_terminal_command_hint(value: str) -> dict[str, str]:
     """Bind a parsed command to the exact user-authorized run occurrence."""
 
@@ -3976,6 +4114,15 @@ def _runtime_plan_is_cached_permission_diagnostic(plan: RuntimePlanSnapshot) -> 
         if str(getattr(step, "tool_name", "") or "").strip()
     }
     return tool_names == {"desktop.permissions"}
+
+
+def _runtime_plan_is_pure_desktop_discovery(plan: RuntimePlanSnapshot) -> bool:
+    steps = list(getattr(getattr(plan, "tool_plan", None), "steps", []) or [])
+    return bool(steps) and all(
+        getattr(step, "tool_name", "") in {"desktop.permissions", "desktop.running_apps"}
+        and not getattr(step, "input_preview", {})
+        for step in steps
+    )
 
 
 def _model_intent_action_evidence_is_grounded(
@@ -4172,6 +4319,7 @@ class RuntimePlanner:
             selected,
             allowed,
         )
+        selected = _intent_with_exact_quoted_body(selected, str(prompt or "").strip())
         plan = self.plan_intent(
             selected,
             allowed_tools=allowed_tools,
@@ -4184,6 +4332,10 @@ class RuntimePlanner:
             and not (
                 _speech_act_goal_requests_cached_diagnostic(prompt)
                 and _runtime_plan_is_cached_permission_diagnostic(plan)
+            )
+            and not (
+                _pure_desktop_discovery_question(prompt)
+                and _runtime_plan_is_pure_desktop_discovery(plan)
             )
         ):
             selected = _empty_intent("general", _clean_prompt(prompt))
@@ -4386,11 +4538,13 @@ class RuntimePlanner:
         selected = bind_candidate(authority_candidate)
         allowed = _allowed_tool_set(allowed_tools)
         selected = _normalize_intent_for_allowed_tools(selected, allowed)
+        selected = _intent_with_exact_quoted_body(selected, immutable_goal)
         plan = self.plan_intent(
             selected,
             allowed_tools=allowed_tools,
             metadata=metadata,
             original_goal=immutable_goal,
+            explicit_native_typed_binding=False,
         )
         if (
             _model_intent_goal_blocks_direct_execution(immutable_goal)
@@ -4477,9 +4631,12 @@ class RuntimePlanner:
         allowed_tools: Iterable[str] | None = None,
         metadata: Mapping[str, Any] | None = None,
         original_goal: str | None = None,
+        explicit_native_typed_binding: bool = True,
     ) -> RuntimePlanSnapshot:
         allowed = _allowed_tool_set(allowed_tools)
         intent = _normalize_intent_for_allowed_tools(intent, allowed)
+        if original_goal is not None:
+            intent = _intent_with_exact_quoted_body(intent, str(original_goal))
         readiness = _planner_readiness_context(metadata)
         prefer_background = _planner_prefers_background_desktop(metadata)
         tool_readiness = _planner_tool_readiness_context(
@@ -4503,6 +4660,7 @@ class RuntimePlanner:
                 intent,
                 allowed,
                 prefer_background_desktop=prefer_background,
+                explicit_native_typed_binding=explicit_native_typed_binding,
             )
             steps = _select_best_runtime_step_tools(
                 steps,
@@ -4657,14 +4815,23 @@ class RuntimePlanner:
         allowed: set[str] | None,
         *,
         prefer_background_desktop: bool = False,
+        explicit_native_typed_binding: bool = True,
     ) -> list[ToolPlanStepSnapshot]:
         if intent.kind == "data_analysis":
             return self._data_analysis_steps(intent, allowed)
         if intent.kind == "desktop_operation":
-            return self._desktop_operation_steps(
+            desktop_steps = self._desktop_operation_steps(
+                intent, allowed, prefer_background_desktop=prefer_background_desktop,
+            )
+            if explicit_native_typed_binding:
+                desktop_steps = _explicit_current_page_link_copy_steps(intent, desktop_steps, allowed)
+                desktop_steps = _explicit_foreground_search_steps(intent, desktop_steps, allowed)
+            return _explicit_clipboard_paste_readback_steps(
                 intent,
+                (_explicit_typed_target_steps(intent, desktop_steps, allowed)
+                 if explicit_native_typed_binding else desktop_steps),
                 allowed,
-                prefer_background_desktop=prefer_background_desktop,
+                explicit_native_binding=explicit_native_typed_binding,
             )
         if intent.kind == "media_playback":
             return self._media_playback_steps(intent, allowed)
@@ -4683,7 +4850,12 @@ class RuntimePlanner:
         if intent.kind == "schedule":
             return self._schedule_steps(intent, allowed)
         if intent.kind == "communication":
-            return self._communication_steps(intent, allowed)
+            return _explicit_clipboard_paste_readback_steps(
+                intent, self._communication_steps(
+                    intent, allowed, explicit_native_typed_binding=explicit_native_typed_binding,
+                ), allowed,
+                explicit_native_binding=explicit_native_typed_binding,
+            )
         if intent.kind == "information_capture":
             return self._information_capture_steps(intent, allowed)
         if intent.kind == "clipboard_operation":
@@ -5651,6 +5823,18 @@ class RuntimePlanner:
             ):
                 app_search = fallback_app_search
                 type_target = None
+        if app_search and _explicit_app_search_field_click_target(
+            intent.user_goal, app_search
+        ):
+            # The app-search compiler owns the explicit field click, literal
+            # query, and dedicated search submit as one ordered chain. Generic
+            # field typing must not consume that chain or replace its submit
+            # with an unrelated foreground confirmation.
+            type_target = None
+            click_target = None
+            safe_type_text = ""
+            foreground_submit_action = ""
+            submit_action = ""
         create_first_safe_shortcut = (
             safe_shortcut_action in {"new_note", "new_document", "new_task"}
             and bool(safe_type_text)
@@ -6094,6 +6278,21 @@ class RuntimePlanner:
             steps = []
             desktop_discovery_step_id = ""
         else:
+            if (
+                not app_name
+                and not desktop_discovery
+                and str(intent.inputs.get("operation_hint") or "") in {"", "open", "focus"}
+                and "搜一下" in intent.user_goal
+                and not any(
+                    _speech_act_action_occurrence_is_authorized(
+                        intent.user_goal, match.start(), match.end()
+                    )
+                    for match in re.finditer(r"搜一下", intent.user_goal)
+                )
+            ):
+                # An unresolved app action cannot borrow app enumeration from
+                # a quoted response payload. Leave the goal for planning.
+                return []
             discovery_tool = _first_allowed(
                 (
                     "desktop.list_apps",
@@ -7466,7 +7665,10 @@ class RuntimePlanner:
             verify_preview = _desktop_verify_input_preview(
                 verify_tool,
                 app_name=search_app_name or app_name,
-                operation_preview={"role_filter": "text", "limit": 80},
+                operation_preview={
+                    "role_filter": "" if search_terminal_step_id == "submit-app-search" else "text",
+                    "limit": 80,
+                },
             )
             if (
                 selected_app_payload
@@ -7760,6 +7962,12 @@ class RuntimePlanner:
         if followup_safe_shortcut:
             followup_safe_shortcuts.append(dict(followup_safe_shortcut))
         followup_safe_shortcuts.extend(followup_safe_shortcut_sequence)
+        copy_transaction = _select_all_copy_transaction_steps(
+            intent, steps, app_name=app_name,
+            followups=followup_safe_shortcuts, allowed=allowed,
+        )
+        if copy_transaction is not None:
+            return copy_transaction
         if followup_safe_shortcuts and any(step.step_id == "operate-foreground-ui" for step in steps):
             previous_step_id = "operate-foreground-ui"
             for index, followup in enumerate(followup_safe_shortcuts):
@@ -8752,6 +8960,19 @@ class RuntimePlanner:
                     main_step,
                     click_step,
                 ]
+                verify_tool = _first_allowed(("browser.current_page",), allowed)
+                if verify_tool:
+                    steps.append(_step(
+                        intent,
+                        "verify-web-search-navigation",
+                        "Verify selected search result navigation",
+                        "browser.research",
+                        verify_tool,
+                        input_preview={},
+                        depends_on=[click_step.step_id],
+                        action="verify_after_action",
+                        reason="Independently read the run-owned target after the approved search link click.",
+                    ))
                 artifact_depends_on = click_step.step_id
                 if str(intent.inputs.get("post_followup_action") or "").strip() == "extract_text":
                     post_step = _step(
@@ -10092,6 +10313,8 @@ class RuntimePlanner:
         self,
         intent: TaskIntentSnapshot,
         allowed: set[str] | None,
+        *,
+        explicit_native_typed_binding: bool = True,
     ) -> list[ToolPlanStepSnapshot]:
         context_source = str(intent.inputs.get("context_source") or "").strip()
         direct_message = intent.inputs.get("direct_message_hint")
@@ -10117,7 +10340,8 @@ class RuntimePlanner:
         if isinstance(direct_message, Mapping):
             direct_steps = _direct_communication_steps(intent, allowed, direct_message)
             if direct_steps:
-                return direct_steps
+                return (_explicit_typed_target_steps(intent, direct_steps, allowed)
+                        if explicit_native_typed_binding else direct_steps)
             if str(direct_message.get("body_source") or "").strip() == "app_search_result":
                 context_steps = _app_search_result_context_steps(
                     intent,
@@ -12110,6 +12334,122 @@ def _context_source_required_capability(source: str) -> str:
     return "artifact.write"
 
 
+
+def _exact_quoted_communication_body(original_goal: str, parsed_body: str) -> str:
+    """Retain literal bytes only when an already parsed explicit body agrees."""
+    for opening, closing in (("\"", "\""), ("'", "'"), ("“", "”"), ("‘", "’")):
+        pattern = (
+            r"(?:说|发送|输入|发|\b(?:say|send|type)\b)\s*" + re.escape(opening)
+            + r"(?P<body>.*?)" + re.escape(closing)
+            + r"\s*(?:并发送|然后发送|并发出)?[。.!！]?\s*$"
+        )
+        match = re.search(pattern, original_goal, re.IGNORECASE | re.DOTALL)
+        if match and " ".join(match["body"].split()) == " ".join(parsed_body.split()):
+            return match["body"]
+    return parsed_body
+
+
+def _intent_with_exact_quoted_body(
+    intent: TaskIntentSnapshot, original_goal: str,
+) -> TaskIntentSnapshot:
+    direct = intent.inputs.get("direct_message_hint")
+    if not isinstance(direct, Mapping) or not isinstance(direct.get("body"), str):
+        return intent
+    body = _exact_quoted_communication_body(original_goal, direct["body"])
+    if body == direct["body"]:
+        return intent
+    inputs = dict(intent.inputs)
+    inputs["direct_message_hint"] = {**direct, "body": body}
+    return intent.model_copy(update={"inputs": inputs, "user_goal": original_goal})
+
+
+def _explicit_typed_target_steps(
+    intent: TaskIntentSnapshot,
+    steps: list[ToolPlanStepSnapshot],
+    allowed: set[str] | None,
+) -> list[ToolPlanStepSnapshot]:
+    """Bind explicit typing to a real focused AX target before preparing send."""
+    observe_tool = _first_allowed(("desktop.ui_elements",), allowed)
+    plain_type = _first_allowed(("desktop.safe_type_text",), allowed)
+    app_focus = _first_allowed(("app.focus", "desktop.focus_app"), allowed)
+    if not observe_tool or not plain_type:
+        return steps
+    direct = intent.inputs.get("direct_message_hint")
+    if (
+        intent.inputs.get("context_source")
+        or (isinstance(direct, Mapping) and any(
+            direct.get(key) for key in ("body_source", "content_transform_hint")
+        ))
+        or any(step.input_bindings for step in steps)
+    ):
+        # Generated/materialized content keeps its existing Runtime binding
+        # and independent verification path. The opaque native authority is
+        # only for literal source text in the deterministic original plan.
+        return steps
+    default_app = str(direct.get("app_name") or "") if isinstance(direct, Mapping) else ""
+    eligible = intent.kind == "communication" or any(
+        step.tool_name == "desktop.submit_foreground" for step in steps
+    )
+    if not eligible:
+        return steps
+    result: list[ToolPlanStepSnapshot] = []
+    verifiers: dict[str, str] = {}
+    for original in steps:
+        dependencies = list(original.depends_on)
+        for dependency in original.depends_on:
+            if dependency in verifiers and verifiers[dependency] not in dependencies:
+                dependencies.append(verifiers[dependency])
+        step = original.model_copy(update={"depends_on": dependencies})
+        payload = dict(step.input_preview)
+        text = payload.get("text")
+        if isinstance(text, str) and step.step_id != "type-communication-recipient":
+            text = _exact_quoted_communication_body(intent.user_goal, text)
+            payload["text"] = text
+            step = step.model_copy(update={"input_preview": payload})
+        app_name = str(payload.get("app_name") or default_app)
+        if (
+            step.tool_name not in {"desktop.safe_type_text", "app.focus_and_safe_type_text"}
+            or not isinstance(text, str) or not text or not app_name
+            or step.approval_required
+        ):
+            result.append(step)
+            continue
+        if step.tool_name == "app.focus_and_safe_type_text":
+            if not app_focus:
+                result.append(step)
+                continue
+            focus_id = f"focus-typed-draft-app-{step.step_id}"
+            result.append(_step(
+                intent, focus_id, "Focus requested message app", "desktop.app_control", app_focus,
+                input_preview={key: value for key, value in payload.items() if key != "text"},
+                depends_on=dependencies, action="focus_app",
+                risk_level=step.risk_level, approval_required=step.approval_required,
+                reason="Retain the requested app focus before observing its typing target.",
+            ))
+            dependencies = [focus_id]
+            payload = {"text": text}
+            step = step.model_copy(update={
+                "tool_name": plain_type, "input_preview": payload,
+                "execution_mode": desktop_tool_execution_mode_for_input(plain_type, payload),
+            })
+        inspect_id = f"inspect-typed-draft-{step.step_id}"
+        verify_id = f"verify-typed-draft-{step.step_id}"
+        result.append(_step(
+            intent, inspect_id, "Inspect exact typing target",
+            "desktop.app_discovery", observe_tool,
+            input_preview={"app_name": app_name, "limit": 80}, depends_on=dependencies,
+            action="read_ui", reason="Observe the actual focused editable target before typing.",
+        ))
+        result.append(step.model_copy(update={"depends_on": [inspect_id]}))
+        result.append(_step(
+            intent, verify_id, "Verify exact typed draft", "desktop.app_discovery", observe_tool,
+            input_preview={"app_name": app_name, "limit": 80}, depends_on=[step.step_id],
+            action="verify", reason="Require the same AX target and exact original user text.",
+        ))
+        verifiers[step.step_id] = verify_id
+    return result
+
+
 def _direct_communication_steps(
     intent: TaskIntentSnapshot,
     allowed: set[str] | None,
@@ -12117,7 +12457,9 @@ def _direct_communication_steps(
 ) -> list[ToolPlanStepSnapshot]:
     app_name = str(direct_message.get("app_name") or "").strip()
     recipient = str(direct_message.get("recipient") or "").strip()
-    body = str(direct_message.get("body") or "").strip()
+    body = _exact_quoted_communication_body(
+        intent.user_goal, str(direct_message.get("body") or "").strip(),
+    )
     body_source = str(direct_message.get("body_source") or "").strip()
     transform = str(direct_message.get("content_transform_hint") or "").strip()
     channel = str(direct_message.get("channel") or "").strip()
@@ -12428,7 +12770,7 @@ def _direct_communication_steps(
             shortcut_tool,
             _communication_recipient_focus_action(channel),
         )
-        focus_capability = "communication.compose"
+        focus_capability = "desktop.ui_operation"
         focus_reason = "Open foreground recipient search with a generic safe shortcut."
     else:
         focus_tool = app_shortcut_tool
@@ -12436,7 +12778,7 @@ def _direct_communication_steps(
             "app_name": app_name,
             "action": _communication_recipient_focus_action(channel),
         }
-        focus_capability = "communication.compose"
+        focus_capability = "desktop.ui_operation"
         focus_reason = "Open the app's recipient search with a safe shortcut before drafting the message."
     steps.extend(
         [
@@ -12595,6 +12937,304 @@ def _direct_communication_steps(
             )
         )
     return steps
+
+
+def _explicit_foreground_search_steps(
+    intent: TaskIntentSnapshot,
+    steps: list[ToolPlanStepSnapshot],
+    allowed: set[str] | None,
+) -> list[ToolPlanStepSnapshot]:
+    """Observe the current search field before input and after submitting it."""
+    ids = [s.step_id for s in steps]
+    simple = ids == ["submit-foreground-search"]
+    typed = ids == [
+        "discover-desktop-state",
+        "focus-app-search-field",
+        "type-app-search-query",
+        "submit-app-search",
+    ]
+    goal = _normalized_speech_act_text(intent.user_goal)
+    generic = (
+        simple
+        or ids[:3] == ["discover-desktop-state", "focus-app-search-field", "type-app-search-query"]
+        or bool(re.match(r"(?:请|帮我)?(?:点击|点)搜索框(?:并)?输入", goal))
+    )
+    if not generic:
+        return steps
+    # These are current-window paths only; explicit app/search-result actions
+    # retain their own declared plans and approval gates.
+    if any(s.input_preview.get("app_name") for s in steps):
+        return steps
+    first_action = re.search(r"点击|点|输入|提交|搜索|查找|search|press|type|click", goal, re.I)
+    spans = _speech_act_quote_spans(goal)
+    actions = [
+        m
+        for m in re.finditer(r"点击|点|输入|提交|搜索|查找|search|press|type|click", goal, re.I)
+        if not any(a < m.end() and m.start() < b for a, b in spans)
+    ]
+    if (
+        not first_action
+        or not _speech_act_action_occurrence_is_authorized(
+            goal, first_action.start(), first_action.end()
+        )
+        or not all(
+            _speech_act_action_occurrence_is_authorized(goal, m.start(), m.end()) for m in actions
+        )
+        or any(
+            not _SPEECH_ACT_POLITE_CONDITIONAL_PREFIX_RE.match(m.group())
+            for m in _SPEECH_ACT_LOCAL_CONDITIONAL_RE.finditer(goal)
+            if not any(a < m.end() and m.start() < b for a, b in spans)
+        )
+        or re.match(
+            r"(?:请)?(?:说|解释|描述|讨论|翻译|回答|复述)|"
+            r"(?:please\s+)?(?:say|explain|describe|discuss|translate|repeat)\b",
+            goal,
+            re.I,
+        )
+    ):
+        return []
+    if not (simple or typed) or steps[-1].tool_name != "desktop.search_submit":
+        return steps
+    if not {"desktop.ui_elements", "desktop.search_submit"}.issubset(allowed or set()):
+        return steps
+    if typed and (
+        steps[1].tool_name != "desktop.safe_shortcut"
+        or steps[1].input_preview != {"action": "find"}
+        or steps[2].tool_name != "desktop.safe_type_text"
+        or not steps[2].input_preview.get("text")
+    ):
+        return steps
+    source = _step(
+        intent,
+        "read-foreground-search-field",
+        "Read current search field",
+        "desktop.app_discovery",
+        "desktop.ui_elements",
+        input_preview={"limit": 80},
+        depends_on=[] if simple else [steps[1].step_id],
+        action="read_ui",
+        reason="Bind the actual focused search field and window before input or Return.",
+    )
+    terminal = steps[-1]
+    if simple:
+        ordered = [source, terminal.model_copy(update={"depends_on": [source.step_id]})]
+    else:
+        preparation = steps[1].model_copy(
+            update={"step_id": "prepare-foreground-search-field", "depends_on": []}
+        )
+        source = source.model_copy(update={"depends_on": [preparation.step_id]})
+        typing = steps[2].model_copy(
+            update={"step_id": "prepare-foreground-search-query", "depends_on": [source.step_id]}
+        )
+        ready = _step(
+            intent,
+            "read-foreground-search-ready",
+            "Read entered search query",
+            "desktop.app_discovery",
+            "desktop.ui_elements",
+            input_preview={"limit": 80},
+            depends_on=[typing.step_id],
+            action="read_ui",
+            reason="Confirm the same focused field and literal query before Return.",
+        )
+        terminal = terminal.model_copy(update={"depends_on": [ready.step_id]})
+        ordered = [preparation, source, typing, ready, terminal]
+    return [
+        *ordered,
+        _step(
+            intent,
+            "verify-foreground-search-result",
+            "Verify current search results",
+            "desktop.app_discovery",
+            "desktop.ui_elements",
+            input_preview={"limit": 80},
+            depends_on=[terminal.step_id],
+            action="verify",
+            reason="Read the same search field and an exact query in its real result tree.",
+        ),
+    ]
+
+
+def _explicit_current_page_link_copy_steps(
+    intent: TaskIntentSnapshot,
+    steps: list[ToolPlanStepSnapshot],
+    allowed: set[str] | None,
+) -> list[ToolPlanStepSnapshot]:
+    """Verify one current-page link against its actual native address control."""
+    from apps.shell.agent.runtime.current_page_link_copy import bounded_page_link_copy_goal
+
+    if not bounded_page_link_copy_goal(intent.user_goal):
+        return steps
+    if not {"desktop.ui_elements", "clipboard.read", "desktop.safe_shortcut"}.issubset(
+        allowed or set()
+    ):
+        return steps
+    primary = [
+        s
+        for s in steps
+        if s.tool_name == "desktop.safe_shortcut"
+        and s.input_preview == {"action": "copy_current_page_link"}
+    ]
+    if len(primary) != 1:
+        return steps
+    original = primary[0]
+    prefix = [s for s in steps if s is not original and s.step_id != "verify-desktop-result"]
+    if any(s.tool_name != "desktop.running_apps" for s in prefix):
+        return steps
+    before = _step(
+        intent,
+        "read-page-link-pasteboard-before",
+        "Read clipboard revision",
+        "clipboard.read",
+        "clipboard.read",
+        input_preview={"max_chars": 2000},
+        depends_on=[],
+        action="read_clipboard",
+        reason="Record the stable pasteboard revision before copying the current page link.",
+    )
+    source = _step(
+        intent,
+        "read-page-link-source-ui",
+        "Read native address control",
+        "desktop.app_discovery",
+        "desktop.ui_elements",
+        input_preview={"limit": 80},
+        depends_on=[before.step_id],
+        action="read_ui",
+        reason="Bind one actual address control, its full HTTP(S) URL and window before copying.",
+    )
+    copy = original.model_copy(
+        update={"step_id": "copy-current-page-link", "depends_on": [source.step_id]}
+    )
+    target = _step(
+        intent,
+        "read-page-link-target-ui",
+        "Read copied address control",
+        "desktop.app_discovery",
+        "desktop.ui_elements",
+        input_preview={"limit": 80},
+        depends_on=[copy.step_id],
+        action="read_ui",
+        reason="Observe the same focused address control and unchanged URL after copying.",
+    )
+    verify = _step(
+        intent,
+        "verify-copied-page-link",
+        "Verify copied page link",
+        "clipboard.read",
+        "clipboard.read",
+        input_preview={"max_chars": 12000},
+        depends_on=[copy.step_id, target.step_id],
+        action="verify",
+        reason="Require exact native URL bytes and a newer stable pasteboard revision.",
+    )
+    return [before, source, copy, target, verify]
+
+def _explicit_clipboard_paste_readback_steps(
+    intent: TaskIntentSnapshot,
+    steps: list[ToolPlanStepSnapshot],
+    allowed: set[str] | None,
+    *,
+    explicit_native_binding: bool = True,
+) -> list[ToolPlanStepSnapshot]:
+    """Bind native clipboard drafts before their composer/send continuation."""
+    hint = intent.inputs.get("direct_message_hint")
+    body_source = str(hint.get("body_source") or "") if isinstance(hint, Mapping) else ""
+    native_clipboard_draft = intent.kind == "communication" and body_source == "clipboard"
+    foreground_submit = any(
+        step.tool_name == "desktop.submit_foreground"
+        and step.input_preview.get("action") in {"send", "submit"}
+        for step in steps
+    )
+    if not explicit_native_binding or not (native_clipboard_draft or foreground_submit):
+        # Ordinary paste retains its app-scoped dispatch and verification.
+        # Model-compiled plans retain their existing materialization path;
+        # they cannot acquire the original-goal native draft capability.
+        return steps
+    if body_source in {"selection", "current_page_link", "app_search_result"}:
+        return steps
+    if body_source != "clipboard" and not re.search(r"粘贴|\bpaste\b", intent.user_goal, re.I):
+        return steps
+    if body_source != "clipboard" and re.search(r"选中|当前网页|网页链接", intent.user_goal):
+        return steps
+    read_tool = _first_allowed(("clipboard.read",), allowed)
+    ui_tool = _first_allowed(("desktop.ui_elements",), allowed)
+    paste_steps = [
+        step for step in steps
+        if step.tool_name in {"desktop.safe_shortcut", "app.open_and_safe_shortcut", "app.focus_and_safe_shortcut"}
+        and step.input_preview.get("action") == "paste"
+    ]
+    if not read_tool or not ui_tool or len(paste_steps) != 1:
+        return steps
+    paste = paste_steps[0]
+    prefix = paste.step_id
+    source_id = f"read-clipboard-before-{prefix}"
+    target_id = f"inspect-clipboard-paste-target-{prefix}"
+    verifier_id = f"verify-clipboard-paste-{prefix}"
+    app_name = str(paste.input_preview.get("app_name") or "").strip()
+    if not app_name:
+        prior_apps = [
+            str(step.input_preview.get("app_name") or "").strip()
+            for step in steps[:steps.index(paste)]
+            if str(step.input_preview.get("app_name") or "").strip()
+        ]
+        app_name = prior_apps[-1] if prior_apps else ""
+    ui_input = {"role_filter": "", "limit": 80}
+    if app_name:
+        ui_input["app_name"] = app_name
+    transformed = []
+    for step in steps:
+        if step is paste:
+            source_dependencies = list(paste.depends_on)
+            if str(paste.tool_name or "").startswith("app."):
+                mode = "open" if str(paste.tool_name).startswith("app.open") else "focus"
+                app_tool = _first_allowed((f"app.{mode}",), allowed)
+                focus_tool = _first_allowed(("app.focus",), allowed)
+                plain_paste = _first_allowed(("desktop.safe_shortcut",), allowed)
+                if not app_tool or not focus_tool or not plain_paste:
+                    return steps
+                prepare_id = f"prepare-clipboard-paste-app-{prefix}"
+                transformed.append(_step(
+                    intent, prepare_id, "Prepare requested paste app", "desktop.app_control", app_tool,
+                    input_preview={"app_name": app_name}, depends_on=source_dependencies,
+                    action="open_app" if mode == "open" else "focus_app",
+                    reason="Prepare the requested app before binding its actual focused paste target.",
+                ))
+                source_dependencies = [prepare_id]
+                if mode == "open":
+                    focus_id = f"focus-clipboard-paste-app-{prefix}"
+                    transformed.append(_step(
+                        intent, focus_id, "Focus requested paste app", "desktop.app_control", focus_tool,
+                        input_preview={"app_name": app_name}, depends_on=source_dependencies,
+                        action="focus_app",
+                        reason="Focus the explicitly opened app before inspecting the paste target.",
+                    ))
+                    source_dependencies = [focus_id]
+                paste = paste.model_copy(update={"tool_name": plain_paste, "input_preview": {"action": "paste"}})
+            transformed.extend([
+                _step(intent, source_id, "Read requested clipboard paste source", "clipboard.read_write", read_tool,
+                      input_preview={"max_chars": 12000}, depends_on=source_dependencies, action="read",
+                      reason="Read exact clipboard bytes only for the user's explicit paste request."),
+                _step(intent, target_id, "Inspect focused editable paste target", "desktop.app_discovery", ui_tool,
+                      input_preview=dict(ui_input), depends_on=[source_id], action="read_ui",
+                      reason="Bind one actual focused editable control and window before pasting."),
+            ])
+            step = paste.model_copy(update={"depends_on": [source_id, target_id]})
+            transformed.append(step)
+            transformed.append(_step(
+                intent, verifier_id, "Verify exact clipboard bytes in the paste target", "desktop.visual_verification", ui_tool,
+                input_preview=dict(ui_input), depends_on=[paste.step_id], action="verify",
+                reason="Require the private clipboard source to appear exactly in the same focused editable control before continuing.",
+            ))
+            continue
+        # A send retains the exact source dependency used by private approval
+        # revalidation, and additionally depends on its independent readback.
+        if step.step_id == "verify-desktop-result" and step.depends_on == [paste.step_id]:
+            continue
+        if paste.step_id in step.depends_on:
+            step = step.model_copy(update={"depends_on": [*step.depends_on, verifier_id]})
+        transformed.append(step)
+    return transformed
 
 
 def _communication_safe_shortcut_operation_tool(allowed: set[str] | None) -> str | None:
@@ -13478,6 +14118,18 @@ def _append_selected_discovered_launch_verification_step(
         }
     else:
         input_preview = {}
+    if verify_tool == "desktop.verify" and not embedded_action and selected_tool in {
+        "app.open", "desktop.open_app",
+    }:
+        input_preview = {
+            "app_name": str(selected_payload.get("app_name") or ""),
+            "verification_goal": "app_running",
+            **{
+                key: selected_payload[key]
+                for key in ("selection_source", "app_selection_source", "query")
+                if key in selected_payload
+            },
+        }
     steps.append(
         _step(
             intent,
@@ -18915,6 +19567,11 @@ def _goal_contract_snapshot(
                 for step in terminal_effect_steps
                 if str(step.capability_id or "").strip()
             ),
+            *(
+                str(step.capability_id or "").strip()
+                for step in steps
+                if step.tool_name == "app.status" and step.action == "status_app"
+            ),
         ]
     )
     criteria: list[GoalCriterionSnapshot] = []
@@ -18965,6 +19622,26 @@ def _goal_contract_snapshot(
                 verifier_step_ids=[step.step_id for step in verifier_steps],
             )
         )
+    if intent.kind == "desktop_operation" and isinstance(
+        intent.inputs.get("screen_capture_hint"), Mapping,
+    ):
+        covered_sources = {
+            source_id for criterion in criteria for source_id in criterion.source_step_ids
+        }
+        requested_captures = [
+            step for step in steps
+            if step.tool_name == "screen.capture"
+            and step.step_id == "capture-screen"
+            and step.step_id not in covered_sources
+        ]
+        capture_criteria = _goal_explicit_subgoal_criteria(intent, requested_captures, steps)
+        for criterion, source in zip(capture_criteria, requested_captures, strict=True):
+            target = _task_step_target_metadata_for_intent(
+                intent, source, steps=steps,
+            ).get("action_target")
+            if isinstance(target, Mapping) and target:
+                criterion.expected["target"] = dict(target)
+        criteria.extend(capture_criteria)
     if not criteria:
         criteria.append(
             GoalCriterionSnapshot(
@@ -19489,6 +20166,8 @@ def _goal_step_is_effectful(step: ToolPlanStepSnapshot) -> bool:
     if stage not in {"operate", "produce"}:
         return False
     action = str(step.action or "").strip()
+    if step.tool_name == "app.status" and action == "status_app":
+        return False
     return action not in {
         "",
         "analyze",
@@ -20165,6 +20844,8 @@ def _task_replan_signals(steps: list[ToolPlanStepSnapshot]) -> list[ReplanSignal
 
 
 def _step_is_dispatch_receipt(step: ToolPlanStepSnapshot) -> bool:
+    if is_semantic_safe_key(step.tool_name):
+        return False
     return bool(
         str(step.action or "").strip()
         in {
@@ -20230,6 +20911,31 @@ def _task_step_target_metadata_for_intent(
             }
 
     metadata = _task_step_target_metadata(step)
+    if step.tool_name == "screen.capture" and step.step_id == "capture-screen":
+        by_id = {item.step_id: item for item in steps}
+        pending = list(step.depends_on)
+        visited: set[str] = set()
+        while pending:
+            dependency = pending.pop(0)
+            if dependency in visited:
+                continue
+            visited.add(dependency)
+            source = by_id.get(dependency)
+            if source is None:
+                continue
+            source_target = _task_step_target_metadata_for_intent(
+                intent, source,
+            ).get("action_target")
+            if isinstance(source_target, Mapping) and source_target.get("kind") == "desktop_app":
+                metadata["action_target"] = {
+                    **dict(metadata.get("action_target") or {}),
+                    **{key: source_target[key] for key in (
+                        "selection_source", "app_name", "query", "title_contains",
+                        "resolved_app_name", "resolved_app_path",
+                    ) if key in source_target},
+                }
+                break
+            pending.extend(source.depends_on)
     foreground_management = intent.inputs.get("foreground_management_hint")
     foreground_action = str(
         foreground_management.get("action")
@@ -20331,8 +21037,10 @@ def _task_step_action_target(
     action = str(step.action or "").strip()
     if action:
         target["action"] = action
-    if "shortcut" in str(step.tool_name or "") or "hotkey" in str(
-        step.tool_name or ""
+    if (
+        is_semantic_safe_key(step.tool_name)
+        or "shortcut" in str(step.tool_name or "")
+        or "hotkey" in str(step.tool_name or "")
     ):
         shortcut_action = str(input_preview.get("action") or "").strip().lower()
         if shortcut_action:
@@ -20353,6 +21061,7 @@ def _task_step_action_target(
         "key",
         "modifiers",
         "direction",
+        "level",
         "x",
         "y",
         "limit",
@@ -20401,6 +21110,8 @@ def _task_step_target_kind(
     tool_name = str(step.tool_name or "").strip()
     action = str(step.action or "").strip()
     capability_id = str(step.capability_id or "").strip()
+    if is_semantic_safe_key(tool_name):
+        return "desktop_app" if input_preview.get("app_name") else "desktop_foreground"
     if tool_name.startswith(("app.", "desktop.")):
         if action in {
             "click",
@@ -20598,6 +21309,93 @@ _RUNTIME_DOV_TERMINAL_MEDIA_PREPARATION_STEPS = frozenset(
 )
 
 
+def _select_all_copy_transaction_steps(
+    intent: TaskIntentSnapshot,
+    steps: list[ToolPlanStepSnapshot],
+    *,
+    app_name: str,
+    followups: list[dict[str, Any]],
+    allowed: set[str] | None,
+) -> list[ToolPlanStepSnapshot] | None:
+    """Compile explicit select-all/copy as one source-bound clipboard effect."""
+    if not app_name or followups != [{"action": "copy"}]:
+        return None
+    if not {"clipboard.read", "desktop.ui_elements", "desktop.safe_shortcut"}.issubset(
+        allowed or set()
+    ):
+        return None
+    primary = next((s for s in steps if s.step_id == "operate-foreground-ui"), None)
+    if primary is None or primary.input_preview.get("action") != "select_all":
+        return None
+    if primary.tool_name not in {"app.open_and_safe_shortcut", "app.focus_and_safe_shortcut"}:
+        return None
+    prefix = [s for s in steps if s is not primary]
+    before = _step(
+        intent,
+        "read-copy-pasteboard-before",
+        "Read clipboard revision",
+        "clipboard.read",
+        "clipboard.read",
+        input_preview={"max_chars": 2000},
+        depends_on=list(primary.depends_on),
+        action="read_clipboard",
+        reason="Record the pasteboard revision before the explicitly requested copy transaction.",
+    )
+    select_all = primary.model_copy(
+        update={
+            "step_id": "prepare-select-all-for-copy",
+            "depends_on": [before.step_id],
+            "action": "prepare_select_all_for_copy",
+            "reason": "Select the full editable source as preparation for the terminal copy; dispatch alone is not completion.",
+        }
+    )
+    observe = _step(
+        intent,
+        "read-copy-source-ui",
+        "Read focused copy source",
+        "desktop.app_discovery",
+        "desktop.ui_elements",
+        input_preview={"app_name": app_name},
+        depends_on=[select_all.step_id],
+        action="read_ui",
+        reason="Bind exact focused editable text and its process/window identity before copying.",
+    )
+    copy = _step(
+        intent,
+        "copy-selected-full-text",
+        "Copy selected full text",
+        "desktop.ui_operation",
+        "desktop.safe_shortcut",
+        input_preview={"action": "copy"},
+        depends_on=[observe.step_id],
+        action="safe_shortcut",
+        reason="Perform the explicitly requested copy; exact AX and new pasteboard revision must verify the result.",
+    )
+    post_ui = _step(
+        intent,
+        "read-copy-target-ui",
+        "Read copied source window",
+        "desktop.app_discovery",
+        "desktop.ui_elements",
+        input_preview={"app_name": app_name},
+        depends_on=[copy.step_id],
+        action="read_ui",
+        reason="Confirm the focused editable source and its window did not change during copying.",
+    )
+    verify = _step(
+        intent,
+        "verify-copied-full-text",
+        "Verify copied full text",
+        "clipboard.read",
+        "clipboard.read",
+        input_preview={"max_chars": 12000},
+        depends_on=[copy.step_id, post_ui.step_id],
+        action="verify",
+        reason="Require a new stable pasteboard revision containing the exact same focused editable text.",
+    )
+    return [*prefix, before, select_all, observe, copy, post_ui, verify]
+
+
 def _runtime_dov_step_metadata(step: ToolPlanStepSnapshot) -> dict[str, Any]:
     if not _runtime_dov_step_applies(step):
         return {}
@@ -20627,8 +21425,19 @@ def _runtime_dov_step_requires_post_action_verification(
     # playback postcondition (player state / track / playback_ok).
     if str(step.step_id or "").strip() in _RUNTIME_DOV_TERMINAL_MEDIA_PREPARATION_STEPS:
         return False
+    if (step.step_id in {"prepare-foreground-search-field", "prepare-foreground-search-query"}
+        and step.action in {"shortcut", "type"}
+        and step.tool_name in {"desktop.safe_shortcut", "desktop.safe_type_text"}):
+        return False
     tool_name = str(step.tool_name or "").strip()
     action = str(step.action or "").strip()
+    if (
+        step.step_id == "prepare-select-all-for-copy"
+        and action == "prepare_select_all_for_copy"
+        and tool_name in {"app.open_and_safe_shortcut", "app.focus_and_safe_shortcut"}
+        and step.input_preview.get("action") == "select_all"
+    ):
+        return False
     if (
         action in {"dispatch_management", "dispatch_shortcut", "dispatch_submit"}
         or tool_name in _RUNTIME_DOV_MANAGEMENT_DISPATCH_RECEIPT_TOOLS
@@ -35450,8 +36259,41 @@ def _looks_like_browser_current_page_metadata(value: str, lowered: str) -> bool:
     )
 
 
+def _pure_desktop_discovery_question(text: str) -> bool:
+    """Recognize bounded observations before rejecting unauthorized mutations.
+
+    An open-app question can contain an action word without authorizing that
+    action. Compound instructions retain their normal planning and policy path.
+    """
+    value = _clean_prompt(text).rstrip("。！？!?.").strip()
+    app_label = r"(?:应用程序|应用|软件|程序|apps?|applications?)"
+    permission_question = (
+        rf"(?:为什么|为何|怎么)(?:我|你|现在)?(?:不能|无法|没法)"
+        rf"(?:(?:打开|启动|开启){app_label}|(?:读取|查看|控制)屏幕)"
+    )
+    running_question = (
+        rf"(?:(?:现在|当前)(?:开了|打开了?|开着|运行着?)(?:哪些|什么){app_label}|"
+        rf"(?:现在|当前)(?:有哪些|哪些|什么){app_label}(?:开着|打开|在运行|运行中)|"
+        rf"(?:列一下|列出|列|看看|查看|搜一下)(?:当前|现在)?"
+        rf"(?:打开|开着|运行|正在运行)(?:的)?{app_label})"
+    )
+    return bool(
+        re.fullmatch(
+            rf"(?:请|帮我|麻烦)?\s*(?:{permission_question}|{running_question})",
+            value,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
 def _desktop_discovery_hint(text: str) -> dict[str, Any] | None:
     value = _clean_prompt(text)
+    passive_search = list(re.finditer(r"搜一下", value))
+    if passive_search and not _pure_desktop_discovery_question(value) and not any(
+        _speech_act_action_occurrence_is_authorized(value, match.start(), match.end())
+        for match in passive_search
+    ):
+        return None
     lowered = value.lower()
     if _looks_like_desktop_permissions_request(value, lowered):
         return {"action": "diagnose_permissions"}

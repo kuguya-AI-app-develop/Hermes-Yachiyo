@@ -352,12 +352,28 @@ class ApprovalResumeCoordinator:
                 # fingerprint and the winning approval claim before any
                 # process-private authority is minted.
                 request._assert_active()
+
+                def observe_private_target() -> Any:
+                    from .prepared_submit_resume_observation import (
+                        observe_actual_prepared_submit_target,
+                    )
+
+                    return observe_actual_prepared_submit_target(
+                        context.broker,
+                        request=context.tool_request,
+                        run_id=context.run_id,
+                        allowed_tools=context.allowed_tools,
+                        budget=context.budget,
+                        assert_active=request._assert_active,
+                    )
+
                 prepared_submit_context = (
                     rehydrate_private_prepared_submit_context(
                         context.tool_request,
                         context.timeline,
                         run_id=context.run_id,
                         goal_contract=context.goal_contract,
+                        observe_private_target=observe_private_target,
                     )
                 )
                 if not prepared_submit_context:
@@ -2228,6 +2244,7 @@ def _approval_resume_remaining_requests_after_tool(
         allowed_tools=context.allowed_tools,
         remaining_requests=[],
         active_window_target=None,
+        timeline=context.timeline,
     )
     if existing:
         if not post_action_verification:
@@ -2735,8 +2752,17 @@ def _daily_desktop_exact_native_receipt_evidence(
         and str(verifier_event.get("actor") or "").strip() == "native_runtime"
         and str(verifier_event.get("execution_authority") or "").strip()
         == "runtime_tool_executor"
-        and str(verifier_event.get("execution_mode") or "").strip()
-        == "native_postcondition_receipt_projection"
+        and (
+            str(verifier_event.get("execution_mode") or "").strip()
+            == "native_postcondition_receipt_projection"
+            or (
+                source_tool == "browser.click"
+                and verifier_tool == "browser.current_page"
+                and str(verifier_event.get("execution_mode") or "").strip()
+                == "trusted_observation_receipt_projection"
+                and result.get("verification_predicate_kind") == "exact_search_link_navigation"
+            )
+        )
         and str(verifier_event.get("visibility") or "").strip() == "internal"
         and str(verifier_event.get("run_id") or "").strip() == context.run_id
         and str(verifier_event.get("plan_id") or "").strip() == source_plan_id
@@ -2829,8 +2855,25 @@ def _daily_desktop_exact_native_receipt_evidence(
         if isinstance(source_event.get("result"), Mapping)
         else {}
     )
-    source_providers = _daily_desktop_provider_identities(source_event, source_result)
-    verifier_providers = _daily_desktop_provider_identities(verifier_event, result)
+    if (
+        source_tool == "browser.click"
+        and verifier_tool == "browser.current_page"
+        and claimed_predicate == "exact_search_link_navigation"
+    ):
+        # CDP target isolation belongs to the local Broker. Compare actual
+        # executor identities rather than its browser_target route label.
+        from .tool_execution import _trusted_runtime_execution_provider_identity
+        source_provider = _trusted_runtime_execution_provider_identity(
+            source_event, source_result,
+        )
+        verifier_provider = _trusted_runtime_execution_provider_identity(verifier_event, result)
+        if not all(source_provider) or verifier_provider != source_provider:
+            return {}
+        source_providers = {source_provider}
+        verifier_providers = {verifier_provider}
+    else:
+        source_providers = _daily_desktop_provider_identities(source_event, source_result)
+        verifier_providers = _daily_desktop_provider_identities(verifier_event, result)
     if len(source_providers) != 1 or (
         verifier_providers and verifier_providers != source_providers
     ):

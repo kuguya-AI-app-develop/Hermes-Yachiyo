@@ -10,6 +10,11 @@ from typing import Any, Callable
 
 from .desktop_provider_session_events import desktop_provider_session_timeline_events
 from .errors import AgentRuntimeError
+from .supplied_images import (
+    SUPPLIED_IMAGE_EVENT,
+    persisted_supplied_image_binding,
+    supplied_image_binding_from_messages,
+)
 
 
 class MainChatRunLifecycle:
@@ -152,6 +157,50 @@ class MainChatRunLifecycle:
                     return self._validated_existing_run(existing, user_goal=user_goal), True
                 raise
             return run, False
+
+    def bind_supplied_images(
+        self, run_id: str, messages: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        scope = self._transaction_scope() if self._transaction_scope else nullcontext()
+        with scope:
+            run = self._get_run(run_id)
+            if run.get("kind") != "main_chat_run":
+                raise self._error_type("supplied_image_binding_requires_main_chat_run")
+            if run.get("status") != "running" or run.get("pending_approval"):
+                return run
+            goal = str(run.get("user_goal") or "")
+            binding = supplied_image_binding_from_messages(
+                run_id=run_id, original_goal=goal, messages=messages
+            )
+            if binding is None:
+                return run
+            timeline = [event for event in run.get("timeline") or [] if isinstance(event, dict)]
+            existing = persisted_supplied_image_binding(
+                run_id=run_id, original_goal=goal, timeline=timeline
+            )
+            if existing is not None:
+                if existing != binding:
+                    raise self._error_type("supplied_image_binding_conflict")
+                return run
+            updated = self._update_run(
+                run_id,
+                timeline=[*timeline, self._timeline(
+                    SUPPLIED_IMAGE_EVENT, "User image input bound", visibility="internal", **binding
+                )],
+                expected_status="running",
+                expected_updated_at=str(run.get("updated_at") or ""),
+                expected_pending_approval_absent=True,
+            )
+            if updated is None:
+                return self._get_run(run_id)
+            if self._append_run_event is None:
+                raise self._error_type("main_chat_run_event_appender_required")
+            _require_run_event(self._append_run_event(
+                run_id, SUPPLIED_IMAGE_EVENT, {**binding, "visibility": "internal"},
+                visibility="internal",
+                **_terminal_event_fence(updated, status="running"),
+            ))
+            return updated
 
     def _validated_existing_run(
         self,

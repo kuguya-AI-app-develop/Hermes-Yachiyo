@@ -4243,6 +4243,15 @@ def planner_desktop_observation_step_needs_model_followup(
     and an exact task verification target.
     """
 
+    if tool_name == "screen.capture":
+        from apps.shell.agent.runtime.model_intent_planning import (
+            capture_only_content_read_requires_model,
+        )
+        if capture_only_content_read_requires_model(
+            str(getattr(decision.selected_intent, "user_goal", "") or ""),
+            decision.plan.tool_plan.steps,
+        ):
+            return True
     if step_id == "read-desktop-content":
         return True
     if not _is_planned_desktop_observation_step(decision, step_id, tool_name):
@@ -4739,6 +4748,16 @@ def _desktop_observation_step_is_direct_readback(
 ) -> bool:
     if not isinstance(inputs, Mapping):
         return False
+    operation = str(inputs.get("operation_hint") or "").strip()
+    if operation in {"read_active_window", "list_windows", "list_running_apps"}:
+        # Enumerating window identities is a native readback. Words such as
+        # "what" and "which" alone do not require a model to interpret it.
+        return not bool(re.search(
+            r"(?:分析|总结|摘要|比较|对比|下一步|该点|应该|"
+            r"\b(?:analy[sz]e|summari[sz]e|compare|decide|should|next\s+step)\b)",
+            prompt,
+            flags=re.IGNORECASE,
+        ))
     if str(inputs.get("operation_hint") or "").strip() != "read_ui":
         return False
     if not isinstance(inputs.get("ui_inspection_hint"), Mapping):
@@ -4892,9 +4911,7 @@ def _canonicalize_app_payload(payload: dict[str, Any]) -> dict[str, Any]:
         return payload
     canonical = _canonical_app_name(app_name)
     canonical_payload = payload if canonical == app_name else {**payload, "app_name": canonical}
-    target = str(canonical_payload.get("target") or "").strip()
-    if canonical == "WeChat" and target in {"消息框", "聊天框"}:
-        return {**canonical_payload, "target": "消息"}
+    # Application aliases must not rewrite the planner-owned UI label.
     return canonical_payload
 
 
