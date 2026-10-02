@@ -4825,6 +4825,7 @@ class RuntimePlanner:
             )
             if explicit_native_typed_binding:
                 desktop_steps = _explicit_current_page_link_copy_steps(intent, desktop_steps, allowed)
+                desktop_steps = _explicit_foreground_search_steps(intent, desktop_steps, allowed)
             return _explicit_clipboard_paste_readback_steps(
                 intent,
                 (_explicit_typed_target_steps(intent, desktop_steps, allowed)
@@ -12936,6 +12937,122 @@ def _direct_communication_steps(
             )
         )
     return steps
+
+
+def _explicit_foreground_search_steps(
+    intent: TaskIntentSnapshot,
+    steps: list[ToolPlanStepSnapshot],
+    allowed: set[str] | None,
+) -> list[ToolPlanStepSnapshot]:
+    """Observe the current search field before input and after submitting it."""
+    ids = [s.step_id for s in steps]
+    simple = ids == ["submit-foreground-search"]
+    typed = ids == [
+        "discover-desktop-state",
+        "focus-app-search-field",
+        "type-app-search-query",
+        "submit-app-search",
+    ]
+    goal = _normalized_speech_act_text(intent.user_goal)
+    generic = (
+        simple
+        or ids[:3] == ["discover-desktop-state", "focus-app-search-field", "type-app-search-query"]
+        or bool(re.match(r"(?:请|帮我)?(?:点击|点)搜索框(?:并)?输入", goal))
+    )
+    if not generic:
+        return steps
+    # These are current-window paths only; explicit app/search-result actions
+    # retain their own declared plans and approval gates.
+    if any(s.input_preview.get("app_name") for s in steps):
+        return steps
+    first_action = re.search(r"点击|点|输入|提交|搜索|查找|search|press|type|click", goal, re.I)
+    spans = _speech_act_quote_spans(goal)
+    actions = [
+        m
+        for m in re.finditer(r"点击|点|输入|提交|搜索|查找|search|press|type|click", goal, re.I)
+        if not any(a < m.end() and m.start() < b for a, b in spans)
+    ]
+    if (
+        not first_action
+        or not _speech_act_action_occurrence_is_authorized(
+            goal, first_action.start(), first_action.end()
+        )
+        or not all(
+            _speech_act_action_occurrence_is_authorized(goal, m.start(), m.end()) for m in actions
+        )
+        or any(
+            not _SPEECH_ACT_POLITE_CONDITIONAL_PREFIX_RE.match(m.group())
+            for m in _SPEECH_ACT_LOCAL_CONDITIONAL_RE.finditer(goal)
+            if not any(a < m.end() and m.start() < b for a, b in spans)
+        )
+        or re.match(
+            r"(?:请)?(?:说|解释|描述|讨论|翻译|回答|复述)|"
+            r"(?:please\s+)?(?:say|explain|describe|discuss|translate|repeat)\b",
+            goal,
+            re.I,
+        )
+    ):
+        return []
+    if not (simple or typed) or steps[-1].tool_name != "desktop.search_submit":
+        return steps
+    if not {"desktop.ui_elements", "desktop.search_submit"}.issubset(allowed or set()):
+        return steps
+    if typed and (
+        steps[1].tool_name != "desktop.safe_shortcut"
+        or steps[1].input_preview != {"action": "find"}
+        or steps[2].tool_name != "desktop.safe_type_text"
+        or not steps[2].input_preview.get("text")
+    ):
+        return steps
+    source = _step(
+        intent,
+        "read-foreground-search-field",
+        "Read current search field",
+        "desktop.app_discovery",
+        "desktop.ui_elements",
+        input_preview={"limit": 80},
+        depends_on=[] if simple else [steps[1].step_id],
+        action="read_ui",
+        reason="Bind the actual focused search field and window before input or Return.",
+    )
+    terminal = steps[-1]
+    if simple:
+        ordered = [source, terminal.model_copy(update={"depends_on": [source.step_id]})]
+    else:
+        preparation = steps[1].model_copy(
+            update={"step_id": "prepare-foreground-search-field", "depends_on": []}
+        )
+        source = source.model_copy(update={"depends_on": [preparation.step_id]})
+        typing = steps[2].model_copy(
+            update={"step_id": "prepare-foreground-search-query", "depends_on": [source.step_id]}
+        )
+        ready = _step(
+            intent,
+            "read-foreground-search-ready",
+            "Read entered search query",
+            "desktop.app_discovery",
+            "desktop.ui_elements",
+            input_preview={"limit": 80},
+            depends_on=[typing.step_id],
+            action="read_ui",
+            reason="Confirm the same focused field and literal query before Return.",
+        )
+        terminal = terminal.model_copy(update={"depends_on": [ready.step_id]})
+        ordered = [preparation, source, typing, ready, terminal]
+    return [
+        *ordered,
+        _step(
+            intent,
+            "verify-foreground-search-result",
+            "Verify current search results",
+            "desktop.app_discovery",
+            "desktop.ui_elements",
+            input_preview={"limit": 80},
+            depends_on=[terminal.step_id],
+            action="verify",
+            reason="Read the same search field and an exact query in its real result tree.",
+        ),
+    ]
 
 
 def _explicit_current_page_link_copy_steps(
@@ -21307,6 +21424,10 @@ def _runtime_dov_step_requires_post_action_verification(
     # tool failures remain blocking, while the terminal media action owns the
     # playback postcondition (player state / track / playback_ok).
     if str(step.step_id or "").strip() in _RUNTIME_DOV_TERMINAL_MEDIA_PREPARATION_STEPS:
+        return False
+    if (step.step_id in {"prepare-foreground-search-field", "prepare-foreground-search-query"}
+        and step.action in {"shortcut", "type"}
+        and step.tool_name in {"desktop.safe_shortcut", "desktop.safe_type_text"}):
         return False
     tool_name = str(step.tool_name or "").strip()
     action = str(step.action or "").strip()

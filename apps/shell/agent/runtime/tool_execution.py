@@ -5832,6 +5832,18 @@ class RuntimeToolCallExecutor:
                 "run_id": trusted_run_id,
             }
         tool_name = self._normalize_tool_name(tool_request.get("tool"))
+        from .foreground_search_receipts import (
+            foreground_search_live_binding,
+            foreground_search_live_matches,
+            foreground_search_request_requires_binding,
+        )
+        search_bound_request = foreground_search_request_requires_binding(
+            tool_request, timeline, run_id=trusted_run_id,
+        )
+        private_search_target = (
+            foreground_search_live_binding(tool_request, timeline, run_id=trusted_run_id)
+            if search_bound_request else None
+        )
         if not (
             tool_name == "desktop.submit_foreground"
             and isinstance(private_prepared_submit_context, Mapping)
@@ -5893,6 +5905,14 @@ class RuntimeToolCallExecutor:
         )
         if callable(bind_owned_provider):
             tool_request = bind_owned_provider(tool_name, tool_request)
+        if search_bound_request:
+            search_route = desktop_execution_route_payload(tool_request)
+            if (
+                search_route.get("selected_provider_kind") != LOCAL_DESKTOP_PROVIDER_KIND
+                or search_route.get("selected_provider_id") != LOCAL_DESKTOP_PROVIDER_ID
+                or search_route.get("can_execute") is not True
+            ):
+                private_search_target = None
         verification_context = self._private_verification_context_for_request(
             tool_name,
             tool_request,
@@ -6077,7 +6097,24 @@ class RuntimeToolCallExecutor:
                 approved=approved,
             )
             if tool_result is None:
-                if private_prepared_submit_context is not None:
+                if search_bound_request:
+                    atomic_search = getattr(broker, "runtime_exact_search_input", None)
+                    if private_search_target is None or not callable(atomic_search):
+                        tool_result = {
+                            "ok": False, "action": tool_name, "status": "blocked",
+                            "reason": "foreground_search_atomic_binding_unavailable",
+                            "error": "foreground_search_atomic_binding_unavailable",
+                            "retryable": False,
+                        }
+                    else:
+                        tool_result = atomic_search(
+                            tool_name, str(payload.get("text") or ""),
+                            validate_pre=lambda snapshot: foreground_search_live_matches(
+                                snapshot, private_search_target,
+                            ),
+                        )
+                        local_broker_executed = True
+                elif private_prepared_submit_context is not None:
                     atomic_submit = getattr(
                         broker,
                         "runtime_exact_submit_foreground",
@@ -8920,6 +8957,14 @@ class RuntimeToolRequestRunner:
                 run_id=run_id,
                 tool_sequence=tool_sequence,
             )
+            from .foreground_search_receipts import foreground_search_dispatch_ready
+            if not foreground_search_dispatch_ready(tool_request, timeline, run_id=run_id):
+                raise AgentDirectOutcomeUnverified(
+                    "未能确认当前搜索框、窗口身份或查询内容；未执行输入或提交。",
+                    reason="foreground_search_source_unverified", tool_name=tool_name,
+                    input_preview=input_preview,
+                    tool_call_id=str(tool_request.get("tool_call_id") or ""),
+                )
             from .current_page_link_copy import (
                 PAGE_LINK_COPY_STEP,
                 page_link_copy_bound,
@@ -10636,6 +10681,15 @@ def _post_action_verification_request(
         if isinstance(tool_request.get("input"), Mapping)
         else {}
     )
+    if tool_name == "desktop.search_submit":
+        from .foreground_search_receipts import POST
+        terminal = [r for r in remaining_requests if _runtime_request_step_id(r) == POST]
+        if len(terminal) == 1 and source_step_id in {"submit-app-search", "submit-foreground-search"}:
+            terminal[0].update({
+                "source_tool": tool_name, "source_step_id": source_step_id,
+                "source_request_id": source_request_id, "source_tool_call_id": source_tool_call_id,
+            })
+            return {}
     from .current_page_link_copy import (
         PAGE_LINK_COPY_STEP,
         PAGE_LINK_PREDICATE,
@@ -11445,6 +11499,12 @@ def _trusted_postcondition_observation_receipt_for_verifier(
                     event,
                     verifier_request,
                     verifier_result,
+                )
+            if not observed:
+                from .foreground_search_receipts import trusted_foreground_search_receipt
+                observed = trusted_foreground_search_receipt(
+                    action_tool, event, verifier_request, verifier_result, timeline,
+                    run_id=clean_run_id,
                 )
             if not observed:
                 observed = _trusted_exact_typed_content_observation_receipt(

@@ -510,6 +510,8 @@ def _full_plan_tool_requests_from_decision(
                 request["continue_to_model"] = True
         if desktop_observation_followup is True:
             request["continue_to_model"] = True
+        if step_id == "verify-foreground-search-result":
+            request["continue_to_model"] = False
         if step_id.startswith("verify-clipboard-paste-"):
             # Exact private clipboard readback is evaluated by Runtime, before
             # exposing any subsequent send approval or asking for a model.

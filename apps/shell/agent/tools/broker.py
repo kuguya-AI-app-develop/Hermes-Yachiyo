@@ -2068,6 +2068,32 @@ class ToolBroker:
             desktop.desktop_search_submit,
         )
 
+    def runtime_exact_search_input(
+        self, tool_name: str, text: str, *, validate_pre: Any
+    ) -> dict[str, Any]:
+        """Recheck the native search target and input under one foreground lock."""
+        if tool_name not in {"desktop.safe_type_text", "desktop.search_submit"}:
+            raise ValueError("unsupported exact search input")
+
+        def input_under_lock() -> dict[str, Any]:
+            if not validate_pre(desktop.ui_elements(limit=80)):
+                return {
+                    "ok": False,
+                    "action": tool_name,
+                    "status": "blocked",
+                    "reason": "foreground_search_live_target_changed",
+                    "error": "foreground_search_live_target_changed",
+                    "summary": "Search input was not dispatched because its window, field, or query changed.",
+                    "retryable": False,
+                }
+            return (
+                desktop.desktop_safe_type_text(text)
+                if tool_name == "desktop.safe_type_text"
+                else desktop.desktop_search_submit()
+            )
+
+        return self._with_foreground_lock(tool_name, input_under_lock)
+
     def desktop_hide_app(self) -> dict[str, Any]:
         return self._with_foreground_lock(
             "desktop.hide_app",
