@@ -12306,6 +12306,10 @@ def test_chat_bridge_quick_message_copies_current_page_link_without_model(
     runtime.agent_runtime_service = service
     hotkey_calls: list[tuple[str, list[str] | None]] = []
     shortcut_calls: list[str] = []
+    key_calls: list[tuple[str, list[str]]] = []
+    page_url = "https://example.test/path?x=1"
+    pasteboard = {"text": "old clipboard", "revision": 10, "focused": False}
+    native_shortcut = desktop_tools.desktop_safe_shortcut
     monkeypatch.setattr(
         "apps.shell.agent_runtime.get_model_profile_service",
         lambda: _FakeNoDefaultProfileService(),
@@ -12331,17 +12335,64 @@ def test_chat_bridge_quick_message_copies_current_page_link_without_model(
 
     def fake_safe_shortcut(action: str) -> dict:
         shortcut_calls.append(action)
-        return {
-            "ok": True,
-            "action": "desktop.safe_shortcut",
-            "summary": "Copied",
-            "data": {
-                "shortcut_action": action,
-            },
-        }
+        return native_shortcut(action)
+
+    def fake_key_dispatch(action: str, key: str, modifiers: list[str]) -> dict:
+        key_calls.append((key, list(modifiers)))
+        if key == "l":
+            pasteboard["focused"] = True
+        elif key == "c":
+            pasteboard["text"] = page_url
+            pasteboard["revision"] += 1
+        return {"ok": True, "action": action, "data": {
+            "key": key, "modifiers": list(modifiers),
+        }}
+
+    def fake_clipboard_read(max_chars=2000) -> dict:
+        text = pasteboard["text"]
+        return {"ok": True, "action": "clipboard.read", "data": {
+            "text": text, "text_length": len(text), "max_chars": max_chars,
+            "truncated": False, "pasteboard_revision_stable": True,
+            "pasteboard_revision": pasteboard["revision"],
+        }}
+
+    def fake_address_observation(**kwargs) -> dict:
+        native = (
+            "META\tGoogle Chrome\t100\tFixture Page\t200\n"
+            "1\tAXTextField\t\tAddress and search bar\tURL bar\t"
+            + page_url + "\ttrue\t0\t0\t100\t100"
+        )
+        if pasteboard["focused"]:
+            focused = {"app_name": "Google Chrome", "pid": 100, "window_id": 200,
+                       "role": "AXTextField", "name": "Address and search bar",
+                       "description": "URL bar", "value": page_url, "focused": True}
+            native += "\nFOCUSED\t" + json.dumps(focused)
+        return {"ok": True, "action": "desktop.ui_elements",
+                "data": desktop_tools._parse_ui_elements_output(native)}
+
+    monkeypatch.setattr(desktop_tools, "_desktop_platform", lambda: "macos")
+    monkeypatch.setattr(desktop_tools, "_send_desktop_keystroke", fake_key_dispatch)
+    monkeypatch.setattr(desktop_tools, "clipboard_read", fake_clipboard_read)
+    monkeypatch.setattr(desktop_tools, "ui_elements", fake_address_observation)
+    monkeypatch.setattr(desktop_tools, "running_apps", lambda: {
+        "ok": True, "action": "desktop.running_apps", "data": {
+            "apps": [{"name": "Google Chrome", "pid": 100, "frontmost": True}],
+            "frontmost": "Google Chrome",
+        },
+    })
+    monkeypatch.setattr(desktop_tools, "active_window", lambda: {
+        "ok": True, "action": "desktop.active_window", "data": {
+            "app_name": "Google Chrome", "pid": 100, "window_id": 200, "title": "Fixture Page",
+        },
+    })
 
     monkeypatch.setattr("apps.shell.agent.tools.desktop.desktop_hotkey", fake_hotkey)
     monkeypatch.setattr("apps.shell.agent.tools.desktop.desktop_safe_shortcut", fake_safe_shortcut)
+    for module in ("legacy_tasks", "legacy_ports"):
+        monkeypatch.setattr(
+            f"apps.shell.yachiyo_agent.{module}.desktop_runtime_blocking_conditions_by_capability",
+            lambda: {},
+        )
     bridge = ChatBridge(runtime)
     try:
         result = bridge.send_quick_message(
@@ -12365,6 +12416,9 @@ def test_chat_bridge_quick_message_copies_current_page_link_without_model(
         assert result["ok"] is True
         assert hotkey_calls == []
         assert shortcut_calls == ["copy_current_page_link"]
+        assert key_calls == [("l", ["command"]), ("c", ["command"])]
+        assert pasteboard["text"] == page_url
+        assert pasteboard["revision"] == 11
         assert agent_task["status"] == "completed"
         assert agent_task["summary"] == "已发送“复制当前网页链接”快捷键。"
         assert agent_task["needs_user_action"] is False
