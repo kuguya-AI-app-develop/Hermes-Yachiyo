@@ -8259,6 +8259,10 @@ class ChatAPI:
                     return
                 if plan is None or not plan["binding"].get("summary_required"):
                     return
+            # A follow-up acknowledgement belongs to the original dispatch's
+            # final summary.  Its skipped-dispatch note is not a new batch.
+            if parent_metadata.get("group_followup_dispatch_ignored"):
+                return
             if parent_metadata.get("group_agent_summary_task_id"):
                 return
             children = self._delegated_group_agent_children(parent_task_id)
