@@ -506,6 +506,24 @@ def runtime_goal_assessment(
             continue
         event = _flatten_event(raw_event)
         event_type = str(event.get("event") or event.get("event_type") or "").strip()
+        if event_type == "agent.delegation.children.verified":
+            from .main_chat_delegation import completion_outcome, same_goal_evidence
+
+            inherited_evidence = same_goal_evidence(contract, event, timeline)
+            if inherited_evidence is not None:
+                payload = assessment.to_payload()
+                payload["evidence"].extend(inherited_evidence)
+                assessment = coordinator.restore_assessment(contract, payload)
+                continue
+            delegated = completion_outcome(contract, event, timeline)
+            if delegated is not None:
+                outcome, observed, plan_id = delegated
+                assessment = coordinator.record_tool_outcome(
+                    contract, assessment, outcome, run_id=contract.run_id,
+                    source_tool_call_id=f"delegation:{observed['delegation_binding_id']}",
+                    source_step_id="group-multi_agent", plan_id=plan_id, observed=observed,
+                )
+            continue
         if event_type == "agent.goal.subgoal.opened":
             subgoal = _mapping_from_json(event.get("subgoal_json"))
             if subgoal is None:

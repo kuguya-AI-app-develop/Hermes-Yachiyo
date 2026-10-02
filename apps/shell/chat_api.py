@@ -6379,6 +6379,11 @@ class ChatAPI:
         for msg in self._session.get_all_messages():
             if msg.role != MessageRole.ASSISTANT or not msg.task_id:
                 continue
+            native_metadata = msg.metadata if isinstance(msg.metadata, dict) else {}
+            if native_metadata.get("group_dispatch_handled") and notify_group_summary:
+                parent_task = self._state.get_task(msg.task_id)
+                if parent_task is not None and parent_task.status == TaskStatus.COMPLETED:
+                    self._maybe_create_group_agent_summary_task(msg.task_id)
             if msg.status != MessageStatus.COMPLETED:
                 continue
             metadata = msg.metadata if isinstance(msg.metadata, dict) else {}

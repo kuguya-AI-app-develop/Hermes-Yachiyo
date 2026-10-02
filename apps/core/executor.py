@@ -1263,6 +1263,7 @@ class NativeAgentExecutor(ExecutionStrategy):
         self._workspace_policy_getter = workspace_policy_getter
         self._activity_store_getter = activity_store_getter
         self._main_chat_run_snapshots: dict[str, dict[str, Any]] = {}
+        self._task_runner: Any = None
 
     @property
     def capabilities(self) -> dict[str, bool]:
@@ -1275,6 +1276,9 @@ class NativeAgentExecutor(ExecutionStrategy):
 
     def set_chat_session(self, chat_session: Optional["ChatSession"]) -> None:
         self._chat_session = chat_session
+
+    def set_task_runner(self, runner: Any) -> None:
+        self._task_runner = runner
 
     def is_available(self) -> bool:
         return True
@@ -1290,6 +1294,8 @@ class NativeAgentExecutor(ExecutionStrategy):
         service = self._runtime_service()
         chat_session = self._chat_session_for_task(task)
         run_id = ""
+        delegated_child_ids: list[str] = []
+        parent_policy = self._main_chat_runtime_policy_kwargs()
         try:
             continuation = _clarification_continuation_for_task(
                 service,
@@ -1297,12 +1303,23 @@ class NativeAgentExecutor(ExecutionStrategy):
                 task,
             )
             user_goal = continuation.user_goal if continuation else task.description
+            group_context = self._native_group_context(chat_session, task)
+            if group_context is not None and continuation is None:
+                # Generated group instructions are model context, never a
+                # replacement for the actual linked user message.
+                from apps.shell.chat_api import ChatAPI
+
+                user_goal = ChatAPI._main_model_goal_text(group_context["source_text"])
             run_metadata: dict[str, Any] = {
                 "source_message_id": _source_message_id_for_task(
                     chat_session,
                     task.task_id,
                 )
             }
+            if task.response_context is not None:
+                from apps.shell.agent.runtime.main_chat_delegation import _digest
+
+                run_metadata["response_context_digest"] = _digest(task.response_context)
             runtime_execution_metadata: dict[str, Any] | None = None
             if continuation is not None:
                 run_metadata.update(continuation.metadata)
@@ -1360,6 +1377,55 @@ class NativeAgentExecutor(ExecutionStrategy):
                         f"{self._task_prompt(task)}\n\n[图片识别结果]\n{vision_result}"
                     )
             group_coordinator = _is_oha_yachiyo_group_coordinator_task(task.description)
+            prepare_delegation = getattr(service, "prepare_main_chat_delegation", None)
+            delegation_plan = None
+            if callable(prepare_delegation) and not image_paths and task.response_context is None:
+                delegation_plan = await asyncio.to_thread(
+                    prepare_delegation, run_id,
+                    selected_ids=set(group_context["selected_ids"]) if group_context else set(),
+                    group_scope=group_context is not None, **parent_policy,
+                )
+            if delegation_plan is not None:
+                proposal_output = await asyncio.to_thread(service.call_main_chat_model, run_id, messages)
+                if group_context is not None:
+                    from apps.shell.chat_api import ChatAPI
+
+                    proposals = [directive.as_request() for directive in ChatAPI._parse_group_dispatch_directives(proposal_output)]
+                else:
+                    directive = _parse_oha_delegation_directive(proposal_output)
+                    proposals = [directive.as_request()] if directive else []
+                for target in delegation_plan["binding"]["targets"]:
+                    self._record_activity(task, f"正在委派给 {target['name']}", target["goal"], "running")
+                upstream = task.description if group_context else ""
+                if group_context:
+                    upstream += "\n\n[Oha-Yachiyo 群组执行约定]\n请按当前岗位职责处理已绑定子目标。"
+                children = await asyncio.to_thread(
+                    service.start_main_chat_delegation, run_id, proposals,
+                    task_id=task.task_id, group=group_context is not None, upstream=upstream,
+                )
+                delegated_child_ids = [str(child["run_id"]) for child in children]
+                if group_context:
+                    self._project_native_group_dispatch(chat_session, task, delegation_plan, children, proposal_output)
+                settled = await self._wait_for_delegated_children(
+                    service, run_id, children, chat_session, task, delegation_plan,
+                    group=group_context is not None,
+                )
+                await asyncio.to_thread(service.verify_main_chat_delegation, run_id)
+                if group_context:
+                    from apps.shell.chat_api import ChatAPI
+
+                    visible_output = ChatAPI._strip_group_dispatch_payloads(proposal_output).strip()
+                    if delegation_plan["binding"].get("summary_required"):
+                        await self._wait_for_group_summary(service, run_id, chat_session, task)
+                    await self._complete_main_chat_run_with_outcome(service, run_id, visible_output)
+                    return visible_output
+                delegated_text = "\n\n".join(_format_oha_delegation_result({
+                    **child, "runnable": target,
+                }) for child, target in zip(settled, delegation_plan["binding"]["targets"]))
+                messages.extend([
+                    {"role": "assistant", "content": proposal_output},
+                    {"role": "user", "content": _build_oha_delegation_followup(user_goal, proposal_output, delegated_text)},
+                ])
             delegation_count = 0
             while True:
                 output = await self._call_main_chat_model_loop(
@@ -1369,13 +1435,14 @@ class NativeAgentExecutor(ExecutionStrategy):
                     chat_session,
                     task,
                     runtime_execution_metadata=runtime_execution_metadata,
+                    final_response_only=delegation_plan is not None,
                 )
                 self._update_processing_message(chat_session, task.task_id, output)
                 if isinstance(output, _AwaitingUserReply):
                     return str(output)
                 delegation_directive = (
                     None
-                    if group_coordinator or task.response_context is not None
+                    if group_coordinator or task.response_context is not None or delegation_plan is not None
                     else _parse_oha_delegation_directive(output)
                 )
                 if delegation_directive is None:
@@ -1408,25 +1475,20 @@ class NativeAgentExecutor(ExecutionStrategy):
                     delegation_directive.goal,
                     "running",
                 )
-                try:
-                    delegated = await asyncio.to_thread(_run_oha_delegation, delegation_directive, service)
-                    delegated_text = _format_oha_delegation_result(delegated)
-                    self._record_activity(
-                        task,
-                        _oha_delegation_activity_title(target, delegated),
-                        delegated_text[:500],
-                        _oha_delegation_activity_status(delegated),
-                        metadata={
-                            "run_id": delegated.get("run_id", ""),
-                            "run_group_id": delegated.get("run_group_id", ""),
-                            "run_status": delegated.get("status", ""),
-                            "pending_approval": delegated.get("pending_approval", {}),
-                        },
-                    )
-                except Exception as exc:
-                    safe_error = redact_api_error_text(exc)
-                    delegated_text = f"OHA delegation failed: {safe_error}"
-                    self._record_activity(task, f"{target} 委派失败", safe_error, "failed")
+                delegation_plan = await asyncio.to_thread(
+                    service.prepare_main_chat_delegation_proposal, run_id,
+                    delegation_directive.as_request(), **parent_policy,
+                )
+                children = await asyncio.to_thread(
+                    service.start_main_chat_delegation, run_id, [delegation_directive.as_request()],
+                    task_id=task.task_id, group=False, upstream="",
+                )
+                delegated_child_ids.extend(str(child["run_id"]) for child in children)
+                settled = await self._wait_for_delegated_children(
+                    service, run_id, children, chat_session, task, delegation_plan, group=False,
+                )
+                await asyncio.to_thread(service.verify_main_chat_delegation, run_id)
+                delegated_text = _format_oha_delegation_result({**settled[0], "runnable": delegation_plan["binding"]["targets"][0]})
                 messages.append({"role": "assistant", "content": output})
                 messages.append(
                     {
@@ -1439,6 +1501,11 @@ class NativeAgentExecutor(ExecutionStrategy):
                     }
                 )
         except asyncio.CancelledError:
+            for child_id in delegated_child_ids:
+                try:
+                    await asyncio.to_thread(service.cancel_run, child_id)
+                except Exception:
+                    logger.debug("取消已绑定的委派子 Run 失败: %s", child_id, exc_info=True)
             if run_id:
                 try:
                     service.cancel_run(run_id)
@@ -1446,6 +1513,13 @@ class NativeAgentExecutor(ExecutionStrategy):
                     logger.debug("取消 Native Run 失败: %s", run_id, exc_info=True)
             raise
         except Exception as exc:
+            for child_id in delegated_child_ids:
+                try:
+                    child = await asyncio.to_thread(service.get_run, child_id)
+                    if child.get("status") not in {"completed", "failed", "cancelled"}:
+                        await asyncio.to_thread(service.cancel_run, child_id)
+                except Exception:
+                    logger.debug("收尾已绑定的委派子 Run 失败: %s", child_id, exc_info=True)
             skip_run_failure = False
             if isinstance(exc, NativeAgentError) and run_id:
                 try:
@@ -1482,6 +1556,143 @@ class NativeAgentExecutor(ExecutionStrategy):
         finally:
             if run_id:
                 self._main_chat_run_snapshots.pop(run_id, None)
+
+    @staticmethod
+    def _native_group_context(chat_session: Any, task: TaskInfo) -> dict[str, Any] | None:
+        if chat_session is None or getattr(chat_session, "_store", None) is None:
+            return None
+        record = chat_session._store.get_session(chat_session.session_id)
+        if record is None or getattr(record, "conversation_kind", "") != "group":
+            return None
+        source = next((message for message in chat_session.get_all_messages()
+                       if str(getattr(message, "task_id", "")) == task.task_id
+                       and str(getattr(message.role, "value", message.role)) == "user"), None)
+        if source is None:
+            return None
+        participants = json.loads(getattr(record, "participants_json", "[]"))
+        return {"source_text": source.content,
+                "selected_ids": [str(item["id"]) for item in participants
+                                 if isinstance(item, dict) and item.get("kind") == "agent" and item.get("id")]}
+
+    @staticmethod
+    def _project_native_group_dispatch(chat_session: Any, task: TaskInfo, plan: dict[str, Any], children: list[dict[str, Any]], output: str) -> None:
+        if chat_session is None:
+            return
+        from apps.core.chat_session import MessageStatus
+        from apps.shell.chat_api import ChatAPI
+
+        started = []
+        for index, (child, target) in enumerate(zip(children, plan["binding"]["targets"])):
+            identity = str(child.get("client_request_id") or "")
+            started.append({"dispatch_index": index, "runnable_id": target["runnable_id"],
+                            "child_identity": identity, "run_id": child["run_id"], "run_group_id": child["run_group_id"]})
+            chat_session.upsert_assistant_projection_message(identity, "", status=MessageStatus.PROCESSING,
+                metadata={"sender": {"kind": "agent", "id": target["runnable_id"], "name": target["name"], "nickname": target["alias"]},
+                          "runnable_kind": "agent", "runnable_id": target["runnable_id"],
+                          "run_id": child["run_id"], "run_group_id": child["run_group_id"], "run_status": child["status"],
+                          "conversation_kind": "group", "group_goal": target["goal"],
+                          "delegated_by_task_id": task.task_id, "delegated_goal": target["goal"]})
+        chat_session.upsert_assistant_message(task_id=task.task_id, content=ChatAPI._strip_group_dispatch_payloads(output).strip(), status=MessageStatus.PROCESSING,
+            metadata={"group_dispatch_handled": True, "group_dispatch_state": "handled",
+                      "group_dispatch_count": len(children), "group_dispatch_started": started,
+                      "group_dispatch_run_group_id": children[0]["run_group_id"]})
+
+    async def _wait_for_delegated_children(self, service: Any, parent_id: str, children: list[dict[str, Any]],
+                                         chat_session: Any, task: TaskInfo, plan: dict[str, Any], *, group: bool) -> list[dict[str, Any]]:
+        from apps.core.chat_session import MessageStatus
+
+        deadlines = {child["run_id"]: time.monotonic() + self._approval_wait_timeout_seconds() for child in children}
+        approval_ids: dict[str, str] = {}
+        remaining = set(deadlines)
+        settled: dict[str, dict[str, Any]] = {}
+        while remaining:
+            parent = await asyncio.to_thread(service.get_run, parent_id)
+            if parent.get("status") != "running":
+                for child_id in remaining:
+                    await asyncio.to_thread(service.cancel_run, child_id)
+                raise NativeAgentError("委派父任务已结束", reason="cancelled")
+            for child, target in zip(children, plan["binding"]["targets"]):
+                child_id = child["run_id"]
+                if child_id not in remaining:
+                    continue
+                current = await asyncio.to_thread(service.get_run, child_id)
+                status = str(current.get("status") or "")
+                pending_id = self._pending_approval_id(current)
+                if pending_id and approval_ids.get(child_id) != pending_id:
+                    approval_ids[child_id] = pending_id
+                    deadlines[child_id] = time.monotonic() + self._approval_wait_timeout_seconds()
+                    self._record_activity(task, f"{target['name']} 等待审批", self._approval_required_content(current), "running",
+                        metadata={"run_id": child_id, "run_group_id": current["run_group_id"], "run_status": status,
+                                  "pending_approval": current.get("pending_approval") or {}})
+                if group and chat_session is not None:
+                    projected = next((message for message in chat_session.get_all_messages()
+                                      if (message.metadata or {}).get("run_id") == child_id), None)
+                    if projected is not None:
+                        terminal = status in {"completed", "failed", "cancelled"}
+                        result = str(current.get("result") or "")
+                        content = f"{target['alias']}：{'已完成' if status == 'completed' else status}\n\n汇报：{result}" if terminal else ""
+                        chat_session.update_assistant_message(projected.message_id, content,
+                            status=MessageStatus.COMPLETED if status == "completed" else MessageStatus.FAILED if terminal else MessageStatus.PROCESSING,
+                            metadata={"run_status": status, "pending_approval": current.get("pending_approval") or {},
+                                      "agent_report": result if terminal else None, "agent_report_status": status if terminal else None})
+                if status in {"failed", "cancelled", "awaiting_user"}:
+                    for other_id in remaining - {child_id}:
+                        await asyncio.to_thread(service.cancel_run, other_id)
+                    raise NativeAgentError(str(current.get("result") or "委派子目标未完成"), reason="delegated_goal_unfulfilled")
+                if status == "completed":
+                    remaining.remove(child_id)
+                    settled[child_id] = current
+                    self._record_activity(task, f"{target['name']} 委派完成", str(current.get("result") or "")[:500], "completed",
+                        metadata={"run_id": child_id, "run_group_id": current["run_group_id"], "run_status": status})
+                elif time.monotonic() >= deadlines[child_id]:
+                    if status == "approval_required":
+                        await asyncio.to_thread(service.timeout_run_approval, child_id, reason="approval_wait_timeout",
+                                                expected_approval_id=approval_ids.get(child_id) or "")
+                    else:
+                        await asyncio.to_thread(service.cancel_run, child_id)
+                    raise NativeAgentError("委派子任务等待超时", reason="approval_timeout")
+            if remaining:
+                await asyncio.sleep(0.05)
+        return [settled[child["run_id"]] for child in children]
+
+    async def _wait_for_group_summary(self, service: Any, parent_id: str, session: Any, task: TaskInfo) -> None:
+        from apps.shell.chat_api import ChatAPI
+        from packages.protocol.enums import TaskStatus
+
+        runner = self._task_runner
+        if runner is None or session is None:
+            raise NativeAgentError("群组总结执行器不可用", reason="delegation_summary_unavailable")
+        api = ChatAPI(SimpleNamespace(state=runner._state, chat_session=session,
+                    store=getattr(session, "_store", None), agent_runtime_service=service))
+        api._maybe_create_group_agent_summary_task(task.task_id)
+        parent_message = session.get_assistant_message_for_task(task.task_id)
+        summary_id = str((parent_message.metadata or {}).get("group_agent_summary_task_id") or "") if parent_message else ""
+        summary = runner._state.get_task(summary_id)
+        if summary is None or summary.task_id == task.task_id or summary.response_context is None:
+            raise NativeAgentError("群组总结任务绑定失败", reason="delegation_summary_binding_conflict")
+        await asyncio.to_thread(service.bind_main_chat_delegation_summary, parent_id, summary)
+        runner._dispatch_pending()
+        deadline = time.monotonic() + self._approval_wait_timeout_seconds()
+        try:
+            while True:
+                parent = await asyncio.to_thread(service.get_run, parent_id)
+                current = runner._state.get_task(summary_id)
+                if parent.get("status") != "running":
+                    raise NativeAgentError("群组父任务已结束", reason="cancelled")
+                if current is None or current.status in {TaskStatus.FAILED, TaskStatus.CANCELLED}:
+                    raise NativeAgentError(str(current.error or "群组总结失败") if current else "群组总结不可恢复", reason="delegation_summary_unfulfilled")
+                if current.status == TaskStatus.COMPLETED:
+                    await asyncio.to_thread(service.verify_main_chat_delegation_summary, parent_id)
+                    return
+                if time.monotonic() >= deadline:
+                    raise NativeAgentError("群组总结等待超时", reason="approval_timeout")
+                await asyncio.sleep(0.05)
+        except BaseException:
+            runner.cancel_task(summary_id)
+            current = runner._state.get_task(summary_id)
+            if current and current.status in {TaskStatus.PENDING, TaskStatus.RUNNING}:
+                runner._state.cancel_task(summary_id)
+            raise
 
     def _messages_for_task(
         self,
@@ -1560,12 +1771,13 @@ class NativeAgentExecutor(ExecutionStrategy):
         task: TaskInfo,
         *,
         runtime_execution_metadata: dict[str, Any] | None = None,
+        final_response_only: bool = False,
     ) -> str:
         execute_loop = getattr(service, "execute_main_chat_model_loop", None)
         if not callable(execute_loop):
             return await asyncio.to_thread(service.call_main_chat_model, run_id, messages)
         kwargs = self._main_chat_runtime_policy_kwargs()
-        if task.response_context is not None:
+        if task.response_context is not None or final_response_only:
             # Internal summaries describe evidence that is already supplied.
             # Their context may contain the original effectful request, but
             # it cannot authorize a fresh tool call or delegation.

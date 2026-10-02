@@ -657,7 +657,7 @@ async def test_task_runner_main_chat_auto_delegation_uses_native_runtime(tmp_pat
     state = AppState()
     task = state.create_task(
         task_type=TaskType.GENERAL,
-        description="请让 Research Agent 回应 Native 委派验证，然后给我结论",
+        description="请让 Research Agent Respond with exactly 'Research Agent native delegation result'，然后给我结论",
         chat_session_id=session.session_id,
     )
     user_message_id = session.add_user_message(task.description)
@@ -668,7 +668,7 @@ async def test_task_runner_main_chat_auto_delegation_uses_native_runtime(tmp_pat
         model_calls.append(messages)
         last_content = str(messages[-1]["content"])
         if "# Agent\nName: Research Agent" in last_content:
-            assert "# User Goal\n请回应 Native 委派链路验证标记" in last_content
+            assert "# User Goal\nRespond with exactly 'Research Agent native delegation result'" in last_content
             return {"role": "assistant", "content": "Research Agent native delegation result"}
         if "[Oha-Yachiyo 自动委派 Run 汇总]" in last_content:
             assert "Research Agent：已完成" in last_content
@@ -683,7 +683,7 @@ async def test_task_runner_main_chat_auto_delegation_uses_native_runtime(tmp_pat
                 {
                     "action": "run_oha_agent",
                     "agent": "Research Agent",
-                    "goal": "请回应 Native 委派链路验证标记",
+                    "goal": "Respond with exactly 'Research Agent native delegation result'",
                 },
                 ensure_ascii=False,
             ),
@@ -834,18 +834,18 @@ async def test_task_runner_group_dispatch_summary_uses_native_runtime(tmp_path, 
             assert "汇报：Coding native dispatch result" in last_content
             return {"role": "assistant", "content": "群组总结：Coding 已完成 Native 群聊派发验证。"}
         if "# Agent\nName: Coding Agent" in last_content:
-            assert "# User Goal\n做真实 Native 群聊派发验证" in last_content
+            assert "# User Goal\nRespond with exactly 'Coding native dispatch result'" in last_content
             assert "[Oha-Yachiyo 群组执行约定]" in last_content
             assert "你在群内身份是：Coding" in last_content
             return {"role": "assistant", "content": "Coding native dispatch result"}
-        assert "请安排 Coding 做真实 Native 群聊派发验证" in last_content
+        assert "请安排 Coding Respond with exactly 'Coding native dispatch result'" in last_content
         assert "oha.group_dispatch" in str(messages[0]["content"])
         return {
             "role": "assistant",
             "content": (
                 "我会让 Coding 处理这件事。\n"
                 '{"tool":"oha.group_dispatch","input":{"tasks":[{"kind":"agent","target":"Coding",'
-                '"goal":"做真实 Native 群聊派发验证"}]}}'
+                '"goal":"Respond with exactly \'Coding native dispatch result\'"}]}}'
             ),
         }
 
@@ -882,7 +882,7 @@ async def test_task_runner_group_dispatch_summary_uses_native_runtime(tmp_path, 
         assert created["session_context"]["conversation_kind"] == "group"
         assert created["session_context"]["participants"][1]["id"] == coding["agent_id"]
 
-        sent = api.send_message("@主模型 请安排 Coding 做真实 Native 群聊派发验证")
+        sent = api.send_message("@主模型 请安排 Coding Respond with exactly 'Coding native dispatch result'")
         assert sent["ok"] is True
         await runner._execute_with_state(sent["task_id"])
 
@@ -910,7 +910,7 @@ async def test_task_runner_group_dispatch_summary_uses_native_runtime(tmp_path, 
         assert parent["metadata"]["group_dispatch_run_group_id"] == agent_message["metadata"]["run_group_id"]
         assert agent_message["metadata"]["runnable_id"] == coding["agent_id"]
         assert agent_message["metadata"]["delegated_by_task_id"] == sent["task_id"]
-        assert agent_message["metadata"]["delegated_goal"] == "做真实 Native 群聊派发验证"
+        assert agent_message["metadata"]["delegated_goal"] == "Respond with exactly 'Coding native dispatch result'"
 
         run_id = agent_message["metadata"]["run_id"]
         run = await _wait_for(

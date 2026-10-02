@@ -8,6 +8,7 @@ from typing import Any, Callable
 from apps.shell.agent.runtime.callbacks import supports_keyword
 from apps.shell.agent.runtime.errors import (
     AgentApprovalRequired,
+    AgentDelegationProposed,
     AgentDirectOutcomeUnverified,
     AgentRuntimeError,
 )
@@ -446,6 +447,16 @@ class MainChatModelLoopRunner:
                 **original_goal_kwargs,
             )
             model_execution_succeeded = True
+        except AgentDelegationProposed as exc:
+            projected, committed = self._cas_from_running(
+                run_id, status="running", result=exc.proposal,
+                timeline=timeline, artifacts=artifacts,
+            )
+            if committed:
+                self._append_run_event(run_id, "agent.delegation.proposed",
+                    {"proposal": exc.proposal, "source": "model_proposal"},
+                    visibility="internal", **_run_event_fence(projected, status="running"))
+            return projected
         except AgentApprovalRequired as exc:
             preserve_browser_target = True
             pending = self._main_chat_pending_approval(
