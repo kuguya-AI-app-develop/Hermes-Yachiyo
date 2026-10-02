@@ -1285,6 +1285,7 @@ class RuntimeCustomApiAgentLoop:
         run_id: str = "",
         timeline: list[dict[str, Any]],
         budget: Any,
+        force_planning: bool = False,
     ) -> DirectToolSelection | ModelIntentClarificationResolution | None:
         """Resolve only ambiguous first-turn intent; execution stays Runtime-owned.
 
@@ -1313,7 +1314,7 @@ class RuntimeCustomApiAgentLoop:
             deterministic_selection,
             immutable_goal,
         )
-        if clarification_authority is None and not needs_model_assistance:
+        if clarification_authority is None and not needs_model_assistance and not force_planning:
             return None
         if not _model_intent_plan_may_replace_execution_envelope(
             runtime_execution_envelope,

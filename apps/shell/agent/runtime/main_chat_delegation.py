@@ -78,6 +78,21 @@ def bound_plan(run: Mapping[str, Any]) -> dict[str, Any] | None:
             return None
     if not isinstance(binding, dict) or plan.get("source") != SOURCE:
         return None
+    targets = binding.get("targets")
+    if (
+        not isinstance(targets, list)
+        or not 1 <= len(targets) <= 3
+        or any(
+            not isinstance(target, Mapping)
+            or not isinstance(target.get("runnable_id"), str)
+            or not target["runnable_id"]
+            or not isinstance(target.get("goal"), str)
+            or not target["goal"]
+            for target in targets
+        )
+        or len({target["runnable_id"] for target in targets}) != len(targets)
+    ):
+        return None
     if binding.get("parent_run_id") != run.get("run_id") or binding.get("original_goal") != run.get(
         "user_goal"
     ):
@@ -159,64 +174,145 @@ def compile_plan(
     parent_runtime: Mapping[str, Any],
     selected_ids: set[str],
     group_scope: bool = False,
+    direct_group: bool = False,
 ) -> dict[str, Any] | None:
     from apps.shell.yachiyo_agent.runtime_planner import RuntimePlanner
 
     goal = str(run.get("user_goal") or "").strip()
-    assignments = []
+    assignment_prefix = (
+        r"(?:^|[；;。\n])\s*(?:请|麻烦|please\s+)?"
+        r"(?:让|安排|委派给|交给|派给|ask\s+|assign\s+|delegate\s+to\s+)\s*"
+    )
+    starts = [match.start() for match in re.finditer(assignment_prefix, goal, re.I)]
+    if starts and starts[0] != 0:
+        return None
+    targets = [
+        target
+        for target in targets
+        if target.get("kind") == "agent"
+        and target.get("enabled", True)
+        and (not group_scope or str(target.get("id")) in selected_ids)
+    ]
+    assignments, covered = [], set()
     for target in targets:
-        if target.get("kind") != "agent":
-            continue
         aliases = {str(target.get("name") or ""), str(target.get("nickname") or "")}
+        matches = {}
         for alias in sorted(aliases - {""}, key=len, reverse=True):
-            # A name in explanatory, conditional or quoted text is not a
-            # runnable selection. Explicit @ routing is handled by ChatAPI;
-            # ordinary delegation always inherits the parent policy.
-            match = re.search(
-                r"(?:^|[；;。\n])\s*(?:请|麻烦|please\s+)?(?:让|安排|委派给|交给|派给|ask\s+|assign\s+|delegate\s+to\s+)\s*"
-                + re.escape(alias)
-                + r"(?=\s|[:：])\s*[:：]?\s*(.+)",
-                goal,
-                re.I,
-            )
-            if match is None:
-                continue
-            segment = match.group(1)
-            segment = re.split(
-                r"[；;。\n]\s*(?:请|麻烦|please\s+)?(?:让|安排|委派给|交给|派给|ask\s+|assign\s+|delegate\s+to\s+)",
-                segment,
-                maxsplit=1,
-                flags=re.I,
-            )[0]
-            # Only remove the coordinator's final presentation instruction.
-            segment = re.sub(
-                r"[,，]\s*(?:然后给我结论|然后总结结果|并总结结果|then\s+summari[sz]e\s+the\s+results)[。.!！]?\s*$",
-                "",
-                segment,
-                flags=re.I,
-            ).strip()
-            if not segment or len(segment) > 4000:
-                return None
-            policy = (
-                {
-                    "tool_policy": deepcopy(target.get("tool_policy") or {}),
-                    "workspace_policy": deepcopy(target.get("workspace_policy") or {}),
-                    "skill_ids": list(target.get("skill_ids") or []),
+            pattern = assignment_prefix + re.escape(alias) + r"(?=\s|[:：])\s*[:：]?\s*"
+            for match in re.finditer(pattern, goal, re.I):
+                matches.setdefault(match.start(), (match.end(), alias))
+        if not matches:
+            continue
+        if len(matches) != 1:
+            return None  # A runnable cannot silently collapse repeated clauses.
+        start, (end, alias) = next(iter(matches.items()))
+        if start in covered:
+            return None  # Ambiguous catalog aliases are not authority.
+        covered.add(start)
+        next_start = next((position for position in starts if position > start), len(goal))
+        segment = goal[end:next_start].strip()
+        segment = re.sub(
+            r"[,，]\s*(?:然后给我结论|然后总结结果|并总结结果|then\s+summari[sz]e\s+the\s+results)[。.!！]?\s*$",
+            "",
+            segment,
+            flags=re.I,
+        ).strip()
+        if not segment or len(segment) > 4000:
+            return None
+        policy = (
+            {
+                "tool_policy": deepcopy(target.get("tool_policy") or {}),
+                "workspace_policy": deepcopy(target.get("workspace_policy") or {}),
+                "skill_ids": list(target.get("skill_ids") or []),
+            }
+            if str(target.get("id")) in selected_ids
+            else inherited_policy(target, parent_runtime)
+        )
+        assignments.append(
+            {
+                "runnable_id": str(target["id"]),
+                "name": str(target.get("name") or alias),
+                "alias": alias,
+                "kind": "agent",
+                "goal": segment,
+                "policy": policy,
+                "position": start,
+            }
+        )
+    if covered != set(starts):
+        return None  # Unknown, disabled or excluded clauses must remain unresolved.
+    assignments.sort(key=lambda target: target.pop("position"))
+    if not assignments and direct_group and group_scope:
+        from apps.shell.chat_api import ChatAPI
+
+        # This is a server-parsed collaboration request, never model JSON.
+        # Each participant receives the entire immutable request and its
+        # existing group role; do not invent a less constrained subgoal.
+        participants = [dict(target) for target in targets if target.get("id") in selected_ids]
+        directives = ChatAPI._direct_group_dispatch_directives(goal, {"participants": participants})
+        aliases = {
+            alias
+            for target in participants
+            for alias in (target.get("name"), target.get("nickname"))
+            if alias
+        }
+        prefix = (
+            r"(?:请|麻烦|please\s+)?\s*(?:"
+            + "|".join(re.escape(alias) for alias in sorted(aliases, key=len, reverse=True))
+            + r")"
+        )
+        if (
+            not aliases
+            or not re.match(prefix, goal, re.I)
+            or not re.search(r"(?:一起|分别|协作|配合|together|parallel)", goal, re.I)
+        ):
+            return None
+        header = re.split(
+            r"(?:一起|分别|协作|配合|together|parallel)", goal, maxsplit=1, flags=re.I
+        )[0]
+        header = re.sub(r"^(?:请|麻烦|please\s+)?\s*", "", header, flags=re.I).strip()
+        names = [
+            name.strip()
+            for name in re.split(r"\s*(?:和|与|、|,|，|&|\band\b)\s*", header, flags=re.I)
+        ]
+        declared = []
+        for name in names:
+            matches = [
+                target
+                for target in participants
+                if name.casefold()
+                in {
+                    str(target.get("name") or "").casefold(),
+                    str(target.get("nickname") or "").casefold(),
                 }
-                if str(target.get("id")) in selected_ids
-                else inherited_policy(target, parent_runtime)
+            ]
+            if len(matches) != 1 or matches[0]["id"] in declared:
+                return None
+            declared.append(matches[0]["id"])
+        if len(directives) != len(declared) or {
+            directive.runnable_id for directive in directives
+        } != set(declared):
+            return None
+        for directive in directives:
+            target = next(
+                (item for item in participants if item["id"] == directive.runnable_id), None
             )
+            if target is None:
+                return None
             assignments.append(
                 {
-                    "runnable_id": str(target["id"]),
-                    "name": str(target.get("name") or alias),
-                    "alias": alias,
+                    "runnable_id": target["id"],
                     "kind": "agent",
-                    "goal": segment,
-                    "policy": policy,
+                    "name": target["name"],
+                    "alias": target.get("nickname") or target["name"],
+                    "goal": goal,
+                    "policy": {
+                        "tool_policy": deepcopy(target.get("tool_policy") or {}),
+                        "workspace_policy": deepcopy(target.get("workspace_policy") or {}),
+                        "skill_ids": list(target.get("skill_ids") or []),
+                    },
                 }
             )
-            break
     if not assignments or len(assignments) > 3:
         return None
     decision = RuntimePlanner().decision(
@@ -238,6 +334,7 @@ def compile_plan(
         "targets": assignments,
         "plan_id": decision.plan.plan_id,
         "summary_required": group_scope and requires_summary(goal),
+        "direct_group": direct_group,
     }
     binding_id = _digest(binding)
     for criterion in contract["criteria"]:
@@ -328,6 +425,7 @@ class MainChatDelegationCoordinator:
         parent_runtime: Mapping[str, Any],
         selected_ids: set[str],
         group_scope: bool = False,
+        direct_group: bool = False,
     ) -> dict[str, Any] | None:
         from .goal_runtime import goal_contract_event_payload, runtime_goal_contract
 
@@ -359,6 +457,7 @@ class MainChatDelegationCoordinator:
                 parent_runtime=parent_runtime,
                 selected_ids=selected_ids,
                 group_scope=group_scope,
+                direct_group=direct_group,
             )
             if plan is None:
                 return None
@@ -473,6 +572,18 @@ class MainChatDelegationCoordinator:
         group: bool,
         upstream: str,
     ) -> list[dict[str, Any]]:
+        parent = self.service.get_run(run_id)
+        initial_plan = bound_plan(parent)
+        if (
+            initial_plan is None
+            or parent.get("status") != "running"
+            or parent.get("pending_approval")
+        ):
+            raise ValueError("delegation_parent_not_running")
+        validate_proposals(initial_plan, proposals)
+        if any(event.get("event") == CHILDREN_EVENT for event in parent["timeline"]):
+            return self.owned_children(parent)
+        envelopes = self._direct_child_envelopes(parent, initial_plan)
         callbacks = []
         children = []
         scope = (
@@ -483,12 +594,17 @@ class MainChatDelegationCoordinator:
         with scope:
             parent = self.service.get_run(run_id)
             plan = bound_plan(parent)
-            if plan is None or parent.get("status") != "running" or parent.get("pending_approval"):
+            if (
+                plan is None
+                or plan["binding_id"] != initial_plan["binding_id"]
+                or parent.get("status") != "running"
+                or parent.get("pending_approval")
+            ):
                 raise ValueError("delegation_parent_not_running")
             validate_proposals(plan, proposals)
             old = [event for event in parent["timeline"] if event.get("event") == CHILDREN_EVENT]
             if old:
-                return [self.service.get_run(item["run_id"]) for item in old[0]["children"]]
+                return self.owned_children(parent)
             root_id, group_id = "", ""
             for index, target in enumerate(plan["binding"]["targets"]):
                 identity = (
@@ -513,6 +629,8 @@ class MainChatDelegationCoordinator:
                 }
                 if group:
                     payload["upstream"] += f"\n你在群内身份是：{target['alias']}"
+                if target["runnable_id"] in envelopes:
+                    payload["runtime_execution_envelope"] = envelopes[target["runnable_id"]]
                 if group_id:
                     payload["run_group_id"] = group_id
                     payload[RUN_GROUP_ATTACHMENT_PAYLOAD_KEY] = issue_run_group_child_attachment(
@@ -560,6 +678,189 @@ class MainChatDelegationCoordinator:
             callback()
         return children
 
+    def _direct_child_envelopes(
+        self, parent: dict[str, Any], plan: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Materialize an exact process goal through the existing planner.
+
+        Legacy terminal templates omit the exact process target. Planning
+        happens before the transaction/child execution leases, so cancellation
+        can still fence every deferred child effect.
+        """
+        from apps.shell.yachiyo_agent.runtime_execution import runtime_execution_envelope_payload
+
+        from .goal_runtime import planned_goal_contract_payload
+        from .model_intent_planning import ModelIntentClarificationResolution
+
+        envelopes = {}
+        if not plan["binding"].get("direct_group"):
+            return envelopes
+        for target in plan["binding"]["targets"]:
+            agent = {
+                **self.service.agent_run_async_coordinator._get_agent_private(
+                    target["runnable_id"]
+                ),
+                **target["policy"],
+            }
+            runtime = self.service._compile_agent_runtime(agent)
+            allowed = runtime["tool_policy"].get("allowed_tools") or []
+            template = planned_goal_contract_payload(target["goal"], allowed_tools=allowed)
+            if not any(
+                set(criterion.get("required_capabilities") or []) == {"terminal.execution"}
+                and (criterion.get("expected", {}).get("target") or {}).get("action")
+                != "run_command"
+                for criterion in template.get("criteria") or []
+            ):
+                continue
+            timeline = []
+            resolution = self.service.custom_api_agent_loop.resolve_initial_model_plan(
+                agent=agent,
+                original_goal=target["goal"],
+                allowed_tools=list(allowed),
+                run_id=parent["run_id"],
+                timeline=timeline,
+                budget=self.service.main_chat_model_loop._run_budget(
+                    parent["run_id"], parent["timeline"]
+                ),
+                force_planning=True,
+            )
+            if resolution is None or isinstance(resolution, ModelIntentClarificationResolution):
+                raise ValueError("delegation_child_planning_unresolved")
+            envelope = runtime_execution_envelope_payload(
+                resolution.decision, allowed_tools=allowed, full_plan=True
+            )
+            if not envelope:
+                raise ValueError("delegation_child_planning_unresolved")
+            envelopes[target["runnable_id"]] = envelope
+            current = self.service.get_run(parent["run_id"])
+            self._record(
+                current,
+                [
+                    (
+                        "agent.delegation.child.planned",
+                        {
+                            "source": SOURCE,
+                            "binding_id": plan["binding_id"],
+                            "runnable_id": target["runnable_id"],
+                            "goal": target["goal"],
+                            "decision_id": resolution.decision.decision_id,
+                            "planning_events_json": json.dumps(timeline, ensure_ascii=False),
+                        },
+                    )
+                ],
+            )
+        return envelopes
+
+    def owned_children(self, parent: Mapping[str, Any]) -> list[dict[str, Any]]:
+        plan = bound_plan(parent)
+        bindings = [
+            _payload(event)
+            for event in parent.get("timeline") or []
+            if (event.get("event") or event.get("event_type")) == CHILDREN_EVENT
+        ]
+        if plan is None or len(bindings) != 1:
+            raise ValueError("delegation_child_binding_missing")
+        binding = bindings[0]
+        receipts = binding.get("children")
+        if (
+            binding.get("source") != SOURCE
+            or binding.get("parent_run_id") != parent["run_id"]
+            or binding.get("binding_id") != plan["binding_id"]
+            or not isinstance(receipts, list)
+            or len(receipts) != len(plan["binding"]["targets"])
+            or any(not isinstance(receipt, Mapping) for receipt in receipts)
+        ):
+            raise ValueError("delegation_child_identity_conflict")
+        children, seen = [], set()
+        for receipt, target in zip(receipts, plan["binding"]["targets"]):
+            child = self.service.get_run(receipt["run_id"])
+            if (
+                child["run_id"] in seen
+                or child.get("kind") != "agent_run"
+                or child.get("runnable_id") != target["runnable_id"]
+                or child.get("user_goal") != target["goal"]
+                or receipt.get("goal") != target["goal"]
+                or any(
+                    child.get(key) != receipt.get(key)
+                    for key in ("runnable_id", "client_request_id", "run_group_id")
+                )
+            ):
+                raise ValueError("delegation_child_identity_conflict")
+            seen.add(child["run_id"])
+            children.append(child)
+        return children
+
+    def cancel_children(self, run_id: str) -> None:
+        parent = self.service.get_run(run_id)
+        if parent.get("status") == "completed" or bound_plan(parent) is None:
+            return
+        if not any(event.get("event") == CHILDREN_EVENT for event in parent.get("timeline") or []):
+            return
+        for child in self.owned_children(parent):
+            if child.get("status") not in {"completed", "failed", "cancelled"}:
+                self.service.cancel_run(child["run_id"])
+
+        plan = bound_plan(parent)
+        summaries = [
+            event
+            for event in parent.get("timeline") or []
+            if event.get("event") == SUMMARY_BOUND_EVENT
+        ]
+        if len(summaries) != 1:
+            return
+        binding = summaries[0]
+        if (
+            binding.get("source") != SOURCE
+            or binding.get("parent_run_id") != run_id
+            or binding.get("binding_id") != plan["binding_id"]
+        ):
+            return
+        try:
+            link = self.service.get_task_run_link(binding["task_id"])
+            summary = self.service.get_run(link["run_id"])
+        except KeyError:
+            return
+        starts = [event for event in summary["timeline"] if event.get("event") == "run.started"]
+        if (
+            link.get("session_id") == binding["session_id"]
+            and summary.get("kind") == "main_chat_run"
+            and summary.get("user_goal") == binding["goal"]
+            and len(starts) == 1
+            and (starts[0].get("metadata") or {}).get("response_context_digest")
+            == binding["context_digest"]
+            and summary.get("status") not in {"completed", "failed", "cancelled"}
+        ):
+            self.service.cancel_run(summary["run_id"])
+
+    def settle(self, run_id: str, result: str) -> dict[str, Any]:
+        from .goal_runtime import runtime_goal_assessment, runtime_goal_contract
+
+        scope = (
+            self.lifecycle._transaction_scope()
+            if self.lifecycle._transaction_scope
+            else nullcontext()
+        )
+        with scope:
+            parent = self.service.get_run(run_id)
+            if parent.get("status") != "running":
+                return parent
+            contract = runtime_goal_contract(
+                run_id=run_id,
+                original_goal=parent["user_goal"],
+                runtime_execution_envelope=None,
+                runtime_execution_metadata=None,
+                messages=[],
+                timeline=parent["timeline"],
+            )
+            assessment = runtime_goal_assessment(contract, parent["timeline"])
+            if not assessment.completed:
+                raise ValueError("delegation_parent_goal_unfulfilled")
+            self._record(
+                parent,
+                [("agent.goal.assessed", {"goal_assessment": assessment.to_persisted_payload()})],
+            )
+            return self.service.complete_main_chat_run(run_id, result)
+
     def verify(self, run_id: str) -> dict[str, Any]:
         from .goal_runtime import runtime_goal_assessment, runtime_goal_contract
 
@@ -577,8 +878,8 @@ class MainChatDelegationCoordinator:
             if plan is None or len(bindings) != 1 or parent.get("status") != "running":
                 raise ValueError("delegation_child_binding_missing")
             completed = []
-            for receipt in bindings[0]["children"]:
-                child = self.service.get_run(receipt["run_id"])
+            children = self.owned_children(parent)
+            for receipt, child in zip(bindings[0]["children"], children):
                 if child.get("status") != "completed" or child.get("pending_approval"):
                     raise ValueError("delegation_child_goal_unfulfilled")
                 if (
@@ -679,6 +980,44 @@ class MainChatDelegationCoordinator:
                 return parent
             return self._record(parent, [(SUMMARY_BOUND_EVENT, payload)])
 
+    def owned_summary(self, parent: Mapping[str, Any]) -> dict[str, Any]:
+        """Resolve a durable summary only through its exact private binding."""
+        plan = bound_plan(parent)
+        bindings = [
+            _payload(event)
+            for event in parent.get("timeline") or []
+            if (event.get("event") or event.get("event_type")) == SUMMARY_BOUND_EVENT
+        ]
+        if plan is None or len(bindings) != 1:
+            raise ValueError("delegation_summary_binding_missing")
+        binding = bindings[0]
+        if (
+            binding.get("source") != SOURCE
+            or binding.get("parent_run_id") != parent["run_id"]
+            or binding.get("binding_id") != plan["binding_id"]
+        ):
+            raise ValueError("delegation_summary_identity_conflict")
+        parent_link = self.lifecycle._task_run_links.for_run(parent["run_id"])
+        link = self.service.get_task_run_link(binding["task_id"])
+        if (
+            not isinstance(parent_link, Mapping)
+            or link.get("session_id") != binding["session_id"]
+            or link.get("session_id") != parent_link.get("session_id")
+            or link.get("task_id") == parent_link.get("task_id")
+        ):
+            raise ValueError("delegation_summary_identity_conflict")
+        summary = self.service.get_run(link["run_id"])
+        starts = [event for event in summary["timeline"] if event.get("event") == "run.started"]
+        if (
+            summary.get("kind") != "main_chat_run"
+            or summary.get("user_goal") != binding["goal"]
+            or len(starts) != 1
+            or (starts[0].get("metadata") or {}).get("response_context_digest")
+            != binding["context_digest"]
+        ):
+            raise ValueError("delegation_summary_identity_conflict")
+        return summary
+
     def verify_summary(self, run_id: str) -> dict[str, Any]:
         from .goal_runtime import runtime_goal_contract
 
@@ -696,20 +1035,8 @@ class MainChatDelegationCoordinator:
             if plan is None or len(bindings) != 1 or parent.get("status") != "running":
                 raise ValueError("delegation_summary_binding_missing")
             binding = bindings[0]
-            link = self.service.get_task_run_link(binding["task_id"])
-            if not link or link.get("session_id") != binding["session_id"]:
-                raise ValueError("delegation_summary_identity_conflict")
-            summary = self.service.get_run(link["run_id"])
-            starts = [event for event in summary["timeline"] if event.get("event") == "run.started"]
-            if (
-                summary.get("kind") != "main_chat_run"
-                or summary.get("status") != "completed"
-                or summary.get("pending_approval")
-                or summary.get("user_goal") != binding["goal"]
-                or len(starts) != 1
-                or (starts[0].get("metadata") or {}).get("response_context_digest")
-                != binding["context_digest"]
-            ):
+            summary = self.owned_summary(parent)
+            if summary.get("status") != "completed" or summary.get("pending_approval"):
                 raise ValueError("delegation_summary_goal_unfulfilled")
             contract = runtime_goal_contract(
                 run_id=summary["run_id"],
@@ -784,6 +1111,16 @@ def completion_outcome(
         or bound[0].get("binding_id") != plan["binding_id"]
         or not isinstance(children, list)
         or len(children) != len(plan["binding"]["targets"])
+    ):
+        return None
+    receipts = bound[0].get("children")
+    if (
+        not isinstance(receipts, list)
+        or len(receipts) != len(children)
+        or any(
+            not isinstance(item, Mapping)
+            for item in [*receipts, *children, *plan["binding"]["targets"]]
+        )
     ):
         return None
     seen = set()

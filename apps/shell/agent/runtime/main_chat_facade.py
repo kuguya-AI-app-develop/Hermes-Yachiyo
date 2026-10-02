@@ -39,7 +39,7 @@ class RuntimeMainChatFacadeMixin:
     """Keeps daily Chat runtime methods while delegating to split services."""
 
     def prepare_main_chat_delegation(
-        self, run_id: str, *, selected_ids: set[str], group_scope: bool = False,
+        self, run_id: str, *, selected_ids: set[str], group_scope: bool = False, direct_group: bool = False,
         tool_policy: dict[str, Any] | None = None,
         workspace_policy: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
@@ -49,7 +49,7 @@ class RuntimeMainChatFacadeMixin:
             model_profile_id="", tool_policy=tool_policy, workspace_policy=workspace_policy,
         )
         return MainChatDelegationCoordinator(self).prepare(
-            run_id, parent_runtime=self._compile_agent_runtime(agent), selected_ids=selected_ids, group_scope=group_scope,
+            run_id, parent_runtime=self._compile_agent_runtime(agent), selected_ids=selected_ids, group_scope=group_scope, direct_group=direct_group,
         )
 
     def start_main_chat_delegation(

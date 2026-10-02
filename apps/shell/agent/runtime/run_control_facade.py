@@ -13,6 +13,11 @@ class RuntimeRunControlFacadeMixin:
     """Keeps legacy cancellation and approval methods while delegating to services."""
 
     def cancel_run(self, run_id: str) -> dict[str, Any]:
+        run = self.get_run(run_id) if str(run_id).startswith("main_chat_run_") else {}
+        if run.get("kind") == "main_chat_run":
+            from .main_chat_delegation import MainChatDelegationCoordinator
+
+            MainChatDelegationCoordinator(self).cancel_children(run_id)
         return self.run_cancellation_coordinator.cancel(run_id)
 
     def _cancel_workflow_run_projection(
