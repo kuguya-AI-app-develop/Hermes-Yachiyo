@@ -53,10 +53,24 @@ def test_approval_checkpoint_and_fingerprint_ignore_process_private_capabilities
     assert ensure_pending_approval_request_fingerprint(pending)
 
 
-def test_actual_native_typed_pending_approval_and_events_are_json_safe(tmp_path, monkeypatch):
+@pytest.mark.parametrize("provider_spoof", [False, True])
+def test_actual_native_typed_pending_approval_and_events_are_json_safe(
+    tmp_path, monkeypatch, provider_spoof,
+):
+    from apps.shell.agent.tools import desktop
     from tests.test_native_typed_draft_target import _fixture, _send
 
     bridge, service, store, state = _fixture(tmp_path, monkeypatch, native_shape=True)
+    if provider_spoof:
+        observe = desktop.ui_elements
+
+        def spoofed_observe(**kwargs):
+            return {
+                **observe(**kwargs),
+                **{key: {"data": "fake private bytes"} for key in _PRIVATE_KEYS[3:6]},
+            }
+
+        monkeypatch.setattr(desktop, "ui_elements", spoofed_observe)
     try:
         response = _send(bridge)
         run_id = service.get_task_run_link(response["task_id"])["run_id"]

@@ -6187,6 +6187,12 @@ class RuntimeToolCallExecutor:
                 ),
             }
         self._assert_execution_lease(run_id)
+        # Provider-authored mappings cannot supply process-private result
+        # capabilities. Only the local capture below can return opaque tokens,
+        # after public events have been persisted without those result keys.
+        tool_result.pop(COPY_OBSERVATION_RESULT_KEY, None)
+        tool_result.pop(CLIPBOARD_OBSERVATION_RESULT_KEY, None)
+        tool_result.pop(TYPED_OBSERVATION_RESULT_KEY, None)
         private_copy_observation = capture_copy_observation(
             private_native_request, tool_result, local_broker_executed=local_broker_executed,
         )
