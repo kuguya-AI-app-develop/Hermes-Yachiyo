@@ -9823,7 +9823,7 @@ class RuntimeToolRequestRunner:
             receipt_kind in {EXACT_FILE_CONTENT_PRESENT_PREDICATE, "exact_search_link_navigation"}
             and current_tool_call_id
         ):
-            # The broker's raw workspace.read event is already durable. Give
+            # The Broker's raw observation event is already durable. Give
             # the Runtime receipt projection its own terminal identity so a
             # replay's first-winner rule cannot discard the later authority.
             receipt_suffix = (

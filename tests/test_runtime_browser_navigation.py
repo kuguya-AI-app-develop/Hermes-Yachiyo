@@ -435,3 +435,16 @@ def test_local_broker_browser_isolation_is_not_an_execution_adapter(navigation_c
     }
     assert _trusted_runtime_execution_provider_identity(request, result) == action_provider
     assert _receipt((source, request, result))["verified_observed_state"] == "open"
+
+
+@pytest.mark.parametrize("malformed", ["corrupt", ["selector"], 1, None])
+def test_corrupt_goal_source_input_rejects_navigation_evidence(malformed):
+    from apps.shell.agent.runtime.goal_runtime import _verifier_matches_source_attempt
+
+    attempt = {"tool": "browser.click", "event": {"input_preview": malformed}, "result": {}}
+    link = {
+        "source_tool": "browser.click",
+        "verifier_tool": "browser.current_page",
+        "predicate_kind": "exact_search_link_navigation",
+    }
+    assert not _verifier_matches_source_attempt(link, attempt)

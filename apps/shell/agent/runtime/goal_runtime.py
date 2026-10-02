@@ -1787,7 +1787,10 @@ def _verifier_matches_source_attempt(
             return False
     verifier_tool = str(verifier_link.get("verifier_tool") or "").strip()
     if predicate_kind == "exact_search_link_navigation":
-        source_input = event.get("input_preview") or {}
+        source_input = (
+            event.get("input_preview")
+            if isinstance(event.get("input_preview"), Mapping) else {}
+        )
         selector = source_input.get("selector")
         if (
             source_tool != "browser.click"
