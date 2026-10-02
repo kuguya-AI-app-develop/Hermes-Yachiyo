@@ -528,6 +528,16 @@ class TaskIntentRouter:
         ):
             return _empty_intent("desktop_operation", text)
         if (
+            metadata.get("daily_desktop_intent")
+            and named_media.get("action") == "play"
+            and named_media.get("query")
+            and not _desktop_operation_hint(app_control_text)
+            and not _app_name_hint(app_control_text)
+        ):
+            # Daily metadata cannot add an empty desktop operation as a
+            # competing route to an already concrete media query.
+            return _empty_intent("desktop_operation", text)
+        if (
             _APP_CONTROL_AUTHORITY_ACTION_RE.search(text)
             and not _APP_CONTROL_AUTHORITY_ACTION_RE.search(app_control_text)
             and not _text_has_authorized_family_action(
