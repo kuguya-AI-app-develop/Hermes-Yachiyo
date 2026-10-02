@@ -4,6 +4,8 @@ import hashlib
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from apps.shell.agent.runtime.private_native_observation import PrivateNativeObservationChannel
+
 _COPY_AUTHORITY = object()
 COPY_TRANSACTION_KEY = "_runtime_private_select_all_copy"
 COPY_PREDICATE = "exact_selected_full_text_copied"
@@ -284,25 +286,11 @@ def exact_copy_observation(
     }
 
 
-class _CopyObservationToken:
-    """A live executor capability; JSON-like output cannot reproduce it."""
-
-    def __init__(self, request: Mapping[str, Any], data: Mapping[str, Any]):
-        self.scope = {
-            key: str(request.get(key) or "")
-            for key in (
-                "run_id",
-                "plan_id",
-                "request_id",
-                "tool_call_id",
-                "step_id",
-                "tool",
-            )
-        }
-        self.data = dict(data)
-        self.used = False
-
-
+_COPY_OBSERVATION_CHANNEL = PrivateNativeObservationChannel(
+    copy_transaction_bound,
+    authority=_COPY_AUTHORITY,
+    tools=frozenset({"desktop.ui_elements", "clipboard.read"}),
+)
 COPY_OBSERVATION_RESULT_KEY = "_runtime_private_copy_observation"
 
 
@@ -312,34 +300,9 @@ def capture_copy_observation(
     *,
     local_broker_executed: bool,
 ) -> Any:
-    if not local_broker_executed or not copy_transaction_bound(request):
-        return None
-    if raw_result.get("ok") is not True or raw_result.get("permission_error"):
-        return None
-    tool = request.get("tool")
-    if tool not in {"desktop.ui_elements", "clipboard.read"}:
-        return None
-    data = raw_result.get("data")
-    if not isinstance(data, Mapping):
-        return None
-    if tool == "desktop.ui_elements":
-        focused = data.get("focused_element")
-        if not isinstance(focused, Mapping):
-            return None
-        raw = {key: data.get(key) for key in ("app_name", "pid", "window_id")}
-        raw["focused_element"] = dict(focused)
-    else:
-        raw = {
-            key: data.get(key)
-            for key in (
-                "text",
-                "text_length",
-                "truncated",
-                "pasteboard_revision",
-                "pasteboard_revision_stable",
-            )
-        }
-    return _CopyObservationToken(request, raw)
+    return _COPY_OBSERVATION_CHANNEL.capture(
+        request, raw_result, local_broker_executed=local_broker_executed
+    )
 
 
 def consume_copy_observation(
@@ -348,11 +311,4 @@ def consume_copy_observation(
     *,
     run_id: str,
 ) -> dict[str, Any]:
-    if not isinstance(token, _CopyObservationToken) or token.used:
-        return {}
-    token.used = True
-    expected = {key: str(request.get(key) or "") for key in token.scope}
-    expected["run_id"] = run_id
-    if token.scope != expected or not all(expected.values()) or not copy_transaction_bound(request):
-        return {}
-    return {"_authority": _COPY_AUTHORITY, "scope": token.scope, "data": token.data}
+    return _COPY_OBSERVATION_CHANNEL.consume(token, request, run_id=run_id)
