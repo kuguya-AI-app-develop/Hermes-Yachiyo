@@ -104,8 +104,8 @@ def _app_lifecycle_status_verified(
     )
 
 
-def _without_media_completion_claims(result: dict[str, Any]) -> dict[str, Any]:
-    """Completion comes from native media observations, not supplied flags."""
+def _without_supplied_completion_claims(result: dict[str, Any]) -> dict[str, Any]:
+    """Completion comes from native observations, not supplied flags."""
 
     authority_keys = {
         "postcondition_verified", "postcondition_ok", "verification_passed",
@@ -1884,7 +1884,19 @@ class ToolBroker:
         )
 
     def app_quit(self, app_name: str) -> dict[str, Any]:
-        return desktop.app_quit(app_name)
+        result = _without_supplied_completion_claims(desktop.app_quit(app_name))
+        data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        return _with_native_postcondition_receipt(
+            result,
+            verified=bool(
+                result.get("ok") is True and result.get("action") == "app.quit"
+                and not result.get("permission_error") and not result.get("fallback_used")
+                and _app_names_match(app_name, str(data.get("app_name") or ""))
+                and data.get("quit_status") in {"quit", "not_running"}
+                and data.get("launch_status") == "not_running"
+                and data.get("running") is False and data.get("quit_verified") is True
+            ),
+        )
 
     def desktop_reveal_path(self, path: str) -> dict[str, Any]:
         return desktop.reveal_path(path)
@@ -1896,7 +1908,7 @@ class ToolBroker:
         return desktop.open_path_with_app(path, app_name)
 
     def media_apple_music_play(self, query: str) -> dict[str, Any]:
-        result = _without_media_completion_claims(desktop.apple_music_play(query))
+        result = _without_supplied_completion_claims(desktop.apple_music_play(query))
         return _with_native_postcondition_receipt(
             result, verified=_apple_music_play_readback_verified(result, query)
         )
@@ -1905,19 +1917,19 @@ class ToolBroker:
         return desktop.apple_music_status()
 
     def media_apple_music_open_and_play(self) -> dict[str, Any]:
-        result = _without_media_completion_claims(desktop.apple_music_open_and_play())
+        result = _without_supplied_completion_claims(desktop.apple_music_open_and_play())
         return _with_native_postcondition_receipt(
             result, verified=_apple_music_open_readback_verified(result)
         )
 
     def media_apple_music_control(self, action: str) -> dict[str, Any]:
-        result = _without_media_completion_claims(desktop.apple_music_control(action))
+        result = _without_supplied_completion_claims(desktop.apple_music_control(action))
         return _with_native_postcondition_receipt(
             result, verified=_apple_music_control_readback_verified(result, action)
         )
 
     def media_music_app_open_and_play(self, app_name: str) -> dict[str, Any]:
-        result = _without_media_completion_claims(desktop.music_app_open_and_play(app_name))
+        result = _without_supplied_completion_claims(desktop.music_app_open_and_play(app_name))
         return _with_native_postcondition_receipt(
             result, verified=str(app_name or "").strip() == "Music"
             and _apple_music_open_readback_verified(result),

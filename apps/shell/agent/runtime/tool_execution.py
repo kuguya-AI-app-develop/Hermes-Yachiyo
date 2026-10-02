@@ -10445,7 +10445,7 @@ def _trusted_declared_exact_dispatch_verifier(
     allowed_tools: Iterable[str],
     timeline: Iterable[Mapping[str, Any]],
 ) -> dict[str, Any]:
-    """Bind one trusted app/path dispatch to its unique declared verifier.
+    """Bind a trusted app/path receipt to its unique declared verifier.
 
     Capability-discovery plans can execute their resolved app/path action in a
     second Runner batch, where the planner-declared verifier is no longer in
@@ -10456,13 +10456,19 @@ def _trusted_declared_exact_dispatch_verifier(
     """
 
     clean_tool = str(tool_name or "").strip()
-    if clean_tool not in {
-        "app.open_path_with_app",
-        "desktop.open_path_with_app",
-    } or not _trusted_exact_dispatch_projection_verifier_tool(
-        clean_tool,
-        tool_request,
-        tool_result,
+    native_quit = bool(
+        clean_tool == "app.quit"
+        and intrinsic_native_postcondition_state(
+            clean_tool,
+            _first_mapping(tool_request.get("input")),
+            tool_result,
+        ) == "fulfilled"
+    )
+    if not native_quit and (
+        clean_tool not in {"app.open_path_with_app", "desktop.open_path_with_app"}
+        or not _trusted_exact_dispatch_projection_verifier_tool(
+            clean_tool, tool_request, tool_result,
+        )
     ):
         return {}
 
@@ -10538,37 +10544,88 @@ def _trusted_declared_exact_dispatch_verifier(
     ):
         return {}
 
+    if native_quit:
+        target = _first_mapping(expected.get("target"))
+        requested_app = str(_first_mapping(tool_request.get("input")).get("app_name") or "").strip()
+        if target.get("action") != "quit_app" or target.get("app_name") != requested_app:
+            return {}
+
     verifier_step_id = verifier_step_ids[0]
     allowed = {str(item or "").strip() for item in allowed_tools}
     plan_candidates: list[dict[str, Any]] = []
     for raw_event in events:
         event_type, payload = _runtime_timeline_event_payload(raw_event)
-        if event_type != "agent.plan.step":
+        flat_native_step = bool(
+            native_quit and event_type == "agent.desktop.intent_planned"
+            and payload.get("source") == "runtime_verification"
+            and payload.get("runtime_stage") == "verify"
+            and payload.get("runtime_role") == "verify_result"
+        )
+        if event_type != "agent.plan.step" and not flat_native_step:
             continue
-        step = payload.get("step") if isinstance(payload.get("step"), Mapping) else {}
-        verifier_tool = str(step.get("tool_name") or "").strip()
+        step = payload if flat_native_step else (
+            payload.get("step") if isinstance(payload.get("step"), Mapping) else {}
+        )
+        verifier_tool = str(step.get("tool_name") or step.get("tool") or "").strip()
         execution_mode = (
-            step.get("execution_mode")
+            step.get("desktop_execution_mode") if flat_native_step
+            else step.get("execution_mode")
             if isinstance(step.get("execution_mode"), Mapping)
             else {}
         )
         if not (
-            str(payload.get("source") or "").strip() == "runtime_planner"
+            (flat_native_step or str(payload.get("source") or "").strip() == "runtime_planner")
             and str(payload.get("plan_id") or "").strip() == plan_id
             and str(payload.get("decision_id") or "").strip() == decision_id
             and str(step.get("step_id") or "").strip() == verifier_step_id
             and source_step_id in _string_list(step.get("depends_on"))
             and step.get("approval_required") is False
             and verifier_tool in allowed
-            and verifier_tool in _POST_ACTION_READ_ONLY_VERIFIER_TOOLS
+            and (
+                verifier_tool in _POST_ACTION_READ_ONLY_VERIFIER_TOOLS
+                or (native_quit and verifier_tool == "desktop.running_apps")
+            )
             and str(execution_mode.get("mode") or "").strip()
             == "read_only_observation"
             and execution_mode.get("keyboard_mouse_capture") is False
         ):
             continue
+        if flat_native_step:
+            source_plans = []
+            expected_target = _first_mapping(expected.get("target"))
+            requested_app = str(_first_mapping(tool_request.get("input")).get("app_name") or "").strip()
+            if not requested_app or expected_target.get("action") != "quit_app" or expected_target.get("app_name") != requested_app:
+                continue
+            for source_event in events:
+                source_type, source_payload = _runtime_timeline_event_payload(source_event)
+                source_input = _first_mapping(source_payload.get("input_preview"))
+                if (
+                    source_type == "agent.desktop.intent_planned"
+                    and source_payload.get("source") == "runtime_planner"
+                    and source_payload.get("tool") == "app.quit"
+                    and source_payload.get("plan_id") == plan_id
+                    and source_payload.get("decision_id") == decision_id
+                    and source_payload.get("step_id") == source_step_id
+                    and source_payload.get("capability_id") == capability_id
+                    and source_input.get("app_name") == requested_app
+                    and _first_mapping(source_payload.get("action_target")) == expected_target
+                ):
+                    source_plans.append(source_payload)
+            if len(source_plans) != 1:
+                continue
+        # The quit adapter already made an independent same-app running
+        # observation. Preserve the Goal's verifier identity even when an
+        # approval-resume batch no longer carries its declared inventory step.
+        observer_tool = (
+            _post_action_verification_tool(clean_tool, allowed_tools=list(allowed))
+            if native_quit and verifier_tool == "desktop.running_apps"
+            else verifier_tool
+        )
+        if not observer_tool:
+            continue
         plan_candidates.append(
             {
-                "tool": verifier_tool,
+                "tool": observer_tool,
                 "step_id": verifier_step_id,
                 "capability_id": str(step.get("capability_id") or "").strip(),
                 "execution_mode": dict(execution_mode),
