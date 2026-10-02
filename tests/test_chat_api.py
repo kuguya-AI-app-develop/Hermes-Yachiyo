@@ -3090,6 +3090,7 @@ def test_send_message_executes_app_search_followup_before_model(tmp_path, monkey
     calls: list[tuple[str, str]] = []
     active_app = "WeChat"
     typed_text = ""
+    submitted = False
     runtime.chat_session.add_user_message("打开微信")
     runtime.chat_session.add_assistant_message("已打开 WeChat。")
     monkeypatch.setattr(
@@ -3136,6 +3137,8 @@ def test_send_message_executes_app_search_followup_before_model(tmp_path, monkey
         })
 
     def fake_safe_shortcut(action: str) -> dict:
+        nonlocal submitted
+        submitted = False
         calls.append(("shortcut", action))
         return _native_postcondition_result({
             "ok": True,
@@ -3156,6 +3159,8 @@ def test_send_message_executes_app_search_followup_before_model(tmp_path, monkey
         })
 
     def fake_search_submit() -> dict:
+        nonlocal submitted
+        submitted = True
         return _native_postcondition_result({
             "ok": True,
             "action": "desktop.search_submit",
@@ -3175,16 +3180,7 @@ def test_send_message_executes_app_search_followup_before_model(tmp_path, monkey
         })
 
     def fake_ui_elements(**_kwargs: Any) -> dict:
-        return _native_postcondition_result({
-            "ok": True,
-            "action": "desktop.ui_elements",
-            "data": {
-                "app_name": active_app,
-                "elements": [
-                    {"role": "AXTextField", "name": "Search", "value": typed_text},
-                ],
-            },
-        })
+        return _native_search_ui_result(active_app, typed_text, submitted=submitted)
 
     monkeypatch.setattr("apps.shell.agent.tools.desktop.app_open", fake_app_open)
     monkeypatch.setattr("apps.shell.agent.tools.desktop.app_focus", fake_app_focus)
@@ -3379,12 +3375,132 @@ def test_send_message_executes_browser_prefix_search_field_type_without_browser_
     api, runtime, store = _make_api(tmp_path)
     service = _make_agent_runtime_service(tmp_path)
     runtime.agent_runtime_service = service
-    calls: list[tuple[str, str]] = []
-    inspect_calls: list[tuple[str, bool]] = []
-    click_calls: list[tuple[str, str, int]] = []
-    active_app = "Google Chrome"
-    typed_text = ""
-    field_target = "搜索框"
+    calls = []
+    inspect_calls = []
+    state = {
+        "app": "Google Chrome",
+        "query": "",
+        "focused": False,
+        "submitted": False,
+        "target": "搜索框",
+        "running": True,
+        "allow_open": False,
+    }
+
+    def app_action(action, app_name):
+        state["app"] = app_name
+        calls.append((action, app_name))
+        return {"ok": True, "action": f"app.{action}", "data": {"app_name": app_name}}
+
+    def ui(**kwargs):
+        result = _native_search_ui_result(
+            state["app"], state["query"], submitted=state["submitted"], focused=state["focused"]
+        )
+        result["data"]["elements"][0]["name"] = state["target"]
+        if state["focused"]:
+            result["data"]["focused_element"]["name"] = state["target"]
+        return result
+
+    def inspect(app_name, *, open_if_needed=False, **kwargs):
+        # Discovery may read a running app before approval, never launch it.
+        inspect_calls.append((app_name, open_if_needed))
+        assert open_if_needed is state["allow_open"]
+        assert calls == []
+        state["app"] = app_name
+        return {
+            "ok": True,
+            "action": "desktop.inspect_app",
+            "data": {
+                "app_name": app_name,
+                "pid": 100,
+                "window_id": 200,
+                "app_found": state["running"],
+                "running": state["running"],
+                "ui_elements": ui()
+                if state["running"]
+                else {"ok": False, "action": "desktop.ui_elements", "data": {}},
+            },
+        }
+
+    def click(target, *, role_filter="", limit=80, click_count=1, expected_app_name=""):
+        assert target == state["target"] and expected_app_name == state["app"]
+        calls.append(("click", target))
+        state["focused"] = True
+        return {
+            "ok": True,
+            "action": "desktop.click_ui_element",
+            "data": {
+                "app_name": state["app"],
+                "pid": 100,
+                "window_id": 200,
+                "target": target,
+                "role_filter": role_filter,
+                "click_count": click_count,
+                "matched_element": {
+                    "role": "AXTextField",
+                    "name": target,
+                    "center": {"x": 320, "y": 240},
+                },
+            },
+        }
+
+    def type_text(text):
+        assert state["focused"]
+        calls.append(("type", text))
+        state["query"] = text
+        return {
+            "ok": True,
+            "action": "desktop.safe_type_text",
+            "data": {
+                "character_count": len(text),
+                "explicit_user_text": True,
+            },
+        }
+
+    def submit():
+        assert state["focused"] and state["query"]
+        calls.append(("search_submit", ""))
+        state["submitted"] = True
+        return {
+            "ok": True,
+            "action": "desktop.search_submit",
+            "data": {
+                "key": "return",
+                "modifiers": [],
+            },
+        }
+
+    monkeypatch.setattr(
+        "apps.shell.agent.tools.desktop.app_open", lambda name: app_action("open", name)
+    )
+    monkeypatch.setattr(
+        "apps.shell.agent.tools.desktop.app_focus", lambda name: app_action("focus", name)
+    )
+    monkeypatch.setattr(
+        "apps.shell.agent.tools.desktop.active_window",
+        lambda: {
+            "ok": True,
+            "action": "desktop.active_window",
+            "data": {
+                "app_name": state["app"],
+                "pid": 100,
+                "window_id": 200,
+            },
+        },
+    )
+    monkeypatch.setattr("apps.shell.agent.tools.desktop.inspect_app", inspect)
+    monkeypatch.setattr("apps.shell.agent.tools.desktop.ui_elements", ui)
+    monkeypatch.setattr("apps.shell.agent.tools.desktop.click_ui_element", click)
+    monkeypatch.setattr("apps.shell.agent.tools.desktop.desktop_safe_type_text", type_text)
+    monkeypatch.setattr("apps.shell.agent.tools.desktop.desktop_search_submit", submit)
+    monkeypatch.setattr(
+        "apps.shell.agent.tools.desktop.desktop_safe_shortcut",
+        lambda *_a, **_kw: pytest.fail("An explicit field click must not invent Cmd-F"),
+    )
+    monkeypatch.setattr(
+        "apps.shell.agent.tools.browser.click",
+        lambda *_a, **_kw: pytest.fail("Native field input must not take a browser tab"),
+    )
     monkeypatch.setattr(
         "apps.shell.agent_runtime.get_model_profile_service",
         lambda: SimpleNamespace(
@@ -3394,322 +3510,97 @@ def test_send_message_executes_browser_prefix_search_field_type_without_browser_
     )
     monkeypatch.setattr(
         "apps.shell.agent_runtime.openai_compatible_chat_message",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("browser prefix search field task should not call model")
-        ),
+        lambda *_a, **_kw: pytest.fail("Explicit app field input must not call a model"),
     )
     monkeypatch.setattr(
-        "apps.shell.chat_api.desktop_permission_missing_by_capability",
-        lambda use_cache=True: {},
+        "apps.shell.chat_api.desktop_permission_missing_by_capability", lambda use_cache=True: {}
     )
-    monkeypatch.setattr(
-        "apps.shell.agent.tools.browser.click",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("search field typing should not route to browser.click")
-        ),
-    )
-
-    def fake_app_focus(app_name: str) -> dict:
-        nonlocal active_app
-        active_app = app_name
-        calls.append(("focus", app_name))
-        return _native_postcondition_result({
-            "ok": True,
-            "action": "app.focus",
-            "data": {
-                "app_name": app_name,
-                "active_app_name": app_name,
-                "focus_verified": True,
-            },
-        })
-
-    def fake_app_open(app_name: str) -> dict:
-        nonlocal active_app
-        active_app = app_name
-        calls.append(("open", app_name))
-        return _native_postcondition_result({
-            "ok": True,
-            "action": "app.open",
-            "summary": f"Opened {app_name}",
-            "data": {"app_name": app_name, "launch_verified": True},
-        })
-
-    def fake_safe_shortcut(action: str) -> dict:
-        calls.append(("shortcut", action))
-        return _native_postcondition_result({
-            "ok": True,
-            "action": "desktop.safe_shortcut",
-            "summary": "Executed safe shortcut: find",
-            "data": {"shortcut_action": action, "key": "f", "modifiers": ["command"]},
-        })
-
-    def fake_safe_type_text(text: str) -> dict:
-        nonlocal typed_text
-        typed_text = text
-        calls.append(("type", text))
-        return _native_postcondition_result({
-            "ok": True,
-            "action": "desktop.safe_type_text",
-            "summary": "Typed user-provided text into the foreground app",
-            "data": {
-                "app_name": active_app,
-                "active_app_name": active_app,
-                "window_title": "Search",
-                "target_scope": "foreground",
-                "character_count": len(text),
-                "explicit_user_text": True,
-            },
-        })
-
-    def fake_inspect_app(
-        app_name: str,
-        *,
-        open_if_needed: bool = False,
-        focus: bool = False,
-        role_filter: str = "",
-        limit: int = 80,
-    ) -> dict:
-        inspect_calls.append((app_name, open_if_needed))
-        return _native_postcondition_result({
-            "ok": True,
-            "action": "desktop.inspect_app",
-            "summary": f"Inspected {app_name}",
-            "data": {
-                "app_name": app_name,
-                "pid": 1234,
-                "window_id": 42,
-                "app_found": True,
-                "running": True,
-                "focus_verified": focus,
-                "ready_for_foreground_action": True,
-                "ui_elements": {
-                    "ok": True,
-                    "action": "desktop.ui_elements",
-                    "data": {
-                        "app_name": app_name,
-                        "count": 1,
-                        "control_like_count": 1,
-                        "elements": [
-                            {
-                                "role": "AXTextField",
-                                "name": field_target,
-                                "enabled": True,
-                                "value": typed_text,
-                            }
-                        ],
-                        "role_filter": role_filter,
-                        "limit": limit,
-                    },
-                },
-            },
-        })
-
-    def fake_click_ui_element(
-        target: str,
-        *,
-        role_filter: str = "",
-        limit: int = 80,
-        click_count: int = 1,
-    ) -> dict:
-        click_calls.append((target, role_filter, click_count))
-        return _native_postcondition_result({
-            "ok": True,
-            "action": "desktop.click_ui_element",
-            "summary": f"Clicked {target}",
-            "data": {
-                "target": target,
-                "app_name": active_app,
-                "active_app_name": active_app,
-                "role_filter": role_filter,
-                "limit": limit,
-                "click_count": click_count,
-                "clicked": True,
-            },
-        })
-
-    def fake_search_submit() -> dict:
-        calls.append(("search_submit", ""))
-        return _native_postcondition_result({
-            "ok": True,
-            "action": "desktop.search_submit",
-            "summary": "Submitted foreground search query",
-            "data": {"key": "return", "modifiers": []},
-        })
-
-    def fake_type_into_ui_element(
-        target: str,
-        text: str,
-        *,
-        role_filter: str = "",
-        limit: int = 80,
-        expected_app_name: str = "",
-    ) -> dict:
-        nonlocal field_target
-        assert not expected_app_name or expected_app_name == active_app
-        field_target = target
-        fake_click_ui_element(target, role_filter=role_filter, limit=limit)
-        fake_safe_type_text(text)
-        return {
-            "ok": True,
-            "action": "desktop.type_into_ui_element",
-            "summary": f"Typed {len(text)} characters into {target}",
-            "data": {
-                "app_name": active_app,
-                "target": target,
-                "text": text,
-                "role_filter": role_filter,
-                "character_count": len(text),
-                "pid": 1234,
-                "window_id": 42,
-                "grounded_element": {
-                    "role": "AXTextField", "name": target,
-                    "pid": 1234, "window_id": 42,
-                },
-            },
-        }
-
-    def fake_submit_foreground(action: str = "submit") -> dict:
-        nonlocal typed_text
-        assert action == "confirm"
-        calls.append(("search_submit", ""))
-        typed_text = ""
-        return {
-            "ok": True,
-            "action": "desktop.submit_foreground",
-            "data": {"submit_action": action, "key": "return", "modifiers": []},
-        }
-
-    def fake_active_window() -> dict:
-        return _native_postcondition_result({
-            "ok": True,
-            "action": "desktop.active_window",
-            "data": {
-                "app_name": active_app,
-                "active_app_name": active_app,
-                "title": "Search",
-                "focus_verified": True,
-            },
-        })
-
-    def fake_ui_elements(**_kwargs: Any) -> dict:
-        return _native_postcondition_result({
-            "ok": True,
-            "action": "desktop.ui_elements",
-            "data": {
-                "app_name": active_app,
-                "active_app_name": active_app,
-                "pid": 1234,
-                "window_id": 42,
-                "title": "Search",
-                "elements": [
-                    {"role": "AXTextField", "name": field_target, "value": typed_text},
-                ],
-            },
-        })
-
-    monkeypatch.setattr("apps.shell.agent.tools.desktop.app_open", fake_app_open)
-    monkeypatch.setattr("apps.shell.agent.tools.desktop.app_focus", fake_app_focus)
-    monkeypatch.setattr("apps.shell.agent.tools.desktop.inspect_app", fake_inspect_app)
-    monkeypatch.setattr(
-        "apps.shell.agent.tools.desktop.click_ui_element",
-        fake_click_ui_element,
-    )
-    monkeypatch.setattr("apps.shell.agent.tools.desktop.type_into_ui_element", fake_type_into_ui_element)
-    monkeypatch.setattr("apps.shell.agent.tools.desktop.active_window", fake_active_window)
-    monkeypatch.setattr("apps.shell.agent.tools.desktop.ui_elements", fake_ui_elements)
-    monkeypatch.setattr("apps.shell.agent.tools.desktop.desktop_safe_shortcut", fake_safe_shortcut)
-    monkeypatch.setattr("apps.shell.agent.tools.desktop.desktop_safe_type_text", fake_safe_type_text)
-    monkeypatch.setattr("apps.shell.agent.tools.desktop.desktop_search_submit", fake_search_submit)
-    monkeypatch.setattr("apps.shell.agent.tools.desktop.desktop_submit_foreground", fake_submit_foreground)
     try:
-        result = _send_foreground_message(api, "Chrome 点击搜索框输入 yachiyo")
-        run = service.get_run(result["run_id"])
-        event_types = [
-            event["event_type"]
-            for event in service.list_run_events(run["run_id"], include_internal=True)["events"]
-        ]
-
-        assert result["ok"] is True
-        assert result["status"] == "waiting_approval"
-        assert result["agent_task"]["status"] == "waiting_approval"
-        assert calls == []
-        assert inspect_calls == [("Google Chrome", True)]
-        assert result["agent_task"]["pending_approvals"][0]["tool_name"] == (
-            "app.focus_and_type_into_ui_element"
-        )
-        _assert_dict_contains(
-            result["agent_task"]["pending_approvals"][0]["input_preview"],
-            {
-                "app_name": "Google Chrome",
-                "target": "搜索框",
-                "role_filter": "text",
-                "text": "yachiyo",
-            },
-        )
-        assert run["status"] == "approval_required"
-        assert "agent.desktop.intent_completed" not in event_types
-        assert "agent.desktop.intent_approval_required" in event_types
-        assert "model.request.started" not in event_types
-        assert "model.requested" not in event_types
-
-        approved = service.approve_run_approval(run["run_id"])
-        assert approved["status"] == "completed"
-        assert calls == [("focus", "Google Chrome"), ("type", "yachiyo")]
-        assert click_calls == [("搜索框", "text", 1)]
-        assert approved["result"] == (
-            "已在 Google Chrome 的 搜索框 输入文字（7 个字符）。"
-        )
-
+        for goal, target, click_tool, expected, expected_status in (
+            (
+                "Chrome 点击搜索框输入 yachiyo",
+                "搜索",
+                "app.focus_and_click_ui_element",
+                [("focus", "Google Chrome"), ("click", "搜索"), ("type", "yachiyo")],
+                "completed",
+            ),
+            (
+                "打开 Chrome 点击搜索栏输入 yachiyo 并搜索",
+                "搜索",
+                "app.open_and_click_ui_element",
+                [
+                    ("open", "Google Chrome"),
+                    ("focus", "Google Chrome"),
+                    ("click", "搜索"),
+                    ("type", "yachiyo"),
+                    ("search_submit", ""),
+                ],
+                "completed",
+            ),
+            # A noncanonical observed alias is not exact frozen input.  It
+            # may dispatch after approval but cannot manufacture completion.
+            (
+                "Chrome 点击搜索框输入 yachiyo",
+                "搜索框",
+                "app.focus_and_click_ui_element",
+                [("focus", "Google Chrome"), ("click", "搜索框"), ("type", "yachiyo")],
+                "failed",
+            ),
+        ):
+            calls.clear()
+            inspect_calls.clear()
+            state.update(
+                query="",
+                focused=False,
+                submitted=False,
+                target=target,
+                allow_open=click_tool.startswith("app.open"),
+            )
+            result = _send_foreground_message(api, goal)
+            run = service.get_run(result["run_id"])
+            assert result["ok"] is True
+            assert result["status"] == result["agent_task"]["status"] == "waiting_approval"
+            assert inspect_calls == [("Google Chrome", state["allow_open"])]
+            assert calls == [] and state["query"] == "" and not state["focused"]
+            assert run["status"] == "approval_required"
+            assert run["pending_approval"]["tool"] == click_tool
+            _assert_dict_contains(
+                run["pending_approval"]["input_preview"],
+                {
+                    "app_name": "Google Chrome",
+                    "target": target,
+                    "role_filter": "text",
+                    "click_count": 1,
+                },
+            )
+            approved = service.approve_run_approval(run["run_id"])
+            assert approved["status"] == expected_status, approved["result"]
+            assert approved["pending_approval"] == {}
+            assert calls == expected
+            assert state["query"] == "yachiyo"
+            events = service.list_run_events(run["run_id"], include_internal=True)["events"]
+            event_types = [event["event_type"] for event in events]
+            assert ("agent.desktop.intent_completed" in event_types) is (
+                expected_status == "completed"
+            )
+            assert "model.request.started" not in event_types
+            assert "model.requested" not in event_types
+            assert service.get_run(run["run_id"])["user_goal"] == goal
+            assert any(
+                event["event_type"] == "agent.tool.call"
+                and event["payload"].get("tool") == "desktop.ui_elements"
+                for event in events
+            )
+        # Without an explicit open verb, a missing app must not be launched
+        # by the pre-approval inspector or by a fallback effect.
         calls.clear()
-        click_calls.clear()
-        second = _send_foreground_message(api, "打开 Chrome 点击搜索栏输入 yachiyo 并搜索")
-        second_run = service.get_run(second["run_id"])
-        second_event_types = [
-            event["event_type"]
-            for event in service.list_run_events(second_run["run_id"], include_internal=True)["events"]
-        ]
-
-        assert second["ok"] is True
-        assert second["status"] == "waiting_approval"
-        assert second["agent_task"]["pending_approvals"][0]["tool_name"] == (
-            "app.open_and_type_into_ui_element"
-        )
-        _assert_dict_contains(
-            second["agent_task"]["pending_approvals"][0]["input_preview"],
-            {
-                "app_name": "Google Chrome",
-                "target": "搜索栏",
-                "role_filter": "text",
-                "text": "yachiyo",
-            },
-        )
-        assert second_run["status"] == "approval_required"
-        assert "agent.desktop.intent_completed" not in second_event_types
-        assert "agent.desktop.intent_approval_required" in second_event_types
-        assert "model.request.started" not in second_event_types
-        assert "model.requested" not in second_event_types
-
-        second_approved = service.approve_run_approval(second_run["run_id"])
-        assert second_approved["status"] == "approval_required"
-        assert second_approved["pending_approval"]["tool"] == "desktop.submit_foreground"
-        assert calls == [
-            ("open", "Google Chrome"),
-            ("focus", "Google Chrome"),
-            ("type", "yachiyo"),
-        ]
-        second_approved = service.approve_run_approval(second_run["run_id"])
-        assert second_approved["status"] == "completed"
-        assert calls == [
-            ("open", "Google Chrome"),
-            ("focus", "Google Chrome"),
-            ("type", "yachiyo"),
-            ("search_submit", ""),
-        ]
-        assert click_calls == [("搜索栏", "text", 1)]
-        assert second_approved["result"] == (
-            "已在 Google Chrome 的 搜索栏 输入文字（7 个字符）。 "
-            "已向前台发送确认指令。"
-        )
+        inspect_calls.clear()
+        state.update(query="", focused=False, submitted=False, running=False, allow_open=False)
+        missing = _send_foreground_message(api, "Chrome 点击搜索框输入 yachiyo")
+        assert missing["status"] == "failed"
+        assert missing["agent_task"]["pending_approvals"] == []
+        assert inspect_calls == [("Google Chrome", False)]
+        assert calls == []
     finally:
         service.close()
         store.close()
@@ -5462,10 +5353,13 @@ def test_send_message_executes_common_folder_with_open_path(tmp_path, monkeypatc
 
 
 def test_send_message_executes_system_settings_panes_without_model(tmp_path, monkeypatch):
+    from apps.shell.agent.runtime.system_settings_receipts import canonical_settings_pane
+    from apps.shell.agent.tools import desktop
     api, runtime, store = _make_api(tmp_path)
     service = _make_agent_runtime_service(tmp_path)
     runtime.agent_runtime_service = service
     settings_calls: list[str] = []
+    readback_calls: list[str] = []
     monkeypatch.setattr(
         "apps.shell.agent_runtime.get_model_profile_service",
         lambda: SimpleNamespace(
@@ -5496,6 +5390,25 @@ def test_send_message_executes_system_settings_panes_without_model(tmp_path, mon
         "apps.shell.agent.tools.desktop.system_settings_open",
         fake_system_settings_open,
     )
+    def fake_active_window() -> dict:
+        readback_calls.append("window")
+        return {"ok": True, "action": "desktop.active_window", "data": {
+            "app_name": "System Settings", "pid": 100, "window_id": 200,
+            "title": canonical_settings_pane(settings_calls[-1]),
+        }}
+
+    def fake_ui_elements(*, app_name: str, role_filter: str, limit: int) -> dict:
+        readback_calls.append("ui")
+        assert (app_name, role_filter, limit) == ("System Settings", "", 80)
+        pane = canonical_settings_pane(settings_calls[-1])
+        return {"ok": True, "action": "desktop.ui_elements", "data":
+            desktop._parse_ui_elements_output(
+                f"META\tSystem Settings\t100\t{pane}\t200\n"
+                f"1\tAXHeading\t\t{pane}\t\t\ttrue\t0\t0\t100\t100"
+            )}
+
+    monkeypatch.setattr(desktop, "active_window", fake_active_window)
+    monkeypatch.setattr(desktop, "ui_elements", fake_ui_elements)
     try:
         cases = (
             ("打开声音设置", "声音", "已打开系统设置：声音。"),
@@ -5550,6 +5463,7 @@ def test_send_message_executes_system_settings_panes_without_model(tmp_path, mon
             "软件更新",
             "储存空间",
         ]
+        assert readback_calls == ["window", "ui", "window"] * len(cases)
     finally:
         service.close()
         store.close()
@@ -9636,27 +9550,20 @@ def test_send_message_routes_site_search_play_to_approval_without_model(
             for event in service.list_run_events(run["run_id"], include_internal=True)["events"]
         ]
 
+        # Historical selector name is retained for the release baseline.  The
+        # full goal includes playback; navigation alone cannot fulfil it and
+        # no saved model profile is configured to plan the remaining action.
         assert result["ok"] is True
-        assert result["status"] == "waiting_approval"
-        assert open_calls == ["https://www.youtube.com/results?search_query=lo+fi"]
-        assert result["agent_task"]["status"] == "waiting_approval"
-        assert result["agent_task"]["needs_user_action"] is True
-        assert result["agent_task"]["tool_calls"][0]["tool_name"] == "browser.open_url"
-        assert result["agent_task"]["tool_calls"][0]["status"] == "completed"
-        assert result["agent_task"]["pending_approvals"][0]["tool_name"] == "browser.click"
-        _assert_dict_contains(
-            result["agent_task"]["pending_approvals"][0]["input_preview"],
-            {"selector": "search-result=1", "click_count": 1},
-        )
-        assert run["status"] == "approval_required"
-        assert run["pending_approval"]["tool"] == "browser.click"
-        _assert_dict_contains(
-            run["pending_approval"]["input_preview"],
-            {"selector": "search-result=1", "click_count": 1},
-        )
-        assert "agent.desktop.intent_planned" in event_types
-        assert "agent.desktop.intent_approval_required" in event_types
-        assert "agent.tool.approval_required" in event_types
+        assert result["status"] == result["agent_task"]["status"] == "failed"
+        assert "Chat Profile" in result["agent_task"]["summary"]
+        assert open_calls == []
+        assert result["agent_task"]["pending_approvals"] == []
+        assert result["agent_task"]["tool_calls"] == []
+        assert run["status"] == "failed"
+        assert run["pending_approval"] == {}
+        assert run["user_goal"] == "打开 YouTube 搜索 lo fi 并播放"
+        assert "agent.desktop.intent_completed" not in event_types
+        assert "agent.desktop.intent_approval_required" not in event_types
         assert "model.request.started" not in event_types
         assert "model.requested" not in event_types
     finally:
@@ -9821,6 +9728,8 @@ def test_send_message_executes_direct_safe_shortcut_task(tmp_path, monkeypatch):
     service = _make_agent_runtime_service(tmp_path)
     runtime.agent_runtime_service = service
     shortcut_calls: list[str] = []
+    link_state = {"copied": False, "revision": 100}
+    link_url = "https://example.test/yachiyo?q=exact"
     monkeypatch.setattr(
         "apps.shell.agent_runtime.get_model_profile_service",
         lambda: SimpleNamespace(
@@ -9841,6 +9750,9 @@ def test_send_message_executes_direct_safe_shortcut_task(tmp_path, monkeypatch):
 
     def fake_safe_shortcut(action: str) -> dict:
         shortcut_calls.append(action)
+        if action == "copy_current_page_link":
+            link_state["copied"] = True
+            # Dispatch happened, but the clipboard adapter reports no change.
         key = {
             "copy": "c",
             "new_window": "n",
@@ -9888,6 +9800,25 @@ def test_send_message_executes_direct_safe_shortcut_task(tmp_path, monkeypatch):
         })
 
     monkeypatch.setattr("apps.shell.agent.tools.desktop.desktop_safe_shortcut", fake_safe_shortcut)
+    from tests.test_native_current_page_link_copy import _native_ui
+
+    monkeypatch.setattr("apps.shell.agent.tools.desktop.running_apps", lambda: {
+        "ok": True, "action": "desktop.running_apps", "data": {
+            "apps": [{"name": "Google Chrome", "pid": 100, "frontmost": True}],
+            "frontmost": "Google Chrome",
+        }})
+    monkeypatch.setattr("apps.shell.agent.tools.desktop.ui_elements", lambda **kw: {
+        "ok": True, "action": "desktop.ui_elements", "data":
+            _native_ui(link_url, focused=link_state["copied"]),
+    })
+    def clipboard_read(max_chars=2000):
+        text = "old clipboard"
+        return {"ok": True, "action": "clipboard.read", "data": {
+            "text": text, "text_length": len(text), "truncated": False,
+            "pasteboard_revision": link_state["revision"],
+            "pasteboard_revision_stable": True,
+        }}
+    monkeypatch.setattr("apps.shell.agent.tools.desktop.clipboard_read", clipboard_read)
     try:
         cases = (
             ("打开新窗口", "new_window", "已发送“新建窗口”快捷键。"),
@@ -9934,6 +9865,8 @@ def test_send_message_executes_direct_safe_shortcut_task(tmp_path, monkeypatch):
             ("上一个标签", "previous_tab", "已发送“切到上一个标签页”快捷键。"),
         )
         for text, action, summary in cases:
+            link_state["copied"] = False
+            calls_before = len(shortcut_calls)
             expected_summary = (
                 "已执行复制，但无法确认剪贴板内容来自当前选区；任务已停止。"
                 if action == "copy"
@@ -9957,7 +9890,8 @@ def test_send_message_executes_direct_safe_shortcut_task(tmp_path, monkeypatch):
                 assert result["agent_task"]["summary"]
             assert result["agent_task"]["needs_user_action"] is False
             assert result["agent_task"]["pending_approvals"] == []
-            assert result["agent_task"]["tool_calls"][-1]["tool_name"] == "desktop.safe_shortcut"
+            assert any(call["tool_name"] == "desktop.safe_shortcut"
+                       for call in result["agent_task"]["tool_calls"])
             assert task is not None
             assert assistant is not None
             assert assistant.content == result["agent_task"]["summary"]
@@ -9966,14 +9900,17 @@ def test_send_message_executes_direct_safe_shortcut_task(tmp_path, monkeypatch):
             assert "agent.desktop.intent_approval_required" not in event_types
             assert "model.request.started" not in event_types
             assert "model.requested" not in event_types
-            assert shortcut_calls[-1] == action
-            assert result["agent_task"]["tool_calls"][-1]["status"] == "failed"
+            assert shortcut_calls[calls_before:] == [action]
+            expected_status = "failed"
+            assert result["agent_task"]["status"] == run["status"] == expected_status
             assert task.status == TaskStatus.FAILED
             assert assistant.status == MessageStatus.FAILED
-            assert run["status"] == "failed"
             if action == "copy":
                 assert "agent.desktop.intent_unverified" in event_types
             assert "agent.desktop.intent_completed" not in event_types
+            if action == "copy_current_page_link":
+                assert clipboard_read()["data"]["text"] == "old clipboard"
+                assert clipboard_read()["data"]["pasteboard_revision"] == 100
 
         assert shortcut_calls == [action for _text, action, _summary in cases]
     finally:
@@ -11345,6 +11282,7 @@ def test_send_message_executes_direct_search_submit_task(tmp_path, monkeypatch):
     service = _make_agent_runtime_service(tmp_path)
     runtime.agent_runtime_service = service
     submit_calls: list[str] = []
+    submitted = False
     monkeypatch.setattr(
         "apps.shell.agent_runtime.get_model_profile_service",
         lambda: SimpleNamespace(
@@ -11360,6 +11298,8 @@ def test_send_message_executes_direct_search_submit_task(tmp_path, monkeypatch):
     )
 
     def fake_search_submit() -> dict:
+        nonlocal submitted
+        submitted = True
         submit_calls.append("search_submit")
         return _native_postcondition_result({
             "ok": True,
@@ -11373,34 +11313,12 @@ def test_send_message_executes_direct_search_submit_task(tmp_path, monkeypatch):
             "ok": True,
             "action": "desktop.active_window",
             "summary": "Active Google Chrome",
-            "data": {"app_name": "Google Chrome", "title": "Search Results"},
+            "data": {"app_name": "Google Chrome", "pid": 100, "window_id": 200, "title": "Search"},
         })
 
-    def fake_ui_elements(
-        role_filter: str = "",
-        limit: int = 80,
-        app_name: str = "",
-    ) -> dict:
-        return _native_postcondition_result({
-            "ok": True,
-            "action": "desktop.ui_elements",
-            "summary": "Read visible search results",
-            "data": {
-                "app_name": app_name or "Google Chrome",
-                "title": "Search Results",
-                "count": 1,
-                "elements": [
-                    {
-                        "role": "AXLink",
-                        "name": "Yachiyo desktop agent runtime",
-                        "value": "Yachiyo desktop agent runtime",
-                    }
-                ],
-                "visibility_status": "visible",
-                "role_filter": role_filter,
-                "limit": limit,
-            },
-        })
+    def fake_ui_elements(role_filter="", limit=80, app_name="") -> dict:
+        assert app_name in {"", "Google Chrome"}
+        return _native_search_ui_result("Google Chrome", "yachiyo", submitted=submitted)
 
     monkeypatch.setattr(
         "apps.shell.agent.tools.desktop.desktop_search_submit",
@@ -11408,9 +11326,15 @@ def test_send_message_executes_direct_search_submit_task(tmp_path, monkeypatch):
     )
     monkeypatch.setattr("apps.shell.agent.tools.desktop.active_window", fake_active_window)
     monkeypatch.setattr("apps.shell.agent.tools.desktop.ui_elements", fake_ui_elements)
+    monkeypatch.setattr("apps.shell.agent.tools.desktop.running_apps", lambda: {
+        "ok": True, "action": "desktop.running_apps", "data": {
+            "apps": [{"name": "Google Chrome", "pid": 100, "frontmost": True}],
+            "frontmost": "Google Chrome",
+        }})
     try:
         cases = ("提交当前搜索", "press enter to search")
         for text in cases:
+            submitted = False
             result = _send_foreground_message(api, text)
             task = runtime.state.get_task(result["task_id"])
             run = service.get_run(result["run_id"])
@@ -11452,13 +11376,14 @@ def test_send_message_prepares_comm_find_message_then_waits_for_send_approval(
     active_app = ""
     recipient_value = ""
     compose_value = ""
+    searched = False
     target_pid = 4401
     target_window_id = 77
     recipient_element = {
         "pid": target_pid,
         "window_id": target_window_id,
         "identifier": "wechat.recipient-search",
-        "name": "Recipient",
+        "name": "Search",
         "role": "AXTextField",
     }
     compose_element = {
@@ -11517,6 +11442,8 @@ def test_send_message_prepares_comm_find_message_then_waits_for_send_approval(
         })
 
     def fake_safe_shortcut(action: str) -> dict:
+        nonlocal searched
+        searched = False
         calls.append(("shortcut", action))
         return _native_postcondition_result({
             "ok": True,
@@ -11557,6 +11484,8 @@ def test_send_message_prepares_comm_find_message_then_waits_for_send_approval(
         })
 
     def fake_search_submit() -> dict:
+        nonlocal searched
+        searched = True
         calls.append(("search_submit", ""))
         return _native_postcondition_result({
             "ok": True,
@@ -11587,29 +11516,24 @@ def test_send_message_prepares_comm_find_message_then_waits_for_send_approval(
         })
 
     def fake_ui_elements(**_kwargs: Any) -> dict:
-        return _with_native_focused_ui_element(_native_postcondition_result({
-            "ok": True,
-            "action": "desktop.ui_elements",
-            "data": {
-                "app_name": active_app,
-                "active_app_name": active_app,
-                "pid": target_pid,
-                "window_id": target_window_id,
-                "elements": [
-                    {
-                        **recipient_element,
-                        "value": recipient_value,
-                        "enabled": True,
-                    },
-                    {
-                        **compose_element,
-                        "value": compose_value,
-                        "enabled": True,
-                        "focused": True,
-                    },
-                ],
-            },
-        }))
+        from apps.shell.agent.tools import desktop
+        title = "张三" if searched else "Search"
+        lines = [
+            f"META\t{active_app}\t{target_pid}\t{title}\t{target_window_id}",
+            f"1\tAXTextField\t\tSearch\t\t{recipient_value}\ttrue\t0\t0\t100\t100",
+            f"1\tAXTextArea\t\tMessage\t\t{compose_value}\ttrue\t0\t100\t100\t100",
+        ]
+        if searched:
+            lines.extend([
+                "1\tAXTable\t\tSearch Results\t\t\ttrue\t0\t0\t100\t100",
+                f"2\tAXRow\t\t{recipient_value}\t\t\ttrue\t0\t0\t100\t100",
+            ])
+        focused = dict(compose_element if searched else recipient_element)
+        focused.update(app_name=active_app, value=compose_value if searched else recipient_value,
+                       focused=True, enabled=True)
+        lines.append("FOCUSED\t" + json.dumps(focused, ensure_ascii=False))
+        return {"ok": True, "action": "desktop.ui_elements", "data":
+                desktop._parse_ui_elements_output("\n".join(lines))}
 
     monkeypatch.setattr("apps.shell.agent.tools.desktop.app_open", fake_app_open)
     monkeypatch.setattr("apps.shell.agent.tools.desktop.app_focus", fake_app_focus)
@@ -11655,8 +11579,12 @@ def test_send_message_prepares_comm_find_message_then_waits_for_send_approval(
             {"action": "send"},
         )
         assert "agent.desktop.intent_planned" in event_types
-        assert "agent.desktop.intent_approval_required" in event_types
-        assert "agent.tool.approval_required" in event_types
+        assert "tool.requested" in event_types
+        assert any(event["event_type"] == "tool.requested" and
+                   event["payload"]["tool"] == "desktop.submit_foreground"
+                   for event in service.list_run_events(
+                       run["run_id"], include_internal=True
+                   )["events"])
         assert "model.request.started" not in event_types
         assert "model.requested" not in event_types
     finally:
@@ -12750,9 +12678,9 @@ def test_send_message_prepares_app_safe_type_text_then_waits_for_send_approval(
             "ok": True,
             "action": "desktop.ui_elements",
             "data": {
-                "app_name": active_app,
-                "pid": target_pid,
-                "window_id": target_window_id,
+                "app_name": active_app if foreground_verified else "ChatGPT",
+                "pid": target_pid if foreground_verified else 9901,
+                "window_id": target_window_id if foreground_verified else 88,
                 "elements": [
                     {
                         **target_element,
@@ -12830,7 +12758,8 @@ def test_send_message_prepares_app_safe_type_text_then_waits_for_send_approval(
             else:
                 assert calls == expected_calls
                 assert any(
-                    tool_call["tool_name"] == first_tool
+                    tool_call["tool_name"] == "desktop.safe_type_text"
+                    and tool_call["input_preview"] == {"text": "hello"}
                     and tool_call["status"] == "completed"
                     for tool_call in result["agent_task"]["tool_calls"]
                 )
@@ -12849,7 +12778,10 @@ def test_send_message_prepares_app_safe_type_text_then_waits_for_send_approval(
             assert submit_request["plan_id"] == authority["plan_id"]
             assert submit_request["decision_id"] == authority["decision_id"]
             assert submit_request["step_id"] == "submit-foreground-ui"
-            assert submit_request["depends_on"] == ["operate-foreground-ui"]
+            assert submit_request["depends_on"] == (
+                ["operate-foreground-ui"] if first_tool == "app.open_and_safe_type_text"
+                else ["operate-foreground-ui", "verify-typed-draft-operate-foreground-ui"]
+            )
             _assert_dict_contains(
                 submit_request["action_target"],
                 {
@@ -25663,6 +25595,47 @@ def test_message_sorting_does_not_duplicate_untracked_assistant():
     sorted_msgs = ChatAPI._sort_messages_by_task([system, assistant])
 
     assert [msg.message_id for msg in sorted_msgs] == ["s1", "a1"]
+
+
+def _native_search_ui_result(
+    app_name: str, query: str, *, submitted: bool = False, focused: bool = True
+) -> dict:
+    """Use the native parser for a stable search field and independent results."""
+    from apps.shell.agent.tools import desktop
+
+    lines = [
+        f"META\t{app_name}\t100\tSearch\t200",
+        f"1\tAXTextField\t\tSearch\t\t{query}\ttrue\t0\t0\t100\t100",
+    ]
+    if focused:
+        lines.append(
+            "FOCUSED\t"
+            + json.dumps(
+                {
+                    "app_name": app_name,
+                    "pid": 100,
+                    "window_id": 200,
+                    "role": "AXTextField",
+                    "name": "Search",
+                    "identifier": "search",
+                    "value": query,
+                    "focused": True,
+                },
+                ensure_ascii=False,
+            )
+        )
+    if submitted:
+        lines.extend(
+            [
+                "1\tAXTable\t\tSearch Results\t\t\ttrue\t0\t0\t100\t100",
+                f"2\tAXRow\t\t{query}\t\t\ttrue\t0\t0\t100\t100",
+            ]
+        )
+    return {
+        "ok": True,
+        "action": "desktop.ui_elements",
+        "data": desktop._parse_ui_elements_output("\n".join(lines)),
+    }
 
 
 def _with_native_focused_ui_element(result: dict) -> dict:
