@@ -107,6 +107,7 @@ class AgentFutureTaskStore:
             "created_at": str(row["created_at"] or ""),
             "updated_at": str(row["updated_at"] or ""),
             "cancelled_at": str(row["cancelled_at"] or ""),
+            "trigger_in_flight": bool(row["trigger_in_flight"]),
         }
 
     def _record_event(self, future_task_id: str, action: str, payload: dict[str, Any]) -> None:
@@ -200,7 +201,7 @@ class AgentFutureTaskStore:
         return {"ok": True, "future_task": self._row_to_future_task(row)}
 
     def list_tasks(self, *, include_finished: bool = True, limit: int = 100) -> list[dict[str, Any]]:
-        where = "" if include_finished else "WHERE status='scheduled'"
+        where = "" if include_finished else "WHERE status IN ('scheduled', 'claimed', 'executing')"
         rows = self._conn.execute(
             f"""
             SELECT *
@@ -227,7 +228,7 @@ class AgentFutureTaskStore:
                 if row is None:
                     self._conn.rollback()
                     raise KeyError(clean_id)
-                if str(row["status"] or "") != "scheduled":
+                if str(row["status"] or "") not in {"scheduled", "claimed", "executing"}:
                     self._conn.rollback()
                     return {
                         "ok": True,
@@ -238,12 +239,18 @@ class AgentFutureTaskStore:
                 self._conn.execute(
                     """
                     UPDATE future_tasks
-                       SET status='cancelled', error=?, updated_at=?, cancelled_at=?
+                       SET status='cancelled', error=?, updated_at=?, cancelled_at=?,
+                           trigger_claim_id=CASE WHEN trigger_in_flight=1
+                               THEN trigger_claim_id ELSE '' END
                      WHERE future_task_id=?
                     """,
                     (self._redact_secrets(reason).strip(), now, now, clean_id),
                 )
-                self._record_event(clean_id, "future_task.cancel", {"reason": reason})
+                self._record_event(clean_id, "future_task.cancel", {
+                    "reason": reason,
+                    "current_trigger_continues": bool(row["trigger_in_flight"]),
+                    "cancellation_policy": "stop_future_triggers",
+                })
                 updated = self._conn.execute(
                     "SELECT * FROM future_tasks WHERE future_task_id=?",
                     (clean_id,),

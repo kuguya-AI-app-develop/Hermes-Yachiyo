@@ -101,6 +101,7 @@ export async function listStudioFutureTasksForView(): Promise<FutureTaskSpec[]> 
     created_at: futureTask.created_at,
     updated_at: futureTask.updated_at,
     cancelled_at: futureTask.cancelled_at || undefined,
+    trigger_in_flight: futureTask.trigger_in_flight,
   }));
 }
 

@@ -1684,6 +1684,7 @@ export type FutureTaskSnapshot = {
   created_at?: string;
   updated_at?: string;
   cancelled_at?: string | null;
+  trigger_in_flight?: boolean;
 };
 
 export type AgentGroupMemberSnapshot = {

@@ -11617,6 +11617,7 @@ def test_future_task_snapshots_keep_runtime_schedule_fields() -> None:
         "created_at",
         "updated_at",
         "cancelled_at",
+        "trigger_in_flight",
     ]
     assert payload["last_run_id"] == "run-1"
     assert triggered_payload["future_task"]["future_task_id"] == "future-1"
