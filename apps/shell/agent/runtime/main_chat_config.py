@@ -96,6 +96,10 @@ class MainChatRuntimeConfigBuilder:
         )
 
     def tool_policy(self, policy: dict[str, Any] | None = None) -> dict[str, Any]:
+        if isinstance(policy, Mapping) and policy.get("response_only") is True:
+            # Main chat normally adds its baseline capabilities to a policy.
+            # Internal evidence summaries explicitly restrict that surface.
+            return self._compile_tool_policy("custom", {"allowed_tools": []})
         base_allowed = [
             "workspace.list",
             "workspace.read",

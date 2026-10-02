@@ -560,11 +560,12 @@ class ProactiveDesktopService:
         if screenshot_error:
             return self._record_screenshot_failure(prompt, screenshot_error, chat_session)
         task = self._runtime.state.create_task(
-            prompt,
+            "Describe the supplied context and recommend next steps.",
             task_type=TaskType.SCREENSHOT,
             risk_level=RiskLevel.LOW,
             attachments=attachments,
             chat_session_id=getattr(chat_session, "session_id", None),
+            response_context=prompt,
         )
 
         if chat_session is not None:

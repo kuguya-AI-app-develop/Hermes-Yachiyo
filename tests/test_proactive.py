@@ -288,8 +288,8 @@ def test_proactive_service_creates_low_risk_screenshot_task(monkeypatch):
     assert len(tasks[0].attachments) == 1
     assert tasks[0].attachments[0]["kind"] == "image"
     assert tasks[0].attachments[0]["mime_type"] == "image/png"
-    assert "详细对话框阅读" in tasks[0].description
-    assert "TTS 会在播报前另行压缩" in tasks[0].description
+    assert "详细对话框阅读" in tasks[0].response_context
+    assert "TTS 会在播报前另行压缩" in tasks[0].response_context
     assert service.last_task_id == tasks[0].task_id
 
     messages = runtime.chat_session.get_messages()

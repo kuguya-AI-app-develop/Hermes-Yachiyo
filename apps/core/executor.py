@@ -1354,7 +1354,7 @@ class NativeAgentExecutor(ExecutionStrategy):
                         runtime_service=service,
                     )
                     messages[-1]["content"] = (
-                        f"{task.description}\n\n[图片识别结果]\n{vision_result}"
+                        f"{self._task_prompt(task)}\n\n[图片识别结果]\n{vision_result}"
                     )
             group_coordinator = _is_oha_yachiyo_group_coordinator_task(task.description)
             delegation_count = 0
@@ -1370,7 +1370,11 @@ class NativeAgentExecutor(ExecutionStrategy):
                 self._update_processing_message(chat_session, task.task_id, output)
                 if isinstance(output, _AwaitingUserReply):
                     return str(output)
-                delegation_directive = None if group_coordinator else _parse_oha_delegation_directive(output)
+                delegation_directive = (
+                    None
+                    if group_coordinator or task.response_context is not None
+                    else _parse_oha_delegation_directive(output)
+                )
                 if delegation_directive is None:
                     await self._complete_main_chat_run_with_outcome(
                         service,
@@ -1521,12 +1525,18 @@ class NativeAgentExecutor(ExecutionStrategy):
             {
                 "role": "user",
                 "content": self._task_user_content(
-                    task.description,
+                    self._task_prompt(task),
                     _task_image_paths(task) if image_paths is None else image_paths,
                 ),
             }
         )
         return messages
+
+    @staticmethod
+    def _task_prompt(task: TaskInfo) -> str:
+        if task.response_context is None:
+            return task.description
+        return f"{task.description}\n\n[Supplied context]\n{task.response_context}"
 
     @staticmethod
     def _safe_get(getter: Optional[Callable[[], str]]) -> str:
@@ -1552,6 +1562,11 @@ class NativeAgentExecutor(ExecutionStrategy):
         if not callable(execute_loop):
             return await asyncio.to_thread(service.call_main_chat_model, run_id, messages)
         kwargs = self._main_chat_runtime_policy_kwargs()
+        if task.response_context is not None:
+            # Internal summaries describe evidence that is already supplied.
+            # Their context may contain the original effectful request, but
+            # it cannot authorize a fresh tool call or delegation.
+            kwargs["tool_policy"] = {"allowed_tools": [], "response_only": True}
         if runtime_execution_metadata:
             kwargs["runtime_execution_metadata"] = runtime_execution_metadata
         run = await asyncio.to_thread(execute_loop, run_id, messages, **kwargs)

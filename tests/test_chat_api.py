@@ -15888,10 +15888,10 @@ def test_manual_group_session_keeps_context_for_agent_mentions(tmp_path, monkeyp
         )
         first_summary_task = runtime.state.get_task(first_summary["task_id"])
         assert first_summary_task is not None
-        assert "[Oha-Yachiyo 群组直接 Agent 汇总]" in first_summary_task.description
-        assert "用户原始请求：@Design 做一版视觉方向" in first_summary_task.description
-        assert "Design：已完成" in first_summary_task.description
-        assert "汇报：Design result" in first_summary_task.description
+        assert "[Oha-Yachiyo 群组直接 Agent 汇总]" in first_summary_task.response_context
+        assert "用户原始请求：@Design 做一版视觉方向" in first_summary_task.response_context
+        assert "Design：已完成" in first_summary_task.response_context
+        assert "汇报：Design result" in first_summary_task.response_context
         runtime.state.update_task_status(first_summary["task_id"], TaskStatus.COMPLETED, result="Design summary done")
         updated_first_agent = next(
             message
@@ -15932,9 +15932,9 @@ def test_manual_group_session_keeps_context_for_agent_mentions(tmp_path, monkeyp
         )
         second_summary_task = runtime.state.get_task(second_summary["task_id"])
         assert second_summary_task is not None
-        assert "用户原始请求：@Code 实现它" in second_summary_task.description
-        assert "Code：已完成" in second_summary_task.description
-        assert "汇报：Code result" in second_summary_task.description
+        assert "用户原始请求：@Code 实现它" in second_summary_task.response_context
+        assert "Code：已完成" in second_summary_task.response_context
+        assert "汇报：Code result" in second_summary_task.response_context
         runtime.state.update_task_status(second_summary["task_id"], TaskStatus.FAILED, error="主模型整理超时")
         updated_second_agent = next(
             message
@@ -16143,16 +16143,16 @@ def test_direct_group_agent_summary_includes_user_followups(tmp_path, monkeypatc
         summary_task = runtime.state.get_task(summary_message["task_id"])
 
         assert summary_task is not None
-        assert "用户原始请求：@Design 做一版视觉方向" in summary_task.description
-        assert "用户后续补充/纠偏：" in summary_task.description
-        assert "- 补充：这版先按移动端优先，颜色不要太亮" in summary_task.description
-        assert "- @主模型 把最终说明改成按移动端验收点输出" in summary_task.description
-        assert "另一个目标：再做一个 logo 方向" not in summary_task.description
-        assert "安排第二轮视觉目标" not in summary_task.description
-        assert "汇报：设计方向已经整理完成。" in summary_task.description
-        assert "执行线索：" in summary_task.description
-        assert "工具调用：artifact.write" in summary_task.description
-        assert "design/mobile-direction.md" in summary_task.description
+        assert "用户原始请求：@Design 做一版视觉方向" in summary_task.response_context
+        assert "用户后续补充/纠偏：" in summary_task.response_context
+        assert "- 补充：这版先按移动端优先，颜色不要太亮" in summary_task.response_context
+        assert "- @主模型 把最终说明改成按移动端验收点输出" in summary_task.response_context
+        assert "另一个目标：再做一个 logo 方向" not in summary_task.response_context
+        assert "安排第二轮视觉目标" not in summary_task.response_context
+        assert "汇报：设计方向已经整理完成。" in summary_task.response_context
+        assert "执行线索：" in summary_task.response_context
+        assert "工具调用：artifact.write" in summary_task.response_context
+        assert "design/mobile-direction.md" in summary_task.response_context
     finally:
         store.close()
 
@@ -16372,9 +16372,9 @@ def test_direct_group_agent_command_flushes_previous_completed_agent_summary(tmp
         )
         summary_task = runtime.state.get_task(summary.task_id)
         assert summary_task is not None
-        assert "用户原始请求：@Design 做一版视觉方向" in summary_task.description
-        assert "汇报：设计方向完成。" in summary_task.description
-        assert "写一个验证脚本" not in summary_task.description
+        assert "用户原始请求：@Design 做一版视觉方向" in summary_task.response_context
+        assert "汇报：设计方向完成。" in summary_task.response_context
+        assert "写一个验证脚本" not in summary_task.response_context
 
         coding_message = next(
             message
@@ -16528,9 +16528,9 @@ def test_manual_group_agent_error_flushes_previous_completed_agent_summary(tmp_p
         )
         summary_task = runtime.state.get_task(summary["task_id"])
         assert summary_task is not None
-        assert "用户原始请求：@Design 做一版视觉方向" in summary_task.description
-        assert "汇报：设计方向完成。" in summary_task.description
-        assert "实现它" not in summary_task.description
+        assert "用户原始请求：@Design 做一版视觉方向" in summary_task.response_context
+        assert "汇报：设计方向完成。" in summary_task.response_context
+        assert "实现它" not in summary_task.response_context
     finally:
         store.close()
 
@@ -16639,9 +16639,9 @@ def test_manual_group_workflow_run_flushes_previous_completed_agent_summary(tmp_
         )
         summary_task = runtime.state.get_task(summary["task_id"])
         assert summary_task is not None
-        assert "用户原始请求：@Design 做一版视觉方向" in summary_task.description
-        assert "汇报：设计方向完成。" in summary_task.description
-        assert "@Flow 跑一下流程" not in summary_task.description
+        assert "用户原始请求：@Design 做一版视觉方向" in summary_task.response_context
+        assert "汇报：设计方向完成。" in summary_task.response_context
+        assert "@Flow 跑一下流程" not in summary_task.response_context
     finally:
         store.close()
 
@@ -16929,9 +16929,9 @@ def test_manual_group_agent_creation_failure_reports_to_main_model(tmp_path, mon
         )
         summary_task = runtime.state.get_task(summary_message["task_id"])
         assert summary_task is not None
-        assert "用户原始请求：@Design 做一版视觉方向" in summary_task.description
-        assert "Design：执行失败" in summary_task.description
-        assert "汇报：工具配置缺失" in summary_task.description
+        assert "用户原始请求：@Design 做一版视觉方向" in summary_task.response_context
+        assert "Design：执行失败" in summary_task.response_context
+        assert "汇报：工具配置缺失" in summary_task.response_context
     finally:
         store.close()
 
@@ -17005,9 +17005,9 @@ def test_manual_group_agent_run_failure_reports_to_main_model(tmp_path, monkeypa
         )
         summary_task = runtime.state.get_task(summary_message["task_id"])
         assert summary_task is not None
-        assert "用户原始请求：@Design 做一版视觉方向" in summary_task.description
-        assert "Design：执行失败" in summary_task.description
-        assert "汇报：模型调用超时。" in summary_task.description
+        assert "用户原始请求：@Design 做一版视觉方向" in summary_task.response_context
+        assert "Design：执行失败" in summary_task.response_context
+        assert "汇报：模型调用超时。" in summary_task.response_context
     finally:
         store.close()
 
@@ -17093,8 +17093,8 @@ def test_manual_group_agent_completion_after_session_switch_writes_back_original
         assert summary_message.status == MessageStatus.PROCESSING.value
         assert summary_task is not None
         assert summary_task.chat_session_id == original_session_id
-        assert "用户原始请求：@Design 做一版视觉方向" in summary_task.description
-        assert "汇报：视觉方向已经完成。" in summary_task.description
+        assert "用户原始请求：@Design 做一版视觉方向" in summary_task.response_context
+        assert "汇报：视觉方向已经完成。" in summary_task.response_context
     finally:
         store.close()
 
@@ -17205,9 +17205,9 @@ def test_manual_group_agent_approval_completion_reports_to_main_model(tmp_path, 
         )
         summary_task = runtime.state.get_task(summary_message["task_id"])
         assert summary_task is not None
-        assert "用户原始请求：@Design 做一版视觉方向" in summary_task.description
-        assert "Design：已完成" in summary_task.description
-        assert "汇报：视觉方向已经完成。" in summary_task.description
+        assert "用户原始请求：@Design 做一版视觉方向" in summary_task.response_context
+        assert "Design：已完成" in summary_task.response_context
+        assert "汇报：视觉方向已经完成。" in summary_task.response_context
     finally:
         store.close()
 
@@ -17317,9 +17317,9 @@ def test_manual_group_agent_approval_rejection_reports_to_main_model(tmp_path, m
         )
         summary_task = runtime.state.get_task(summary_message["task_id"])
         assert summary_task is not None
-        assert "用户原始请求：@Design 做一版视觉方向" in summary_task.description
-        assert "Design：已取消" in summary_task.description
-        assert "汇报：工具审批已拒绝：不需要写文件。" in summary_task.description
+        assert "用户原始请求：@Design 做一版视觉方向" in summary_task.response_context
+        assert "Design：已取消" in summary_task.response_context
+        assert "汇报：工具审批已拒绝：不需要写文件。" in summary_task.response_context
     finally:
         store.close()
 
@@ -17509,12 +17509,12 @@ def test_group_main_model_dispatch_result_creates_agent_run_messages(tmp_path, m
         assert assistant_messages[0]["metadata"]["group_agent_summary_pending"] is True
         summary_task = runtime.state.get_task(summary_message["task_id"])
         assert summary_task is not None
-        assert "[Oha-Yachiyo 群组 Agent 汇总]" in summary_task.description
-        assert "不要再派发新的 Agent 任务" in summary_task.description
-        assert "汇报：Design done" in summary_task.description
-        assert "产物：design-01.md (tool_artifact)" in summary_task.description
-        assert "另有 2 个产物见 Run Detail" in summary_task.description
-        assert "汇报：Code done" in summary_task.description
+        assert "[Oha-Yachiyo 群组 Agent 汇总]" in summary_task.response_context
+        assert "不要再派发新的 Agent 任务" in summary_task.response_context
+        assert "汇报：Design done" in summary_task.response_context
+        assert "产物：design-01.md (tool_artifact)" in summary_task.response_context
+        assert "另有 2 个产物见 Run Detail" in summary_task.response_context
+        assert "汇报：Code done" in summary_task.response_context
 
         runtime.state.update_task_status(
             summary_message["task_id"],
@@ -17803,9 +17803,9 @@ def test_plain_group_message_can_dispatch_agents_via_main_model_result(tmp_path,
         )
         summary_task = runtime.state.get_task(summary_message["task_id"])
         assert summary_task is not None
-        assert "用户原始请求：我想让群里合适的 Agent 做个视觉测试" in summary_task.description
-        assert "Design：已完成" in summary_task.description
-        assert "汇报：视觉方案已经整理好。" in summary_task.description
+        assert "用户原始请求：我想让群里合适的 Agent 做个视觉测试" in summary_task.response_context
+        assert "Design：已完成" in summary_task.response_context
+        assert "汇报：视觉方案已经整理好。" in summary_task.response_context
     finally:
         store.close()
 
@@ -17931,12 +17931,12 @@ def test_plain_group_goal_dispatches_two_agents_and_summarizes(tmp_path, monkeyp
         summary_task = runtime.state.get_task(summary_message["task_id"])
         assert summary_task is not None
         assert summary_message["status"] == "processing"
-        assert "用户原始请求：我想让群里合适的 Agent 分别做 UI 验收和验证脚本方案" in summary_task.description
-        assert "Design：已完成" in summary_task.description
-        assert "Coding：已完成" in summary_task.description
-        assert "汇报：设计验收点已经整理好。" in summary_task.description
-        assert "汇报：验证脚本方案已经整理好。" in summary_task.description
-        assert "不要再派发新的 Agent 任务" in summary_task.description
+        assert "用户原始请求：我想让群里合适的 Agent 分别做 UI 验收和验证脚本方案" in summary_task.response_context
+        assert "Design：已完成" in summary_task.response_context
+        assert "Coding：已完成" in summary_task.response_context
+        assert "汇报：设计验收点已经整理好。" in summary_task.response_context
+        assert "汇报：验证脚本方案已经整理好。" in summary_task.response_context
+        assert "不要再派发新的 Agent 任务" in summary_task.response_context
 
         runtime.state.update_task_status(
             summary_message["task_id"],
@@ -18148,16 +18148,16 @@ def test_plain_group_goal_mixed_agent_outcomes_waits_and_summarizes(tmp_path, mo
         assert final_payload["approval_count"] == 0
         assert final_delegated["Design"]["metadata"]["agent_report_status"] == "completed"
         assert final_delegated["Coding"]["metadata"]["agent_report_status"] == "failed"
-        assert "用户原始请求：请让群里合适的 Agent 分别整理 UI 验收点和运行验证脚本" in summary_task.description
-        assert "Design：已完成" in summary_task.description
-        assert "汇报：UI 验收点已经整理完成。" in summary_task.description
-        assert "Coding：执行失败" in summary_task.description
-        assert "汇报：验证脚本失败：plain group verify failed" in summary_task.description
-        assert "执行线索：" in summary_task.description
-        assert "terminal.run" in summary_task.description
-        assert "python3 verify_plain_group.py" in summary_task.description
-        assert "plain group verify failed" in summary_task.description
-        assert "回复必须明确区分：成功项、失败/取消/拒绝项、失败原因、未执行派活、可验收内容/产物、用户下一步可选动作。" in summary_task.description
+        assert "用户原始请求：请让群里合适的 Agent 分别整理 UI 验收点和运行验证脚本" in summary_task.response_context
+        assert "Design：已完成" in summary_task.response_context
+        assert "汇报：UI 验收点已经整理完成。" in summary_task.response_context
+        assert "Coding：执行失败" in summary_task.response_context
+        assert "汇报：验证脚本失败：plain group verify failed" in summary_task.response_context
+        assert "执行线索：" in summary_task.response_context
+        assert "terminal.run" in summary_task.response_context
+        assert "python3 verify_plain_group.py" in summary_task.response_context
+        assert "plain group verify failed" in summary_task.response_context
+        assert "回复必须明确区分：成功项、失败/取消/拒绝项、失败原因、未执行派活、可验收内容/产物、用户下一步可选动作。" in summary_task.response_context
 
         runtime.state.update_task_status(
             summary_message["task_id"],
@@ -18466,10 +18466,10 @@ def test_group_dispatch_reports_skipped_agent_not_in_group(tmp_path, monkeypatch
         )
         summary_task = runtime.state.get_task(summary_message["task_id"])
         assert summary_task is not None
-        assert "未执行派活" in summary_task.description
-        assert "未执行派活：" in summary_task.description
-        assert "- Ghost: 不在当前群组中" in summary_task.description
-        assert "汇报：Design done" in summary_task.description
+        assert "未执行派活" in summary_task.response_context
+        assert "未执行派活：" in summary_task.response_context
+        assert "- Ghost: 不在当前群组中" in summary_task.response_context
+        assert "汇报：Design done" in summary_task.response_context
     finally:
         store.close()
 
@@ -18531,9 +18531,9 @@ def test_group_dispatch_all_skipped_still_creates_main_summary(tmp_path, monkeyp
         assert summary_message["status"] == "processing"
         summary_task = runtime.state.get_task(summary_message["task_id"])
         assert summary_task is not None
-        assert "未执行派活：" in summary_task.description
-        assert "- Ghost: 不在当前群组中" in summary_task.description
-        assert "没有 Agent 实际执行" in summary_task.description
+        assert "未执行派活：" in summary_task.response_context
+        assert "- Ghost: 不在当前群组中" in summary_task.response_context
+        assert "没有 Agent 实际执行" in summary_task.response_context
     finally:
         store.close()
 
@@ -18599,8 +18599,8 @@ def test_group_dispatch_workflow_request_guides_to_studio(tmp_path, monkeypatch)
         )
         summary_task = runtime.state.get_task(summary_message["task_id"])
         assert summary_task is not None
-        assert "Workflow Studio" in summary_task.description
-        assert "没有 Agent 实际执行" in summary_task.description
+        assert "Workflow Studio" in summary_task.response_context
+        assert "没有 Agent 实际执行" in summary_task.response_context
     finally:
         store.close()
 
@@ -18661,9 +18661,9 @@ def test_group_dispatch_run_creation_failure_reports_to_main_summary(tmp_path, m
         assert summary_message["status"] == "processing"
         summary_task = runtime.state.get_task(summary_message["task_id"])
         assert summary_task is not None
-        assert "Code：执行失败" in summary_task.description
-        assert "任务：写一个测试脚本" in summary_task.description
-        assert "汇报：Agent 模型配置不可用" in summary_task.description
+        assert "Code：执行失败" in summary_task.response_context
+        assert "任务：写一个测试脚本" in summary_task.response_context
+        assert "汇报：Agent 模型配置不可用" in summary_task.response_context
     finally:
         store.close()
 
@@ -20458,7 +20458,7 @@ def test_group_dispatch_agent_completion_after_session_switch_writes_back_origin
         assert summary_message.status == MessageStatus.PROCESSING.value
         assert summary_task is not None
         assert summary_task.chat_session_id == original_session_id
-        assert "汇报：视觉测试已经完成。" in summary_task.description
+        assert "汇报：视觉测试已经完成。" in summary_task.response_context
     finally:
         store.close()
 
@@ -20766,7 +20766,7 @@ def test_group_agent_approval_completion_creates_main_summary(tmp_path, monkeypa
         assert summary_message["metadata"]["group_agent_summary_for_task_id"] == sent["task_id"]
         summary_task = runtime.state.get_task(summary_message["task_id"])
         assert summary_task is not None
-        assert "汇报：测试已经通过，覆盖群组派发和审批恢复。" in summary_task.description
+        assert "汇报：测试已经通过，覆盖群组派发和审批恢复。" in summary_task.response_context
         assert payload["is_processing"] is True
     finally:
         store.close()
@@ -20929,8 +20929,8 @@ def test_plain_group_goal_approval_flow_continues_to_main_summary(tmp_path, monk
             "验证脚本运行通过。"
         )
         assert summary_task is not None
-        assert "Coding：已完成" in summary_task.description
-        assert "汇报：验证脚本运行通过。" in summary_task.description
+        assert "Coding：已完成" in summary_task.response_context
+        assert "汇报：验证脚本运行通过。" in summary_task.response_context
 
         runtime.state.update_task_status(
             summary_message["task_id"],
@@ -21025,8 +21025,8 @@ def test_group_direct_agent_summary_concurrent_calls_create_one_followup(tmp_pat
         assert agent_message.metadata["group_agent_summary_pending"] is True
         assert summary_task is not None
         assert summary_task.chat_session_id == runtime.chat_session.session_id
-        assert "[Oha-Yachiyo 群组直接 Agent 汇总]" in summary_task.description
-        assert "用户原始请求：@Design 做并发整理" in summary_task.description
+        assert "[Oha-Yachiyo 群组直接 Agent 汇总]" in summary_task.response_context
+        assert "用户原始请求：@Design 做并发整理" in summary_task.response_context
     finally:
         runtime.state.create_task = original_create_task
         release_create_task.set()
@@ -21122,8 +21122,8 @@ def test_group_dispatch_uses_runtime_native_service_end_to_end(tmp_path, monkeyp
         assert summary_message["status"] == "processing"
         assert summary_task is not None
         assert summary_task.chat_session_id == runtime.chat_session.session_id
-        assert "Coding：已完成" in summary_task.description
-        assert "汇报：Coding native dispatch result" in summary_task.description
+        assert "Coding：已完成" in summary_task.response_context
+        assert "汇报：Coding native dispatch result" in summary_task.response_context
     finally:
         service.close()
         store.close()
@@ -21313,7 +21313,7 @@ def test_group_direct_agent_completion_keeps_full_goal_in_chat(tmp_path, monkeyp
         )
         summary_task = runtime.state.get_task(summary_message["task_id"])
         assert summary_task is not None
-        assert long_goal in summary_task.description
+        assert long_goal in summary_task.response_context
     finally:
         store.close()
 
@@ -21508,8 +21508,8 @@ def test_group_agent_approval_rejection_creates_main_summary(tmp_path, monkeypat
         assert summary_message["status"] == "processing"
         summary_task = runtime.state.get_task(summary_message["task_id"])
         assert summary_task is not None
-        assert "Design：已取消" in summary_task.description
-        assert "汇报：工具审批已拒绝：Rejected from chat" in summary_task.description
+        assert "Design：已取消" in summary_task.response_context
+        assert "汇报：工具审批已拒绝：Rejected from chat" in summary_task.response_context
     finally:
         store.close()
 
@@ -21621,8 +21621,8 @@ def test_group_agent_approval_waits_for_all_delegates_before_summary(tmp_path, m
         assert summary_message["status"] == "processing"
         summary_task = runtime.state.get_task(summary_message["task_id"])
         assert summary_task is not None
-        assert "汇报：设计稿已经完成。" in summary_task.description
-        assert "汇报：字符计数脚本已经完成。" in summary_task.description
+        assert "汇报：设计稿已经完成。" in summary_task.response_context
+        assert "汇报：字符计数脚本已经完成。" in summary_task.response_context
     finally:
         store.close()
 
@@ -21832,21 +21832,21 @@ def test_group_multiple_agent_approvals_wait_until_every_delegate_terminal(tmp_p
         )
         summary_task = runtime.state.get_task(summary_message["task_id"])
         assert summary_task is not None
-        assert "回复必须明确区分：成功项、失败/取消/拒绝项、失败原因、未执行派活、可验收内容/产物、用户下一步可选动作。" in summary_task.description
-        assert "如果有的 Agent 成功、有的 Agent 失败或被拒绝，不要把整轮任务说成单纯成功或单纯失败" in summary_task.description
-        assert "用户后续补充/纠偏：" in summary_task.description
-        assert "- 补充：最终整理时请把失败项和可验收项分开说" in summary_task.description
-        assert "- @主模型 把验收说明改成按成功、失败、待确认三段输出" in summary_task.description
-        assert "另一个目标：再开一个按钮动效方案" not in summary_task.description
-        assert "安排第二轮测试目标" not in summary_task.description
-        assert "Design：已完成" in summary_task.description
-        assert "汇报：UI 验收点已经整理完成。" in summary_task.description
-        assert "Coding：执行失败" in summary_task.description
-        assert "汇报：验证脚本失败：缺少依赖。" in summary_task.description
-        assert "执行线索：" in summary_task.description
-        assert "terminal.run" in summary_task.description
-        assert "python3 verify.py" in summary_task.description
-        assert "Missing dependency" in summary_task.description
+        assert "回复必须明确区分：成功项、失败/取消/拒绝项、失败原因、未执行派活、可验收内容/产物、用户下一步可选动作。" in summary_task.response_context
+        assert "如果有的 Agent 成功、有的 Agent 失败或被拒绝，不要把整轮任务说成单纯成功或单纯失败" in summary_task.response_context
+        assert "用户后续补充/纠偏：" in summary_task.response_context
+        assert "- 补充：最终整理时请把失败项和可验收项分开说" in summary_task.response_context
+        assert "- @主模型 把验收说明改成按成功、失败、待确认三段输出" in summary_task.response_context
+        assert "另一个目标：再开一个按钮动效方案" not in summary_task.response_context
+        assert "安排第二轮测试目标" not in summary_task.response_context
+        assert "Design：已完成" in summary_task.response_context
+        assert "汇报：UI 验收点已经整理完成。" in summary_task.response_context
+        assert "Coding：执行失败" in summary_task.response_context
+        assert "汇报：验证脚本失败：缺少依赖。" in summary_task.response_context
+        assert "执行线索：" in summary_task.response_context
+        assert "terminal.run" in summary_task.response_context
+        assert "python3 verify.py" in summary_task.response_context
+        assert "Missing dependency" in summary_task.response_context
 
         runtime.state.update_task_status(
             summary_message["task_id"],
@@ -22007,8 +22007,8 @@ def test_group_followup_targets_latest_active_delegated_batch(tmp_path, monkeypa
         )
         first_summary_task = runtime.state.get_task(first_summary["task_id"])
         assert first_summary_task is not None
-        assert "图标方案完成。" in first_summary_task.description
-        assert "这条只给第二批汇总" not in first_summary_task.description
+        assert "图标方案完成。" in first_summary_task.response_context
+        assert "这条只给第二批汇总" not in first_summary_task.response_context
 
         service.runs["agent_run_coding"] = {
             **service.runs["agent_run_coding"],
@@ -22028,8 +22028,8 @@ def test_group_followup_targets_latest_active_delegated_batch(tmp_path, monkeypa
         )
         second_summary_task = runtime.state.get_task(second_summary["task_id"])
         assert second_summary_task is not None
-        assert "- 补充：这条只给第二批汇总" in second_summary_task.description
-        assert "验证脚本完成。" in second_summary_task.description
+        assert "- 补充：这条只给第二批汇总" in second_summary_task.response_context
+        assert "验证脚本完成。" in second_summary_task.response_context
     finally:
         store.close()
 
@@ -22150,8 +22150,8 @@ def test_group_followup_after_unsynced_completed_dispatch_enters_summary(tmp_pat
         )
         summary_task = runtime.state.get_task(second_summary["task_id"])
         assert summary_task is not None
-        assert "验证脚本完成。" in summary_task.description
-        assert "- 补充：第二批汇总时请说明怎么验收" in summary_task.description
+        assert "验证脚本完成。" in summary_task.response_context
+        assert "- 补充：第二批汇总时请说明怎么验收" in summary_task.response_context
     finally:
         store.close()
 
@@ -22272,8 +22272,8 @@ def test_group_followup_dispatch_payload_is_ignored_and_stays_in_current_summary
         )
         summary_task = runtime.state.get_task(summary_message["task_id"])
         assert summary_task is not None
-        assert "- 补充：最终整理时请强调不要暴露 JSON" in summary_task.description
-        assert "补充不要暴露 JSON" not in summary_task.description
+        assert "- 补充：最终整理时请强调不要暴露 JSON" in summary_task.response_context
+        assert "补充不要暴露 JSON" not in summary_task.response_context
     finally:
         store.close()
 
@@ -22393,13 +22393,13 @@ def test_plain_group_followup_during_running_agent_enters_main_summary(tmp_path,
         )
         summary_task = runtime.state.get_task(summary_message["task_id"])
         assert summary_task is not None
-        assert "用户原始请求：请让群里合适的 Agent 做移动端验收方案" in summary_task.description
-        assert "用户后续补充/纠偏：" in summary_task.description
-        assert "- 补充：最终整理时请优先列出移动端验收风险" in summary_task.description
-        assert "另一个目标：再做桌面端验收方案" not in summary_task.description
-        assert "Design：已完成" in summary_task.description
-        assert "任务：整理移动端验收方案" in summary_task.description
-        assert "汇报：移动端验收方案已经完成。" in summary_task.description
+        assert "用户原始请求：请让群里合适的 Agent 做移动端验收方案" in summary_task.response_context
+        assert "用户后续补充/纠偏：" in summary_task.response_context
+        assert "- 补充：最终整理时请优先列出移动端验收风险" in summary_task.response_context
+        assert "另一个目标：再做桌面端验收方案" not in summary_task.response_context
+        assert "Design：已完成" in summary_task.response_context
+        assert "任务：整理移动端验收方案" in summary_task.response_context
+        assert "汇报：移动端验收方案已经完成。" in summary_task.response_context
     finally:
         store.close()
 
@@ -22815,17 +22815,17 @@ def test_summarize_delegated_run_creates_main_followup_task(tmp_path, monkeypatc
         assert summary_message.metadata["sender"]["kind"] == "main"
         assert summary_message.metadata["delegated_run_source_task_id"] == task_id
         assert summary_task is not None
-        assert "[Oha-Yachiyo 自动委派 Run 汇总]" in summary_task.description
-        assert "用户原始请求：帮我派一个 Agent 写脚本" in summary_task.description
-        assert "我会交给 Coding Agent 处理。" in summary_task.description
-        assert "run_oha_agent" not in summary_task.description
-        assert "Coding Agent：已完成" in summary_task.description
-        assert "任务：写一个 CLI 工具" in summary_task.description
-        assert "汇报：CLI 工具已经完成。" in summary_task.description
-        assert "执行线索：" in summary_task.description
-        assert "artifact.write" in summary_task.description
-        assert "scripts/tool.py" in summary_task.description
-        assert "产物：scripts/tool.py (code)" in summary_task.description
+        assert "[Oha-Yachiyo 自动委派 Run 汇总]" in summary_task.response_context
+        assert "用户原始请求：帮我派一个 Agent 写脚本" in summary_task.response_context
+        assert "我会交给 Coding Agent 处理。" in summary_task.response_context
+        assert "run_oha_agent" not in summary_task.response_context
+        assert "Coding Agent：已完成" in summary_task.response_context
+        assert "任务：写一个 CLI 工具" in summary_task.response_context
+        assert "汇报：CLI 工具已经完成。" in summary_task.response_context
+        assert "执行线索：" in summary_task.response_context
+        assert "artifact.write" in summary_task.response_context
+        assert "scripts/tool.py" in summary_task.response_context
+        assert "产物：scripts/tool.py (code)" in summary_task.response_context
     finally:
         activity_store.close()
         store.close()
@@ -22914,17 +22914,17 @@ def test_summarize_delegated_run_uses_native_run_projection(tmp_path, monkeypatc
         assert summary_message.metadata["run_group_id"] == run_group["run_group_id"]
         assert summary_message.metadata["delegated_run_source_task_id"] == task_id
         assert summary_task is not None
-        assert "[Oha-Yachiyo 自动委派 Run 汇总]" in summary_task.description
-        assert "用户原始请求：请自动委派一个 Agent 整理 evidence" in summary_task.description
-        assert "run_oha_agent" not in summary_task.description
-        assert "agent_native_coding：已完成" in summary_task.description
-        assert "任务：整理 NativeRunEngine evidence" in summary_task.description
-        assert "汇报：NativeRunEngine delegation finished." in summary_task.description
-        assert "执行线索：" in summary_task.description
-        assert "artifact.write" in summary_task.description
-        assert "reports/native-summary.md" in summary_task.description
-        assert "产物：reports/native-summary.md (report)" in summary_task.description
-        assert "agent-context.md" not in summary_task.description
+        assert "[Oha-Yachiyo 自动委派 Run 汇总]" in summary_task.response_context
+        assert "用户原始请求：请自动委派一个 Agent 整理 evidence" in summary_task.response_context
+        assert "run_oha_agent" not in summary_task.response_context
+        assert "agent_native_coding：已完成" in summary_task.response_context
+        assert "任务：整理 NativeRunEngine evidence" in summary_task.response_context
+        assert "汇报：NativeRunEngine delegation finished." in summary_task.response_context
+        assert "执行线索：" in summary_task.response_context
+        assert "artifact.write" in summary_task.response_context
+        assert "reports/native-summary.md" in summary_task.response_context
+        assert "产物：reports/native-summary.md (report)" in summary_task.response_context
+        assert "agent-context.md" not in summary_task.response_context
     finally:
         native_service.close()
         activity_store.close()
@@ -23097,8 +23097,8 @@ def test_summarize_delegated_run_uses_runtime_injected_activity_store(tmp_path, 
         assert result["run_group_id"] == run["run_group_id"]
         assert result["source_task_id"] == task_id
         assert summary_task is not None
-        assert "Injected Agent：已完成" in summary_task.description
-        assert "Injected activity store was used." in summary_task.description
+        assert "Injected Agent：已完成" in summary_task.response_context
+        assert "Injected activity store was used." in summary_task.response_context
     finally:
         activity_store.close()
         store.close()

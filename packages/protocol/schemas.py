@@ -49,6 +49,9 @@ class TaskInfo(BaseModel):
     chat_session_id: str | None = None
     progress_label: str | None = None
     progress_updated_at: datetime | None = None
+    # Runtime-supplied evidence for a separate, response-only task. The
+    # immutable objective remains description; this context grants no tools.
+    response_context: str | None = None
 
 
 class TaskGetResponse(BaseModel):
