@@ -102,7 +102,7 @@ def test_bridge_app_enables_local_webview_cors():
 
     assert cors_entry is not None
     assert cors_entry.options["allow_origins"] == []
-    assert cors_entry.options["allow_origin_regex"] == r"^https?://(127\.0\.0\.1|localhost)(:\d+)?$"
+    assert cors_entry.options["allow_origin_regex"] == r"^https?://(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$"
     assert cors_entry.options["allow_methods"] == ["*"]
     assert cors_entry.options["allow_headers"] == ["*"]
 
