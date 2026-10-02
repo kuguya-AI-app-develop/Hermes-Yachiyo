@@ -7289,10 +7289,13 @@ def test_send_message_projects_screen_capture_permission_recovery_actions(tmp_pa
 
 
 def test_send_message_executes_structured_recovery_action_without_model(tmp_path, monkeypatch):
+    from apps.shell.agent.tools import desktop
+
     api, runtime, store = _make_api(tmp_path)
     service = _make_agent_runtime_service(tmp_path)
     runtime.agent_runtime_service = service
     settings_open_calls: list[str] = []
+    settings_readback_calls: list[str] = []
     monkeypatch.setattr(
         "apps.shell.agent_runtime.get_model_profile_service",
         lambda: SimpleNamespace(
@@ -7309,23 +7312,47 @@ def test_send_message_executes_structured_recovery_action_without_model(tmp_path
 
     def fake_system_settings_open(target: str) -> dict:
         settings_open_calls.append(target)
-        return _native_postcondition_result(
-            {
-                "ok": True,
-                "action": "system.settings_open",
-                "summary": f"Opened System Settings: {target}",
-                "data": {
-                    "target": target,
-                    "open_target": "system_settings",
-                },
+        return {
+            "ok": True,
+            "action": "system.settings_open",
+            "summary": f"Opened System Settings: {target}",
+            "data": {
+                "target": target,
+                "open_target": "system_settings",
             },
-            observed_state="open",
-        )
+        }
+
+    def fake_active_window() -> dict:
+        settings_readback_calls.append("active")
+        return {
+            "ok": True,
+            "action": "desktop.active_window",
+            "data": {
+                "app_name": "System Settings",
+                "pid": 100,
+                "window_id": 200,
+                "title": "屏幕录制",
+            },
+        }
+
+    def fake_ui_elements(*, app_name: str, role_filter: str, limit: int) -> dict:
+        settings_readback_calls.append("ui")
+        assert (app_name, role_filter, limit) == ("System Settings", "", 80)
+        return {
+            "ok": True,
+            "action": "desktop.ui_elements",
+            "data": desktop._parse_ui_elements_output(
+                "META\tSystem Settings\t100\t屏幕录制\t200\n"
+                "1\tAXHeading\t\t屏幕录制\t\t\ttrue\t0\t0\t100\t100"
+            ),
+        }
 
     monkeypatch.setattr(
         "apps.shell.agent.tools.desktop.system_settings_open",
         fake_system_settings_open,
     )
+    monkeypatch.setattr(desktop, "active_window", fake_active_window)
+    monkeypatch.setattr(desktop, "ui_elements", fake_ui_elements)
     try:
         result = _send_foreground_message(api,
             "打开屏幕录制权限",
@@ -7378,6 +7405,7 @@ def test_send_message_executes_structured_recovery_action_without_model(tmp_path
         assert assistant.status == MessageStatus.COMPLETED
         assert assistant.content == "已打开系统设置：屏幕录制权限。"
         assert settings_open_calls == ["屏幕录制权限"]
+        assert settings_readback_calls == ["active", "ui", "active"]
         assert run["status"] == "completed"
         assert run["pending_approval"] == {}
         assert user_metadata["desktop_permission_recovery"] is True
