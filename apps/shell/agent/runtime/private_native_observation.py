@@ -131,9 +131,9 @@ class PrivateNativeObservationChannel:
         if token.channel is not self:
             return {}
         expected = {key: str(request.get(key) or "") for key in _SCOPE_KEYS}
-        expected["run_id"] = run_id
         if (
-            token.scope != expected
+            expected["run_id"] != run_id
+            or token.scope != expected
             or not all(expected.values())
             or not self._bound_request(request)
         ):

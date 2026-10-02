@@ -87,7 +87,8 @@ def test_wrong_scope_or_forged_public_output_cannot_be_consumed(bad):
         consumer = _channel()
     else:
         changed[bad] = "foreign"
-    assert consumer.consume(token, changed, run_id="other" if bad == "run_id" else "run") == {}
+    # The trusted caller's run does not override a changed request's run.
+    assert consumer.consume(token, changed, run_id="run") == {}
     assert owner.consume(token, request, run_id="run") == {}
 
 
