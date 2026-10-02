@@ -520,6 +520,21 @@ class TaskIntentRouter:
             _speech_act_strip_unauthorized_contextual_tails(text)
         )
         named_media = media_playback_hint(app_control_text)
+        web_search = _web_search_hint(app_control_text, "")
+        if (
+            web_search.get("followup_action") == "click_search_result"
+            and _desktop_operation_hint(app_control_text) == "open"
+            and _text_has_authorized_family_action(text, re.compile(r"搜索|检索|\b(?:search|find)\b", re.I))
+            and _text_has_authorized_family_action(text, re.compile(
+                r"(?:打开|点击|点一下|点按|进入|访问|选择|选中)\s*"
+                r"(?:第?一个|第一条|首个|第1个|第1条|1)\s*(?:搜索结果|结果|链接|条目)"
+                r"|\b(?:open|click|visit|select|choose)\s+(?:the\s+)?"
+                r"(?:first|1st)\s+(?:search\s+)?(?:result|link|item)\b", re.I,
+            ))
+        ):
+            # The browser plan already opens the requested browser search
+            # and selects its first result; an app-open rival adds no action.
+            return _empty_intent("desktop_operation", text)
         if (
             named_media.get("action") == "play"
             and named_media.get("app_name")
@@ -8887,6 +8902,19 @@ class RuntimePlanner:
                     main_step,
                     click_step,
                 ]
+                verify_tool = _first_allowed(("browser.current_page",), allowed)
+                if verify_tool:
+                    steps.append(_step(
+                        intent,
+                        "verify-web-search-navigation",
+                        "Verify selected search result navigation",
+                        "browser.research",
+                        verify_tool,
+                        input_preview={},
+                        depends_on=[click_step.step_id],
+                        action="verify_after_action",
+                        reason="Independently read the run-owned target after the approved search link click.",
+                    ))
                 artifact_depends_on = click_step.step_id
                 if str(intent.inputs.get("post_followup_action") or "").strip() == "extract_text":
                     post_step = _step(

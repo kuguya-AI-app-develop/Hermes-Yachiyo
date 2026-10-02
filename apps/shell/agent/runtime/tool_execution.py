@@ -9818,17 +9818,20 @@ class RuntimeToolRequestRunner:
             "visibility": "internal",
             **source_fields,
         }
+        receipt_kind = str(receipt.get("verification_predicate_kind") or "").strip()
         if (
-            str(receipt.get("verification_predicate_kind") or "").strip()
-            == EXACT_FILE_CONTENT_PRESENT_PREDICATE
+            receipt_kind in {EXACT_FILE_CONTENT_PRESENT_PREDICATE, "exact_search_link_navigation"}
             and current_tool_call_id
         ):
             # The broker's raw workspace.read event is already durable. Give
             # the Runtime receipt projection its own terminal identity so a
             # replay's first-winner rule cannot discard the later authority.
-            projected_call["tool_call_id"] = (
-                f"{current_tool_call_id}:exact-file-readback-receipt"
+            receipt_suffix = (
+                "browser-navigation-receipt"
+                if receipt_kind == "exact_search_link_navigation"
+                else "exact-file-readback-receipt"
             )
+            projected_call["tool_call_id"] = f"{current_tool_call_id}:{receipt_suffix}"
         timeline.append(
             self._timeline(
                 "agent.tool.call",
@@ -11386,6 +11389,16 @@ def _trusted_postcondition_observation_receipt_for_verifier(
                 or action_result.get("permission_error") is True
             ):
                 return {}
+            if (
+                event.get("approval_resume_result_canonical") is True
+                and str(event.get("tool") or event.get("detail") or "") == "browser.click"
+            ):
+                from .browser_navigation_receipts import (
+                    approved_navigation_projection_duplicates,
+                )
+                if approved_navigation_projection_duplicates(event, timeline):
+                    continue
+                return {}
             action_provider = _trusted_runtime_execution_provider_identity(
                 event,
                 action_result,
@@ -11460,6 +11473,13 @@ def _trusted_postcondition_observation_receipt_for_verifier(
                     event, verifier_request, verifier_result, timeline,
                     provider_identity=_trusted_runtime_execution_provider_identity,
                     private_observations=private_copy_observations,
+                )
+            if not observed:
+                from .browser_navigation_receipts import (
+                    trusted_search_link_navigation_receipt,
+                )
+                observed = trusted_search_link_navigation_receipt(
+                    action_tool, event, verifier_request, verifier_result, timeline,
                 )
             if not observed:
                 observed = _trusted_exact_clipboard_content_observation_receipt(
@@ -11961,6 +11981,16 @@ def _trusted_runtime_execution_provider_identity(
         result.get("desktop_execution_route"),
         context.get("desktop_execution_route"),
     )
+    # browser_target is CDP isolation within the local Broker, not a
+    # separately routed execution adapter. Goal receipts must name the actual
+    # executor; the browser observer independently binds the owned target.
+    if (
+        str(result.get("action") or "").startswith("browser.")
+        and str(route.get("selected_provider_kind") or "") == "browser_target"
+        and result.get("desktop_execution_provider_routed") is not True
+        and not provider
+    ):
+        return LOCAL_DESKTOP_PROVIDER_KIND, LOCAL_DESKTOP_PROVIDER_ID
     provider_kind = str(provider.get("provider_kind") or "").strip()
     provider_id = str(provider.get("provider_id") or "").strip()
     route_kind = str(route.get("selected_provider_kind") or "").strip()
@@ -13878,6 +13908,8 @@ def _post_action_verification_predicate_kind(
         return _EXACT_SUBMIT_DISPATCH_PREDICATE
     if clean_tool == "desktop.search_submit":
         return "exact_app_search_result_present"
+    if clean_tool == "browser.click":
+        return "exact_search_link_navigation"
     return ""
 
 

@@ -5789,7 +5789,7 @@ def test_chat_bridge_quick_message_opens_browser_then_requires_approval_for_page
         assert ui_click_calls == []
         assert waiting_task["status"] == "failed"
         assert waiting_task["summary"].startswith(
-            _BACKGROUND_DESKTOP_PROVIDER_HANDOFF_SUMMARY
+            _BACKGROUND_DESKTOP_PROVIDER_HANDOFF_SUMMARY.replace(" Google Chrome", "目标应用")
         )
         assert waiting_task["needs_user_action"] is True
         assert waiting_task["pending_approvals"] == []
@@ -5831,6 +5831,7 @@ def test_chat_bridge_quick_message_searches_then_requires_approval_for_first_res
     app_open_calls: list[str] = []
     open_calls: list[str] = []
     click_calls: list[tuple[str, int]] = []
+    observed_page_urls: list[str] = []
     monkeypatch.setattr(
         "apps.shell.agent_runtime.get_model_profile_service",
         lambda: _FakeNoDefaultProfileService(),
@@ -5879,9 +5880,30 @@ def test_chat_bridge_quick_message_searches_then_requires_approval_for_first_res
                 "selector": selector,
                 "label": "Yachiyo result",
                 "tag": "A",
+                "click_count": 1,
+                "source_url": open_calls[-1],
+                "navigation_url": "https://example.test/yachiyo",
+                "link_target": "",
             },
         }
 
+    def fake_current_page() -> dict:
+        # The click acknowledgement does not prove navigation. Read the same
+        # run-owned CDP target independently after the approved click.
+        url = "https://example.test/yachiyo" if click_calls else open_calls[-1]
+        observed_page_urls.append(url)
+        return {
+            "ok": True,
+            "action": "browser.current_page",
+            "data": {
+                "url": url,
+                "title": "Yachiyo result" if click_calls else "Search",
+                "target_id": "target-search-owned",
+                "target_websocket_available": True,
+            },
+        }
+
+    monkeypatch.setattr("apps.shell.agent.tools.browser.current_page", fake_current_page)
     monkeypatch.setattr("apps.shell.agent.tools.desktop.app_open", fake_app_open)
     monkeypatch.setattr("apps.shell.agent.tools.browser.open_url", fake_open_url)
     monkeypatch.setattr("apps.shell.agent.tools.browser.click", fake_browser_click)
@@ -5895,15 +5917,16 @@ def test_chat_bridge_quick_message_searches_then_requires_approval_for_first_res
                 "launcher_surface": "quick_message",
             },
         )
+        assert result["ok"] is True, result
         task_id = result["task_id"]
         waiting_task = result["agent_task"]
         link = service.get_task_run_link(task_id)
         waiting_run = service.get_run(link["run_id"])
 
-        assert result["ok"] is True
         assert app_open_calls == []
         assert open_calls == ["https://www.google.com/search?q=yachiyo"]
         assert click_calls == []
+        assert observed_page_urls == []
         assert waiting_task["status"] == "waiting_approval"
         assert waiting_task["needs_user_action"] is True
         assert any(
@@ -5921,14 +5944,15 @@ def test_chat_bridge_quick_message_searches_then_requires_approval_for_first_res
             _approval_decision_for_run(waiting_run),
         )
         run = service.get_run(link["run_id"])
-        event_types = [
-            event["event_type"]
-            for event in service.list_run_events(run["run_id"], include_internal=True)["events"]
-        ]
+        stored_events = service.list_run_events(
+            run["run_id"], include_internal=True, limit=500,
+        )["events"]
+        event_types = [event["event_type"] for event in stored_events]
 
         assert app_open_calls == []
         assert open_calls == ["https://www.google.com/search?q=yachiyo"]
         assert click_calls == [("search-result=1", 1)]
+        assert observed_page_urls == ["https://example.test/yachiyo"]
         assert approved.status == "completed", approved.summary
         assert approved.summary == (
             "已打开网页：https://www.google.com/search?q=yachiyo。 "
@@ -5940,6 +5964,34 @@ def test_chat_bridge_quick_message_searches_then_requires_approval_for_first_res
         assert run["pending_approval"] == {}
         assert "agent.desktop.intent_approval_required" in event_types
         assert "agent.desktop.intent_completed" in event_types
+        completion, = [
+            event["payload"] for event in stored_events
+            if event["event_type"] == "agent.desktop.intent_completed"
+        ]
+        evidence = completion["verification_evidence"]
+        assert evidence["verification_status"] == "verified"
+        assert evidence["verification_tool"] == "browser.current_page"
+        assert evidence["verification_source_step_id"] == "click-web-search-result"
+        assert evidence["verification_step_id"] == "verify-web-search-navigation"
+        assert evidence["verification_provider_id"] == "local-native-desktop"
+        assert evidence["verification_tool_call_id"].endswith(":browser-navigation-receipt")
+        from apps.shell.agent.runtime.goal_runtime import (
+            runtime_goal_assessment, runtime_goal_contract,
+        )
+        durable_timeline = [
+            {**event["payload"], "event": event["event_type"]}
+            for event in stored_events
+        ]
+        restored_contract = runtime_goal_contract(
+            run_id=run["run_id"],
+            original_goal="打开 Chrome 搜索 yachiyo 然后打开第一个结果",
+            timeline=durable_timeline,
+            runtime_execution_envelope=None,
+            runtime_execution_metadata=None,
+            messages=[],
+        )
+        assert restored_contract is not None
+        assert runtime_goal_assessment(restored_contract, durable_timeline).completed
         assert "model.request.started" not in event_types
         assert "model.requested" not in event_types
     finally:

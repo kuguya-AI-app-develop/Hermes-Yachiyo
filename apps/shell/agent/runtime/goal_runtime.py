@@ -1646,6 +1646,7 @@ def _trusted_verifier_link(
         "exact_app_search_result_present",
         "exact_selected_full_text_copied",
         "exact_current_page_link_copied",
+        "exact_search_link_navigation",
         EXACT_FILE_CONTENT_PRESENT_PREDICATE,
     }:
         return None
@@ -1785,6 +1786,18 @@ def _verifier_matches_source_attempt(
         ):
             return False
     verifier_tool = str(verifier_link.get("verifier_tool") or "").strip()
+    if predicate_kind == "exact_search_link_navigation":
+        source_input = event.get("input_preview") or {}
+        selector = source_input.get("selector")
+        if (
+            source_tool != "browser.click"
+            or verifier_tool != "browser.current_page"
+            or not isinstance(selector, str)
+            or not re.fullmatch(r"search-result=[1-9][0-9]*", selector)
+            or type(source_input.get("click_count")) is not int
+            or dict(source_input) != {"selector": selector, "click_count": 1}
+        ):
+            return False
     if (
         source_tool in {"terminal.run", "python.run"}
         and verifier_tool in EXACT_FILE_READBACK_VERIFIER_TOOLS
