@@ -7859,6 +7859,12 @@ class RuntimePlanner:
         if followup_safe_shortcut:
             followup_safe_shortcuts.append(dict(followup_safe_shortcut))
         followup_safe_shortcuts.extend(followup_safe_shortcut_sequence)
+        copy_transaction = _select_all_copy_transaction_steps(
+            intent, steps, app_name=app_name,
+            followups=followup_safe_shortcuts, allowed=allowed,
+        )
+        if copy_transaction is not None:
+            return copy_transaction
         if followup_safe_shortcuts and any(step.step_id == "operate-foreground-ui" for step in steps):
             previous_step_id = "operate-foreground-ui"
             for index, followup in enumerate(followup_safe_shortcuts):
@@ -20768,6 +20774,93 @@ _RUNTIME_DOV_TERMINAL_MEDIA_PREPARATION_STEPS = frozenset(
 )
 
 
+def _select_all_copy_transaction_steps(
+    intent: TaskIntentSnapshot,
+    steps: list[ToolPlanStepSnapshot],
+    *,
+    app_name: str,
+    followups: list[dict[str, Any]],
+    allowed: set[str] | None,
+) -> list[ToolPlanStepSnapshot] | None:
+    """Compile explicit select-all/copy as one source-bound clipboard effect."""
+    if not app_name or followups != [{"action": "copy"}]:
+        return None
+    if not {"clipboard.read", "desktop.ui_elements", "desktop.safe_shortcut"}.issubset(
+        allowed or set()
+    ):
+        return None
+    primary = next((s for s in steps if s.step_id == "operate-foreground-ui"), None)
+    if primary is None or primary.input_preview.get("action") != "select_all":
+        return None
+    if primary.tool_name not in {"app.open_and_safe_shortcut", "app.focus_and_safe_shortcut"}:
+        return None
+    prefix = [s for s in steps if s is not primary]
+    before = _step(
+        intent,
+        "read-copy-pasteboard-before",
+        "Read clipboard revision",
+        "clipboard.read",
+        "clipboard.read",
+        input_preview={"max_chars": 2000},
+        depends_on=list(primary.depends_on),
+        action="read_clipboard",
+        reason="Record the pasteboard revision before the explicitly requested copy transaction.",
+    )
+    select_all = primary.model_copy(
+        update={
+            "step_id": "prepare-select-all-for-copy",
+            "depends_on": [before.step_id],
+            "action": "prepare_select_all_for_copy",
+            "reason": "Select the full editable source as preparation for the terminal copy; dispatch alone is not completion.",
+        }
+    )
+    observe = _step(
+        intent,
+        "read-copy-source-ui",
+        "Read focused copy source",
+        "desktop.app_discovery",
+        "desktop.ui_elements",
+        input_preview={"app_name": app_name},
+        depends_on=[select_all.step_id],
+        action="read_ui",
+        reason="Bind exact focused editable text and its process/window identity before copying.",
+    )
+    copy = _step(
+        intent,
+        "copy-selected-full-text",
+        "Copy selected full text",
+        "desktop.ui_operation",
+        "desktop.safe_shortcut",
+        input_preview={"action": "copy"},
+        depends_on=[observe.step_id],
+        action="safe_shortcut",
+        reason="Perform the explicitly requested copy; exact AX and new pasteboard revision must verify the result.",
+    )
+    post_ui = _step(
+        intent,
+        "read-copy-target-ui",
+        "Read copied source window",
+        "desktop.app_discovery",
+        "desktop.ui_elements",
+        input_preview={"app_name": app_name},
+        depends_on=[copy.step_id],
+        action="read_ui",
+        reason="Confirm the focused editable source and its window did not change during copying.",
+    )
+    verify = _step(
+        intent,
+        "verify-copied-full-text",
+        "Verify copied full text",
+        "clipboard.read",
+        "clipboard.read",
+        input_preview={"max_chars": 12000},
+        depends_on=[copy.step_id, post_ui.step_id],
+        action="verify",
+        reason="Require a new stable pasteboard revision containing the exact same focused editable text.",
+    )
+    return [*prefix, before, select_all, observe, copy, post_ui, verify]
+
+
 def _runtime_dov_step_metadata(step: ToolPlanStepSnapshot) -> dict[str, Any]:
     if not _runtime_dov_step_applies(step):
         return {}
@@ -20799,6 +20892,13 @@ def _runtime_dov_step_requires_post_action_verification(
         return False
     tool_name = str(step.tool_name or "").strip()
     action = str(step.action or "").strip()
+    if (
+        step.step_id == "prepare-select-all-for-copy"
+        and action == "prepare_select_all_for_copy"
+        and tool_name in {"app.open_and_safe_shortcut", "app.focus_and_safe_shortcut"}
+        and step.input_preview.get("action") == "select_all"
+    ):
+        return False
     if (
         action in {"dispatch_management", "dispatch_shortcut", "dispatch_submit"}
         or tool_name in _RUNTIME_DOV_MANAGEMENT_DISPATCH_RECEIPT_TOOLS

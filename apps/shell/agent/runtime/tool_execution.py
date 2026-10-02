@@ -14,6 +14,17 @@ from apps.shell.agent.runtime.app_aliases import (
     compact_app_alias,
 )
 from apps.shell.agent.runtime.callbacks import supports_keyword
+from apps.shell.agent.runtime.clipboard_copy_transaction import (
+    COPY_OBSERVATION_RESULT_KEY,
+    COPY_STEP,
+    COPY_TRANSACTION_KEY,
+    COPY_VERIFY_STEP,
+    capture_copy_observation,
+    consume_copy_observation,
+    copy_transaction_bound,
+    exact_copy_observation,
+    prepare_copy_transactions,
+)
 from apps.shell.agent.runtime.desktop_execution_providers import (
     LOCAL_DESKTOP_PROVIDER_ID,
     LOCAL_DESKTOP_PROVIDER_KIND,
@@ -5694,6 +5705,8 @@ class RuntimeToolCallExecutor:
         # below and never written back to model-authored input.
         ensure_tool_call_id(tool_request)
         tool_request = dict(tool_request)
+        private_copy_request = dict(tool_request) if copy_transaction_bound(tool_request) else {}
+        tool_request.pop(COPY_TRANSACTION_KEY, None)
         private_prepared_submit_context = tool_request.pop(
             _RUNTIME_PRIVATE_PREPARED_SUBMIT_REQUEST_KEY,
             None,
@@ -6083,6 +6096,9 @@ class RuntimeToolCallExecutor:
                 ),
             }
         self._assert_execution_lease(run_id)
+        private_copy_observation = capture_copy_observation(
+            private_copy_request, tool_result, local_broker_executed=local_broker_executed,
+        )
         tool_result = self._limit_tool_result(tool_result)
         tool_result = _tool_result_with_desktop_provider_session_context(
             tool_request,
@@ -6220,6 +6236,8 @@ class RuntimeToolCallExecutor:
                         artifact_context,
                     ),
                 )
+        if private_copy_observation is not None:
+            return {**tool_result, COPY_OBSERVATION_RESULT_KEY: private_copy_observation}
         if (
             private_exact_submit_result
             and str(tool_result.get("submitted_action") or "").strip()
@@ -8075,11 +8093,16 @@ class RuntimeToolRequestRunner:
         foreground_readiness_blocker: dict[str, Any] | None = None
         active_window_verification_target: dict[str, Any] | None = None
         private_clipboard_source_receipts: dict[str, dict[str, Any]] = {}
+        private_copy_observations: dict[str, dict[str, Any]] = {}
         private_clipboard_paste_bindings: dict[str, dict[str, Any]] = {}
         private_prepared_submit_contexts: dict[str, dict[str, Any]] = {}
         private_exact_submit_dispatch_receipts: dict[str, dict[str, Any]] = {}
         tool_sequence = 0
         _prepare_runtime_private_clipboard_source_requests(tool_requests)
+        prepare_copy_transactions(
+            tool_requests, user_goal=user_goal, allowed_tools=allowed_tools,
+            run_id=run_id, timeline=timeline,
+        )
         for tool_request in tool_requests:
             # Exact file readback authority is intentionally live-run only.
             # Preserve only the opaque identity attached by an approved
@@ -8786,6 +8809,14 @@ class RuntimeToolRequestRunner:
                 run_id=run_id,
                 budget=budget,
             )
+            private_copy_token = tool_result.pop(COPY_OBSERVATION_RESULT_KEY, None)
+            private_copy_result = consume_copy_observation(
+                private_copy_token, tool_request, run_id=run_id,
+            )
+            if private_copy_result:
+                private_copy_observations[str(tool_request.get("tool_call_id") or "")] = (
+                    private_copy_result
+                )
             private_exact_submit_result = tool_result.pop(
                 _RUNTIME_PRIVATE_EXACT_SUBMIT_RESULT_KEY,
                 None,
@@ -8957,6 +8988,7 @@ class RuntimeToolRequestRunner:
                     private_clipboard_paste_binding=(
                         private_clipboard_paste_binding
                     ),
+                    private_copy_observations=private_copy_observations,
                 )
             )
             if trusted_observation_receipt:
@@ -10223,6 +10255,20 @@ def _post_action_verification_request(
         tool_name in {"desktop.safe_shortcut", "desktop.shortcut"}
         and str(raw_input.get("action") or "").strip().lower() == "copy"
     )
+    if (
+        semantic_clipboard_copy
+        and copy_transaction_bound(tool_request)
+        and source_step_id == COPY_STEP
+    ):
+        terminal = [r for r in remaining_requests if _runtime_request_step_id(r) == COPY_VERIFY_STEP]
+        if len(terminal) == 1 and copy_transaction_bound(terminal[0]):
+            target = terminal[0]
+            target.update({
+                "source_tool": tool_name, "source_step_id": source_step_id,
+                "source_request_id": source_request_id, "source_tool_call_id": source_tool_call_id,
+                "verification_predicate_kind": "exact_selected_full_text_copied",
+            })
+            return {}
     semantic_clipboard_paste = bool(
         tool_name in _CLIPBOARD_PASTE_TOOLS
         and str(raw_input.get("action") or "").strip().lower() == "paste"
@@ -10846,6 +10892,7 @@ def _trusted_postcondition_observation_receipt_for_verifier(
     tool_timeline_start: int,
     run_id: str,
     private_clipboard_paste_binding: Mapping[str, Any] | None = None,
+    private_copy_observations: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Bind a real read-only observation to one exact prior mutation.
 
@@ -10984,6 +11031,12 @@ def _trusted_postcondition_observation_receipt_for_verifier(
                     verifier_request,
                     verifier_result,
                     private_clipboard_paste_binding,
+                )
+            if not observed and action_tool == "desktop.safe_shortcut":
+                observed = exact_copy_observation(
+                    event, verifier_request, verifier_result, timeline,
+                    provider_identity=_trusted_runtime_execution_provider_identity,
+                    private_observations=private_copy_observations,
                 )
             if not observed:
                 observed = _trusted_exact_clipboard_content_observation_receipt(
