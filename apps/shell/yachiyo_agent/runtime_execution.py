@@ -516,6 +516,8 @@ def _full_plan_tool_requests_from_decision(
             request["continue_to_model"] = False
         if _request_needs_model_materialization(tool_name, raw_request_input):
             request["continue_to_model"] = True
+        if step_id.startswith(("inspect-typed-draft-", "verify-typed-draft-")):
+            request["continue_to_model"] = False
         requests.append(request)
     return requests
 

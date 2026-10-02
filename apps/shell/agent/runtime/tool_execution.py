@@ -31,6 +31,10 @@ from apps.shell.agent.runtime.clipboard_paste_target import (
     consume_clipboard_paste_observation,
     private_clipboard_paste_observation_data,
 )
+from apps.shell.agent.runtime.communication_target import (
+    conversation_recipient_matches,
+    is_message_composer,
+)
 from apps.shell.agent.runtime.desktop_execution_providers import (
     LOCAL_DESKTOP_PROVIDER_ID,
     LOCAL_DESKTOP_PROVIDER_KIND,
@@ -107,6 +111,26 @@ from apps.shell.agent.runtime.tool_outcomes import from_tool_result
 from apps.shell.agent.runtime.tool_requests import (
     ensure_tool_call_id,
     normalize_tool_request_input,
+)
+from apps.shell.agent.runtime.typed_draft_target import (
+    OBSERVATION_REQUEST_KEY as TYPED_OBSERVATION_REQUEST_KEY,
+)
+from apps.shell.agent.runtime.typed_draft_target import (
+    OBSERVATION_RESULT_KEY as TYPED_OBSERVATION_RESULT_KEY,
+)
+from apps.shell.agent.runtime.typed_draft_target import (
+    POST_PREFIX as TYPED_DRAFT_POST_PREFIX,
+)
+from apps.shell.agent.runtime.typed_draft_target import (
+    PRE_PREFIX as TYPED_DRAFT_PRE_PREFIX,
+)
+from apps.shell.agent.runtime.typed_draft_target import (
+    bind_typed_source_target,
+    capture_typed_observation,
+    consume_typed_observation,
+    focused_editable_target,
+    prepare_typed_draft_targets,
+    typed_target_receipt,
 )
 from apps.shell.agent.runtime.verification_receipts import (
     APP_WINDOW_PRESENT_PREDICATE,
@@ -5773,7 +5797,7 @@ class RuntimeToolCallExecutor:
         private_native_request = dict(tool_request)
         tool_request.pop(COPY_TRANSACTION_KEY, None)
         tool_request.pop("_runtime_private_clipboard_target", None)
-        tool_request.pop("_runtime_private_typed_observation", None)
+        tool_request.pop(TYPED_OBSERVATION_REQUEST_KEY, None)
         private_prepared_submit_context = tool_request.pop(
             _RUNTIME_PRIVATE_PREPARED_SUBMIT_REQUEST_KEY,
             None,
@@ -6168,6 +6192,9 @@ class RuntimeToolCallExecutor:
         )
         private_clipboard_observation = capture_clipboard_paste_observation(
             private_native_request, tool_result, local_broker_executed=local_broker_executed,
+)
+        typed_observation_token = capture_typed_observation(
+            private_native_request, tool_result, local_broker_executed=local_broker_executed,
         )
         tool_result = self._limit_tool_result(tool_result)
         tool_result = _tool_result_with_desktop_provider_session_context(
@@ -6313,6 +6340,8 @@ class RuntimeToolCallExecutor:
             private_observation_results[CLIPBOARD_OBSERVATION_RESULT_KEY] = (
                 private_clipboard_observation
             )
+        if typed_observation_token is not None:
+            private_observation_results[TYPED_OBSERVATION_RESULT_KEY] = typed_observation_token
         if private_observation_results:
             return {**tool_result, **private_observation_results}
         if (
@@ -7118,6 +7147,7 @@ def _private_prepared_submit_context_from_observation(
     *,
     run_id: str,
     private_clipboard_paste_binding: Mapping[str, Any] | None = None,
+    private_typed_target: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     predicate = str(receipt.get("verification_predicate_kind") or "").strip()
     if predicate not in {
@@ -7176,6 +7206,9 @@ def _private_prepared_submit_context_from_observation(
         == source_tool_call_id
     ):
         expected_text = private_clipboard_paste_binding.get("content")
+    if isinstance(private_typed_target, Mapping):
+        from .typed_draft_target import owned_typed_content
+        expected_text = owned_typed_content(private_typed_target, receipt)
     if not isinstance(expected_text, str):
         source_input = (
             source_event.get("input_preview")
@@ -7229,6 +7262,8 @@ def _private_prepared_submit_context_from_observation(
         "target_ui_identity": dict(target_ui_identity),
         "content": expected_text,
         "content_sha256": content_sha256,
+        "target_recipient": str(receipt.get("target_recipient") or ""),
+        "composer_required": receipt.get("composer_required") is True,
     }
 
 
@@ -7292,6 +7327,7 @@ def persisted_prepared_submit_receipt_from_private_context(
         "provider_kind",
         "provider_id",
         "target_app_name",
+        "target_recipient",
         "content",
         "content_sha256",
         "submit_step_id",
@@ -7308,6 +7344,7 @@ def persisted_prepared_submit_receipt_from_private_context(
         },
         "target_window": dict(context.get("target_window") or {}),
         "target_ui_identity": dict(context.get("target_ui_identity") or {}),
+        "composer_required": context.get("composer_required") is True,
     }
     required = (
         "run_id",
@@ -7449,6 +7486,10 @@ def rehydrate_private_prepared_submit_context(
             and dict(result.get("target_window") or {}) == dict(target_window)
             and dict(result.get("target_ui_identity") or {})
             == dict(target_ui_identity)
+            and str(result.get("target_recipient") or "")
+            == str(persisted.get("target_recipient") or "")
+            and (result.get("composer_required") is True)
+            == (persisted.get("composer_required") is True)
             and str(result.get("provider_kind") or "").strip()
             == str(persisted.get("provider_kind") or "").strip()
             and str(result.get("provider_id") or "").strip()
@@ -7643,6 +7684,10 @@ def _private_prepared_submit_snapshot_revalidation(
         )
     data = snapshot.get("data") if isinstance(snapshot.get("data"), Mapping) else {}
     _observed_app, elements = _trusted_ui_observation_elements(data)
+    if not conversation_recipient_matches(
+        data, str(prepared_context.get("target_recipient") or "")
+    ):
+        return {}
     expected_identity = dict(prepared_context.get("target_ui_identity") or {})
     expected_text = prepared_context.get("content")
     if not isinstance(expected_text, str) or not expected_text or not expected_identity:
@@ -7650,10 +7695,15 @@ def _private_prepared_submit_snapshot_revalidation(
     expected_hash = hashlib.sha256(expected_text.encode("utf-8")).hexdigest()
     if expected_hash != str(prepared_context.get("content_sha256") or "").strip():
         return {}
+    if prepared_context.get("composer_required") is True:
+        live_focused = focused_editable_target(data)
+        elements = [live_focused] if live_focused is not None else []
     exact_target_elements = [
         element
         for element in elements
         if _trusted_editable_ui_target_identity(element) == expected_identity
+        and (prepared_context.get("composer_required") is not True
+             or (element.get("focused") is True and is_message_composer(element)))
     ]
     exact_content_at_target = [
         element
@@ -8182,6 +8232,12 @@ class RuntimeToolRequestRunner:
         tool_timeline_start = len(timeline)
         budget = budget or self._run_budget(run_id, timeline)
         user_goal = self._user_goal_from_messages(messages)
+        private_typed_specs = prepare_typed_draft_targets(
+            tool_requests, user_goal=user_goal, allowed_tools=allowed_tools,
+            timeline=timeline, run_id=run_id,
+        )
+        private_typed_source_contexts: dict[str, dict[str, Any]] = {}
+        private_typed_observations: dict[str, dict[str, Any]] = {}
         foreground_readiness_blocker: dict[str, Any] | None = None
         active_window_verification_target: dict[str, Any] | None = None
         private_clipboard_source_receipts: dict[str, dict[str, Any]] = {}
@@ -8919,6 +8975,15 @@ class RuntimeToolRequestRunner:
                     ),
                 }
                 tool_requests[index] = tool_request
+            typed_context: dict[str, Any] = {}
+            if any(str(dependency).startswith(TYPED_DRAFT_PRE_PREFIX)
+                   for dependency in tool_request.get("depends_on", [])):
+                typed_context = bind_typed_source_target(
+                    tool_request, private_typed_specs, timeline, run_id=run_id,
+                    private_observations=private_typed_observations,
+                )
+                if not typed_context:
+                    raise AgentRuntimeError("typed_draft_target_or_recipient_unverified")
             action_timeline_start = len(timeline)
             self._append_tool_start_progress(
                 tool_request,
@@ -8951,6 +9016,16 @@ class RuntimeToolRequestRunner:
                 private_clipboard_observations[str(tool_request.get("tool_call_id") or "")] = (
                     private_clipboard_result
                 )
+            typed_raw = consume_typed_observation(
+                tool_result.pop(TYPED_OBSERVATION_RESULT_KEY, None), tool_request, run_id=run_id,
+            )
+            if typed_raw:
+                private_typed_observations[str(tool_request["tool_call_id"])] = typed_raw
+            if (
+                typed_context and tool_result.get("ok") is True
+                and not tool_result.get("approval_required")
+            ):
+                private_typed_source_contexts[str(tool_request["tool_call_id"])] = typed_context
             private_exact_submit_result = tool_result.pop(
                 _RUNTIME_PRIVATE_EXACT_SUBMIT_RESULT_KEY,
                 None,
@@ -9133,6 +9208,8 @@ class RuntimeToolRequestRunner:
                     ),
                     private_copy_observations=private_copy_observations,
                     private_clipboard_observations=private_clipboard_observations,
+                    private_typed_source_contexts=private_typed_source_contexts,
+                    private_typed_observations=private_typed_observations,
                 )
             )
             if trusted_observation_receipt:
@@ -9142,6 +9219,9 @@ class RuntimeToolRequestRunner:
                         tool_request,
                         timeline,
                         run_id=run_id,
+                        private_typed_target=private_typed_source_contexts.get(
+                            str(trusted_observation_receipt.get("source_tool_call_id") or "")
+                        ),
                         private_clipboard_paste_binding=(
                             private_clipboard_paste_binding
                         ),
@@ -11038,6 +11118,8 @@ def _trusted_postcondition_observation_receipt_for_verifier(
     private_clipboard_paste_binding: Mapping[str, Any] | None = None,
     private_copy_observations: dict[str, dict[str, Any]] | None = None,
     private_clipboard_observations: dict[str, dict[str, Any]] | None = None,
+    private_typed_source_contexts: Mapping[str, Mapping[str, Any]] | None = None,
+    private_typed_observations: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Bind a real read-only observation to one exact prior mutation.
 
@@ -11168,6 +11250,10 @@ def _trusted_postcondition_observation_receipt_for_verifier(
                     event,
                     verifier_request,
                     verifier_result,
+                    private_typed_target=(private_typed_source_contexts or {}).get(
+                        str(event.get("tool_call_id") or "")
+                    ),
+                    private_typed_observations=private_typed_observations,
                 )
             if not observed:
                 observed = _trusted_exact_pasted_content_observation_receipt(
@@ -11979,7 +12065,17 @@ def _trusted_exact_typed_content_observation_receipt(
     action_event: Mapping[str, Any],
     verifier_request: Mapping[str, Any],
     verifier_result: Mapping[str, Any],
+    *,
+    private_typed_target: Mapping[str, Any] | None = None,
+    private_typed_observations: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    if private_typed_target is not None:
+        return typed_target_receipt(
+            private_typed_target, action_event, verifier_request, verifier_result,
+            private_typed_observations or {},
+        )
+    if _runtime_request_step_id(verifier_request).startswith(TYPED_DRAFT_POST_PREFIX):
+        return {}
     if action_tool not in _EXACT_TYPED_CONTENT_OBSERVATION_TOOLS:
         return {}
     verifier_tool = str(

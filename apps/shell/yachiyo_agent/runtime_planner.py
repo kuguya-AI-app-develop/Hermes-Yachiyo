@@ -4252,6 +4252,7 @@ class RuntimePlanner:
             selected,
             allowed,
         )
+        selected = _intent_with_exact_quoted_body(selected, str(prompt or "").strip())
         plan = self.plan_intent(
             selected,
             allowed_tools=allowed_tools,
@@ -4470,6 +4471,7 @@ class RuntimePlanner:
         selected = bind_candidate(authority_candidate)
         allowed = _allowed_tool_set(allowed_tools)
         selected = _normalize_intent_for_allowed_tools(selected, allowed)
+        selected = _intent_with_exact_quoted_body(selected, immutable_goal)
         plan = self.plan_intent(
             selected,
             allowed_tools=allowed_tools,
@@ -4564,6 +4566,8 @@ class RuntimePlanner:
     ) -> RuntimePlanSnapshot:
         allowed = _allowed_tool_set(allowed_tools)
         intent = _normalize_intent_for_allowed_tools(intent, allowed)
+        if original_goal is not None:
+            intent = _intent_with_exact_quoted_body(intent, str(original_goal))
         readiness = _planner_readiness_context(metadata)
         prefer_background = _planner_prefers_background_desktop(metadata)
         tool_readiness = _planner_tool_readiness_context(
@@ -4747,10 +4751,14 @@ class RuntimePlanner:
         if intent.kind == "desktop_operation":
             return _explicit_clipboard_paste_readback_steps(
                 intent,
-                self._desktop_operation_steps(
+                _explicit_typed_target_steps(
                     intent,
+                    self._desktop_operation_steps(
+                        intent,
+                        allowed,
+                        prefer_background_desktop=prefer_background_desktop,
+                    ),
                     allowed,
-                    prefer_background_desktop=prefer_background_desktop,
                 ),
                 allowed,
             )
@@ -10228,7 +10236,7 @@ class RuntimePlanner:
         if isinstance(direct_message, Mapping):
             direct_steps = _direct_communication_steps(intent, allowed, direct_message)
             if direct_steps:
-                return direct_steps
+                return _explicit_typed_target_steps(intent, direct_steps, allowed)
             if str(direct_message.get("body_source") or "").strip() == "app_search_result":
                 context_steps = _app_search_result_context_steps(
                     intent,
@@ -12221,6 +12229,111 @@ def _context_source_required_capability(source: str) -> str:
     return "artifact.write"
 
 
+
+def _exact_quoted_communication_body(original_goal: str, parsed_body: str) -> str:
+    """Retain literal bytes only when an already parsed explicit body agrees."""
+    for opening, closing in (("\"", "\""), ("'", "'"), ("“", "”"), ("‘", "’")):
+        pattern = (
+            r"(?:说|发送|输入|发|\b(?:say|send|type)\b)\s*" + re.escape(opening)
+            + r"(?P<body>.*?)" + re.escape(closing)
+            + r"\s*(?:并发送|然后发送|并发出)?[。.!！]?\s*$"
+        )
+        match = re.search(pattern, original_goal, re.IGNORECASE | re.DOTALL)
+        if match and " ".join(match["body"].split()) == " ".join(parsed_body.split()):
+            return match["body"]
+    return parsed_body
+
+
+def _intent_with_exact_quoted_body(
+    intent: TaskIntentSnapshot, original_goal: str,
+) -> TaskIntentSnapshot:
+    direct = intent.inputs.get("direct_message_hint")
+    if not isinstance(direct, Mapping) or not isinstance(direct.get("body"), str):
+        return intent
+    body = _exact_quoted_communication_body(original_goal, direct["body"])
+    if body == direct["body"]:
+        return intent
+    inputs = dict(intent.inputs)
+    inputs["direct_message_hint"] = {**direct, "body": body}
+    return intent.model_copy(update={"inputs": inputs, "user_goal": original_goal})
+
+
+def _explicit_typed_target_steps(
+    intent: TaskIntentSnapshot,
+    steps: list[ToolPlanStepSnapshot],
+    allowed: set[str] | None,
+) -> list[ToolPlanStepSnapshot]:
+    """Bind explicit typing to a real focused AX target before preparing send."""
+    observe_tool = _first_allowed(("desktop.ui_elements",), allowed)
+    plain_type = _first_allowed(("desktop.safe_type_text",), allowed)
+    app_focus = _first_allowed(("app.focus", "desktop.focus_app"), allowed)
+    if not observe_tool or not plain_type:
+        return steps
+    direct = intent.inputs.get("direct_message_hint")
+    default_app = str(direct.get("app_name") or "") if isinstance(direct, Mapping) else ""
+    eligible = intent.kind == "communication" or any(
+        step.tool_name == "desktop.submit_foreground" for step in steps
+    )
+    if not eligible:
+        return steps
+    result: list[ToolPlanStepSnapshot] = []
+    verifiers: dict[str, str] = {}
+    for original in steps:
+        dependencies = list(original.depends_on)
+        for dependency in original.depends_on:
+            if dependency in verifiers and verifiers[dependency] not in dependencies:
+                dependencies.append(verifiers[dependency])
+        step = original.model_copy(update={"depends_on": dependencies})
+        payload = dict(step.input_preview)
+        text = payload.get("text")
+        if isinstance(text, str) and step.step_id != "type-communication-recipient":
+            text = _exact_quoted_communication_body(intent.user_goal, text)
+            payload["text"] = text
+            step = step.model_copy(update={"input_preview": payload})
+        app_name = str(payload.get("app_name") or default_app)
+        if (
+            step.tool_name not in {"desktop.safe_type_text", "app.focus_and_safe_type_text"}
+            or not isinstance(text, str) or not text or not app_name
+            or step.approval_required
+        ):
+            result.append(step)
+            continue
+        if step.tool_name == "app.focus_and_safe_type_text":
+            if not app_focus:
+                result.append(step)
+                continue
+            focus_id = f"focus-typed-draft-app-{step.step_id}"
+            result.append(_step(
+                intent, focus_id, "Focus requested message app", "desktop.app_control", app_focus,
+                input_preview={key: value for key, value in payload.items() if key != "text"},
+                depends_on=dependencies, action="focus_app",
+                risk_level=step.risk_level, approval_required=step.approval_required,
+                reason="Retain the requested app focus before observing its typing target.",
+            ))
+            dependencies = [focus_id]
+            payload = {"text": text}
+            step = step.model_copy(update={
+                "tool_name": plain_type, "input_preview": payload,
+                "execution_mode": desktop_tool_execution_mode_for_input(plain_type, payload),
+            })
+        inspect_id = f"inspect-typed-draft-{step.step_id}"
+        verify_id = f"verify-typed-draft-{step.step_id}"
+        result.append(_step(
+            intent, inspect_id, "Inspect exact typing target",
+            "desktop.app_discovery", observe_tool,
+            input_preview={"app_name": app_name, "limit": 80}, depends_on=dependencies,
+            action="read_ui", reason="Observe the actual focused editable target before typing.",
+        ))
+        result.append(step.model_copy(update={"depends_on": [inspect_id]}))
+        result.append(_step(
+            intent, verify_id, "Verify exact typed draft", "desktop.app_discovery", observe_tool,
+            input_preview={"app_name": app_name, "limit": 80}, depends_on=[step.step_id],
+            action="verify", reason="Require the same AX target and exact original user text.",
+        ))
+        verifiers[step.step_id] = verify_id
+    return result
+
+
 def _direct_communication_steps(
     intent: TaskIntentSnapshot,
     allowed: set[str] | None,
@@ -12228,7 +12341,9 @@ def _direct_communication_steps(
 ) -> list[ToolPlanStepSnapshot]:
     app_name = str(direct_message.get("app_name") or "").strip()
     recipient = str(direct_message.get("recipient") or "").strip()
-    body = str(direct_message.get("body") or "").strip()
+    body = _exact_quoted_communication_body(
+        intent.user_goal, str(direct_message.get("body") or "").strip(),
+    )
     body_source = str(direct_message.get("body_source") or "").strip()
     transform = str(direct_message.get("content_transform_hint") or "").strip()
     channel = str(direct_message.get("channel") or "").strip()
