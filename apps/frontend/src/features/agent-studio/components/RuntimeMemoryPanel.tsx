@@ -118,6 +118,9 @@ export function RuntimeMemoryPanel({
                     {typeof futureTask.run_count === 'number' ? <span>{futureTask.run_count} 次运行</span> : null}
                     <code>{futureTask.future_task_id}</code>
                   </div>
+                  {futureTask.status === 'cancelled' && futureTask.trigger_in_flight ? (
+                    <div className="agent-inline-note warn">后续触发已取消，当前 Run 继续执行。</div>
+                  ) : null}
                   {futureTask.error ? <div className="agent-inline-note warn">{futureTask.error}</div> : null}
                 </div>
                 <div className="runtime-management-actions">
@@ -126,7 +129,7 @@ export function RuntimeMemoryPanel({
                       打开 Run
                     </button>
                   ) : null}
-                  {futureTask.status === 'scheduled' ? (
+                  {['scheduled', 'claimed', 'executing'].includes(futureTask.status) ? (
                     <button
                       type="button"
                       className="danger-action"
@@ -160,6 +163,8 @@ function formatEpochDate(value?: number): string {
 
 function futureTaskStatusLabel(status?: string): string {
   if (status === 'scheduled') return '已排程';
+  if (status === 'claimed') return '准备触发';
+  if (status === 'executing') return '正在触发';
   if (status === 'triggered') return '已触发';
   if (status === 'cancelled') return '已取消';
   if (status === 'failed') return '失败';
@@ -167,7 +172,7 @@ function futureTaskStatusLabel(status?: string): string {
 }
 
 function futureTaskStatusTone(status?: string): string {
-  if (status === 'scheduled') return 'running';
+  if (['scheduled', 'claimed', 'executing'].includes(status || '')) return 'running';
   if (status === 'triggered') return 'ready';
   if (status === 'failed' || status === 'cancelled') return 'danger';
   return '';

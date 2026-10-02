@@ -305,6 +305,7 @@ export type FutureTaskSpec = {
   created_at?: string;
   updated_at?: string;
   cancelled_at?: string;
+  trigger_in_flight?: boolean;
 };
 
 export type AgentDraft = {

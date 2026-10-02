@@ -9,7 +9,6 @@ from typing import Any, Callable
 from apps.shell.agent.runtime.credentials import agent_model_credential_ref
 from apps.shell.credential_store import CredentialStoreError
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -244,7 +243,9 @@ CREATE TABLE IF NOT EXISTS future_tasks (
     error TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    cancelled_at TEXT NOT NULL DEFAULT ''
+    cancelled_at TEXT NOT NULL DEFAULT '',
+    trigger_claim_id TEXT NOT NULL DEFAULT '',
+    trigger_in_flight INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS future_task_events (
     event_id TEXT PRIMARY KEY,
@@ -365,6 +366,18 @@ class RuntimeSchemaMigrator:
             )
         if "pending_approval_json" not in run_columns:
             self._conn.execute("ALTER TABLE runs ADD COLUMN pending_approval_json TEXT NOT NULL DEFAULT '{}'")
+        future_task_columns = {
+            str(row["name"])
+            for row in self._conn.execute("PRAGMA table_info(future_tasks)").fetchall()
+        }
+        if future_task_columns and "trigger_claim_id" not in future_task_columns:
+            self._conn.execute(
+                "ALTER TABLE future_tasks ADD COLUMN trigger_claim_id TEXT NOT NULL DEFAULT ''"
+            )
+        if future_task_columns and "trigger_in_flight" not in future_task_columns:
+            self._conn.execute(
+                "ALTER TABLE future_tasks ADD COLUMN trigger_in_flight INTEGER NOT NULL DEFAULT 0"
+            )
         memory_columns = {
             str(row["name"])
             for row in self._conn.execute("PRAGMA table_info(memory_items)").fetchall()

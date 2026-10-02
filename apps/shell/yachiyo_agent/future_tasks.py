@@ -29,6 +29,7 @@ def future_task_snapshot_from_payload(payload: Mapping[str, Any] | None) -> Futu
         created_at=str(raw.get("created_at") or ""),
         updated_at=str(raw.get("updated_at") or ""),
         cancelled_at=_optional_text(raw.get("cancelled_at")),
+        trigger_in_flight=raw.get("trigger_in_flight") is True,
     )
 
 
