@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import replace
 from typing import Any
 
 from apps.shell.agent.runtime.desktop_execution_providers import (
@@ -34,9 +35,11 @@ from apps.shell.agent.runtime.input_bindings import (
     validate_workspace_file_resolution_receipt,
 )
 from apps.shell.agent.runtime.tool_capabilities import capability_ids_for_tool
+from apps.shell.agent.runtime.process_receipts import verified_terminal_process_observation
 from apps.shell.agent.runtime.tool_outcomes import (
     OutcomeStatus,
     ToolOutcome,
+    VerificationStatus,
     canonical_media_playback_state,
     from_tool_result,
     media_track_change_verified,
@@ -571,6 +574,20 @@ def runtime_goal_assessment(
             opened_subgoals=opened_subgoals,
             source_attempts=source_attempts,
         )
+        process_observation = verified_terminal_process_observation(
+            contract,
+            goal_event,
+            result,
+            runtime_owned=_runtime_owned_terminal_event(
+                goal_event,
+                result,
+                run_id=contract.run_id,
+                plan_id=str(goal_event.get("plan_id") or ""),
+            ),
+            eligible_criterion_ids=tuple(eligible_criterion_ids),
+        )
+        if process_observation:
+            outcome = replace(outcome, verification=VerificationStatus.VERIFIED)
         observed = _canonical_observed_payload(
             contract,
             goal_event,
@@ -579,6 +596,7 @@ def runtime_goal_assessment(
             eligible_criterion_ids=eligible_criterion_ids,
             timeline=timeline,
         )
+        observed.update(process_observation)
         recovery_root_target = _recovery_root_target(
             goal_event,
             source_attempts=source_attempts,

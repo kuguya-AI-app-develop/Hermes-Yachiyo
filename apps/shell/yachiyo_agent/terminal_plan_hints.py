@@ -63,7 +63,11 @@ def _clean_terminal_command(value: str) -> str:
         flags=re.IGNORECASE,
     )[0].strip()
     command = re.sub(r"\s*(?:一下|下|吧|吗|嘛|呢)$", "", command, flags=re.IGNORECASE).strip()
-    command = command.strip("「」『』“”\"'`")
+    quote_pairs = {"「": "」", "『": "』", "“": "”", '"': '"', "'": "'", "`": "`"}
+    if command and command[0] in quote_pairs and command[-1] == quote_pairs[command[0]]:
+        command = command[1:-1]
+    if re.match(r"(?:the\s+exact\s+command|the\s+following\s+command|these\s+exact\s+inputs|command\s+payload)\b", command, flags=re.IGNORECASE):
+        return ""
     if command in {"", "起来", "一下", "下"}:
         return ""
     return command
@@ -73,9 +77,15 @@ def _looks_like_shell_command(command: str) -> bool:
     value = str(command or "").strip()
     if not value:
         return False
+    first = re.split(r"[\s;&|<>]", value, maxsplit=1)[0].strip()
+    # Shell punctuation inside a description does not make that description
+    # an executable command. Leave prose and structured options to planning.
+    if first.lower() in {"the", "a", "an", "these", "following", "exact", "command", "commands"}:
+        return False
+    if re.search(r"\b(?:shell|timeout_seconds)\s*=", value):
+        return False
     if re.search(r"(?:&&|\|\||[|;<>])", value):
         return True
-    first = re.split(r"[\s;&|<>]", value, maxsplit=1)[0].strip()
     if first.startswith(("./", "../", "/", "~/")):
         return True
     return first.lower() in {
@@ -103,6 +113,7 @@ def _looks_like_shell_command(command: str) -> bool:
         "npm",
         "pnpm",
         "ps",
+        "printf",
         "pwd",
         "python",
         "python3",

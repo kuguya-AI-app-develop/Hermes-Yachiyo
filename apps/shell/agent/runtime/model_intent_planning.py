@@ -746,11 +746,11 @@ def _abstract_capability_input_slots(
         if fields != _ABSTRACT_INPUT_SLOT_FIELDS:
             raise ModelIntentPlanningError("abstract_capability_input_slot_fields_missing")
         slot = _required_text(raw_slot.get("slot"), "abstract_input_slot")
-        semantic_value = _required_text(
+        semantic_value = _required_preserved_text(
             raw_slot.get("value"),
             "abstract_input_value",
         )
-        evidence_quote = _required_text(
+        evidence_quote = _required_preserved_text(
             raw_slot.get("evidence_quote"),
             "abstract_input_evidence_quote",
         )
@@ -1309,6 +1309,13 @@ def _tool_request_arguments(request: Any) -> dict[str, Any]:
     if not isinstance(raw_arguments, Mapping):
         raise ModelIntentPlanningError("model_intent_arguments_not_object")
     return {str(key): value for key, value in raw_arguments.items()}
+
+
+def _required_preserved_text(value: Any, field_name: str) -> str:
+    # Grounded payload bytes (patches, typed text, command arguments) are
+    # executable inputs. Trimming them would change the authorized action.
+    _required_text(value, field_name)
+    return value
 
 
 def _required_text(value: Any, field_name: str) -> str:
