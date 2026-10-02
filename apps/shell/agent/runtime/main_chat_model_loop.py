@@ -203,16 +203,36 @@ class MainChatModelLoopRunner:
                 self._resolve_initial_model_plan is not None
                 and not authoritative_direct_daily_desktop_intent
             ):
-                initial_plan_resolution = self._resolve_initial_model_plan(
-                    agent=agent,
-                    original_goal=user_goal,
-                    allowed_tools=list(allowed_tools),
-                    runtime_execution_metadata=runtime_execution_metadata,
-                    runtime_execution_envelope=runtime_execution_envelope,
-                    run_id=run_id,
-                    timeline=timeline,
-                    budget=budget,
-                )
+                try:
+                    initial_plan_resolution = self._resolve_initial_model_plan(
+                        agent=agent,
+                        original_goal=user_goal,
+                        allowed_tools=list(allowed_tools),
+                        runtime_execution_metadata=runtime_execution_metadata,
+                        runtime_execution_envelope=runtime_execution_envelope,
+                        run_id=run_id,
+                        timeline=timeline,
+                        budget=budget,
+                    )
+                except Exception as exc:
+                    # Intent planning calls the same provider as execution.
+                    # A rejected planning turn must not leave a live run behind.
+                    safe_error = self._redact_secrets(exc)
+                    failed_run = self._fail_main_chat_run(
+                        run_id,
+                        safe_error,
+                        timeline=[
+                            *timeline,
+                            self._timeline("model.request.failed", safe_error),
+                        ],
+                        run_events=[(
+                            "model.request.failed",
+                            self._task_model_events.model_request_failed_payload(safe_error),
+                        )],
+                    )
+                    if str(failed_run.get("status") or "") != "failed":
+                        return failed_run
+                    raise
                 if isinstance(
                     initial_plan_resolution,
                     ModelIntentClarificationResolution,
