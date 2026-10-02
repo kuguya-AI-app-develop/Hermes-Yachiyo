@@ -827,6 +827,9 @@ async def test_requested_group_summary_blocks_parent_and_preserves_failure_or_ca
                 if message["role"] == "assistant" and message["task_id"] == sent["task_id"]
             )
             assert projected["metadata"]["run_status"] == final["status"]
+            assert projected["status"] == (
+                "completed" if decision == "restart_complete" else "failed"
+            )
     finally:
         release_summary.set()
         if running and not running.done():
