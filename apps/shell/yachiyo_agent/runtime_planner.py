@@ -6271,6 +6271,21 @@ class RuntimePlanner:
             steps = []
             desktop_discovery_step_id = ""
         else:
+            if (
+                not app_name
+                and not desktop_discovery
+                and str(intent.inputs.get("operation_hint") or "") in {"", "open", "focus"}
+                and "搜一下" in intent.user_goal
+                and not any(
+                    _speech_act_action_occurrence_is_authorized(
+                        intent.user_goal, match.start(), match.end()
+                    )
+                    for match in re.finditer(r"搜一下", intent.user_goal)
+                )
+            ):
+                # An unresolved app action cannot borrow app enumeration from
+                # a quoted response payload. Leave the goal for planning.
+                return []
             discovery_tool = _first_allowed(
                 (
                     "desktop.list_apps",
