@@ -13507,6 +13507,11 @@ def _append_selected_discovered_launch_verification_step(
         input_preview = {
             "app_name": str(selected_payload.get("app_name") or ""),
             "verification_goal": "app_running",
+            **{
+                key: selected_payload[key]
+                for key in ("selection_source", "app_selection_source", "query")
+                if key in selected_payload
+            },
         }
     steps.append(
         _step(
