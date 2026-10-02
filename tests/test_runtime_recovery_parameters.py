@@ -65,6 +65,7 @@ def test_invalid_encoded_operand_does_not_crash_the_type_parser():
         ("Apple Music 上一首", "media.apple_music_control", {"action": "previous"}),
         ("Apple Music 播放暂停", "media.apple_music_control", {"action": "toggle"}),
         ("在 Apple Music 中播放 超时空辉夜姬", "media.apple_music_play", {"query": "超时空辉夜姬"}),
+        ("打开Apple Music并播放", "media.music_app_open_and_play", {"app_name": "Music"}),
         ("把 hello 复制到剪贴板", "clipboard.write", {"text": "hello"}),
         ("读取当前网页标题和地址", "browser.current_page", {}),
         ("列出当前运行的应用", "desktop.running_apps", {}),
