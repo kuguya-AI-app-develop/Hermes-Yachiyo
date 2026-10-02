@@ -6424,6 +6424,15 @@ class ChatAPI:
                     service.cancel_run(parent["run_id"])
                     self._cancel_native_group_summary_task(parent)
                     continue
+                if parent.get("status") == "cancelled":
+                    coordinator.cancel_children(parent["run_id"])
+                    self._cancel_native_group_summary_task(parent)
+                    if not durable_only:
+                        self._state.cancel_task(task.task_id)
+                    else:
+                        self._session.update_assistant_message(message.message_id, message.content,
+                            status=MessageStatus.FAILED, error="任务已取消", metadata={"run_status": "cancelled"})
+                    continue
                 plan = bound_plan(parent)
                 children = coordinator.owned_children(parent)
                 for child in children:
@@ -6432,12 +6441,6 @@ class ChatAPI:
                     if child_message:
                         self._update_agent_run_message_from_result(child_message.message_id,
                             child_message.metadata.get("sender") or {}, child, notify_group_summary=False)
-                if parent.get("status") == "cancelled":
-                    coordinator.cancel_children(parent["run_id"])
-                    self._cancel_native_group_summary_task(parent)
-                    if not durable_only:
-                        self._state.cancel_task(task.task_id)
-                    continue
                 failed = next((child for child in children if child.get("status") in {"failed", "cancelled", "awaiting_user"}), None)
                 if failed or parent.get("status") == "failed":
                     raise AgentRuntimeError(str((failed or parent).get("result") or "群组子目标未完成"))

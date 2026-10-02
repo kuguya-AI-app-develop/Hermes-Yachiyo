@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
-from packages.security import redact_api_error_text
-
 from apps.shell.agent.runtime.tool_approvals import ToolApprovalResumeContext
+from packages.security import redact_api_error_text
 
 
 class RuntimeRunControlFacadeMixin:
@@ -17,7 +17,12 @@ class RuntimeRunControlFacadeMixin:
         if run.get("kind") == "main_chat_run":
             from .main_chat_delegation import MainChatDelegationCoordinator
 
-            MainChatDelegationCoordinator(self).cancel_children(run_id)
+            try:
+                MainChatDelegationCoordinator(self).cancel_children(run_id)
+            except (KeyError, ValueError, TypeError):
+                logging.getLogger(__name__).debug(
+                    "委派子任务绑定已失效，仍取消父任务", exc_info=True
+                )
         return self.run_cancellation_coordinator.cancel(run_id)
 
     def _cancel_workflow_run_projection(

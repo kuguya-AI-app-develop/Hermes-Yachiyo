@@ -796,7 +796,13 @@ class MainChatDelegationCoordinator:
             return
         if not any(event.get("event") == CHILDREN_EVENT for event in parent.get("timeline") or []):
             return
-        for child in self.owned_children(parent):
+        try:
+            children = self.owned_children(parent)
+        except (KeyError, ValueError, TypeError):
+            # A quarantined lineage grants no cancellation authority. The
+            # caller must still be able to fail or cancel the parent itself.
+            return
+        for child in children:
             if child.get("status") not in {"completed", "failed", "cancelled"}:
                 self.service.cancel_run(child["run_id"])
 

@@ -930,7 +930,17 @@ def test_orphan_direct_group_binding_isolated_from_other_chat_messages(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("decision", ["approve", "reject", "cancel", "restart_approve"])
+@pytest.mark.parametrize(
+    "decision",
+    [
+        "approve",
+        "reject",
+        "cancel",
+        "restart_approve",
+        "corrupt_receipt_poll",
+        "corrupt_receipt_cancel",
+    ],
+)
 async def test_direct_group_parent_waits_for_actual_child_goal_and_approval(
     tmp_path, monkeypatch, decision
 ):
@@ -1048,6 +1058,44 @@ async def test_direct_group_parent_waits_for_actual_child_goal_and_approval(
         assert service.get_run(parent["run_id"])["status"] == "running"
         assert state.get_task(sent["task_id"]).status == TaskStatus.RUNNING
         assert calls == []  # Only the saved Agent planner; no main-model dispatch turn.
+        if decision.startswith("corrupt_receipt_"):
+            from apps.shell.agent.runtime.main_chat_delegation import MainChatDelegationCoordinator
+
+            MainChatDelegationCoordinator(service)._record(
+                service.get_run(parent["run_id"]),
+                [
+                    (
+                        CHILDREN_EVENT,
+                        {
+                            "source": SOURCE,
+                            "parent_run_id": parent["run_id"],
+                            "binding_id": "quarantined-generation",
+                            "children": [None],
+                        },
+                    )
+                ],
+            )
+            if decision == "corrupt_receipt_cancel":
+                service.cancel_run(parent["run_id"])
+            api.get_messages()
+            final = service.get_run(parent["run_id"])
+            expected = "failed" if decision == "corrupt_receipt_poll" else "cancelled"
+            assert final["status"] == expected
+            assert state.get_task(sent["task_id"]).status == (
+                TaskStatus.FAILED if expected == "failed" else TaskStatus.CANCELLED
+            )
+            assert service.get_run(child["run_id"])["status"] == "approval_required"
+            projected = next(
+                message
+                for message in api.get_messages()["messages"]
+                if message["task_id"] == sent["task_id"] and message["role"] == "assistant"
+            )
+            assert projected["metadata"]["run_status"] == expected
+            assert projected["status"] == "failed"
+            service.cancel_run(
+                child["run_id"]
+            )  # Explicit test cleanup, independent of quarantined parent authority.
+            return
         if decision == "cancel":
             service.cancel_run(parent["run_id"])
         elif decision == "reject":
@@ -1233,3 +1281,42 @@ def test_repeated_dispatch_requires_one_exact_owned_child_generation(mutation):
             group=False,
             upstream="",
         )
+
+
+@pytest.mark.parametrize("mutation", ["foreign_source", "short", "shape", "missing_child"])
+def test_invalid_child_binding_never_blocks_cancellation_of_its_own_parent(mutation):
+    from types import SimpleNamespace
+
+    from apps.shell.agent.runtime.run_control_facade import RuntimeRunControlFacadeMixin
+
+    contract, timeline = _same_goal_ledger()
+    parent = {
+        "run_id": contract.run_id,
+        "kind": "main_chat_run",
+        "user_goal": contract.original_goal,
+        "status": "running",
+        "timeline": timeline,
+    }
+    if mutation == "foreign_source":
+        timeline[1]["source"] = "model"
+    elif mutation == "short":
+        timeline[1]["children"] = []
+    elif mutation == "shape":
+        timeline[1]["children"] = [None]
+    calls = []
+
+    class Runtime(RuntimeRunControlFacadeMixin):
+        main_chat_runs = SimpleNamespace(_transaction_scope=None)
+        run_cancellation_coordinator = SimpleNamespace(
+            cancel=lambda run_id: calls.append(run_id) or {"status": "cancelled"}
+        )
+
+        def get_run(self, run_id):
+            if run_id == parent["run_id"]:
+                return parent
+            raise KeyError(run_id)
+
+    assert Runtime().cancel_run(parent["run_id"])["status"] == "cancelled"
+    assert calls == [
+        parent["run_id"]
+    ]  # No cancellation authority over unverified child identities.
