@@ -4243,6 +4243,15 @@ def planner_desktop_observation_step_needs_model_followup(
     and an exact task verification target.
     """
 
+    if tool_name == "screen.capture":
+        from apps.shell.agent.runtime.model_intent_planning import (
+            capture_only_content_read_requires_model,
+        )
+        if capture_only_content_read_requires_model(
+            str(getattr(decision.selected_intent, "user_goal", "") or ""),
+            decision.plan.tool_plan.steps,
+        ):
+            return True
     if step_id == "read-desktop-content":
         return True
     if not _is_planned_desktop_observation_step(decision, step_id, tool_name):

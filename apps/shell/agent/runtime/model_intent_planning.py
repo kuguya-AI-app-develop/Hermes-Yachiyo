@@ -304,6 +304,11 @@ def planner_selection_needs_model_assistance(
     steps = list(getattr(tool_plan, "steps", []) or [])
     if plan is None or tool_plan is None or not steps:
         return True
+    if (
+        str(getattr(selected_intent, "kind", "") or "") == "desktop_operation"
+        and capture_only_content_read_requires_model(clean_goal, steps)
+    ):
+        return True
     if _compound_action_clauses_underplanned(clean_goal, steps):
         return True
     selected_requests = list(getattr(selection, "requests", []) or [])
@@ -343,6 +348,34 @@ def planner_selection_needs_model_assistance(
             return True
     return False
 
+
+
+_CAPTURE_CONTENT_READ_RE = re.compile(
+    r"(?:读(?:取)?|阅读|看(?:看)?|查看|检查|解释|分析|总结)\s*"
+    r"(?:一下|一眼|当前|的|新|未读|未读的|一下当前)*\s*(?:聊天|对话|消息|cpu)"
+    r"|\b(?:read|review|check|summari[sz]e|explain|analy[sz]e)\s+"
+    r"(?:(?:the|current|new|unread)\s+)*(?:messages?|chats?|conversation|cpu)\b",
+    flags=re.IGNORECASE,
+)
+
+
+def capture_only_content_read_requires_model(original_goal: str, steps: Iterable[Any]) -> bool:
+    """A picture does not fulfill a request to read or explain its contents."""
+    tools = {
+        str((step.get("tool") or step.get("tool_name") or "")
+            if isinstance(step, Mapping) else getattr(step, "tool_name", "") or "")
+        for step in steps
+    }
+    if "screen.capture" not in tools or not tools.issubset({
+        "screen.capture", "app.open", "app.focus", "app.status", "desktop.open_app",
+        "desktop.focus_app", "desktop.list_apps", "desktop.running_apps", "desktop.active_window",
+    }):
+        return False
+    normalized = _normalized_speech_act_text(original_goal)
+    return any(
+        _speech_act_action_occurrence_is_authorized(normalized, match.start(), match.end())
+        for match in _CAPTURE_CONTENT_READ_RE.finditer(normalized)
+    )
 
 def _compound_action_clauses_underplanned(
     original_goal: str,
