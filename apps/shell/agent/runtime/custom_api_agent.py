@@ -9016,11 +9016,20 @@ class RuntimeCustomApiAgentLoop:
             ):
                 return ""
             presentation = str(planned_tool_request.get("presentation") or "").strip()
+            from .current_page_link_copy import bounded_page_link_copy_goal
+            page_link_preparation = bool(
+                contract
+                and bounded_page_link_copy_goal(contract.original_goal)
+                and planned_tool == "clipboard.read"
+                and str(planned_tool_request.get("step_id") or "")
+                == "read-page-link-pasteboard-before"
+            )
             summary = (
                 ""
                 if (
                     planned_tool in _DIRECT_DAILY_SEQUENCE_CONTEXT_TOOLS
                     or direct_runtime_verification
+                    or page_link_preparation
                 )
                 else self._daily_desktop_summary(
                     planned_tool,
@@ -9033,6 +9042,7 @@ class RuntimeCustomApiAgentLoop:
                 not summary
                 and planned_tool not in _DIRECT_DAILY_SEQUENCE_CONTEXT_TOOLS
                 and not direct_runtime_verification
+                and not page_link_preparation
             ):
                 return ""
             completed_step = {

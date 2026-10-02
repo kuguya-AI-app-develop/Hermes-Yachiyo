@@ -8920,6 +8920,60 @@ class RuntimeToolRequestRunner:
                 run_id=run_id,
                 tool_sequence=tool_sequence,
             )
+            from .current_page_link_copy import (
+                PAGE_LINK_COPY_STEP,
+                page_link_copy_bound,
+                page_link_copy_source_ready,
+            )
+            if (
+                page_link_copy_bound(tool_request)
+                and _runtime_request_step_id(tool_request) == PAGE_LINK_COPY_STEP
+                and not page_link_copy_source_ready(
+                    tool_request,
+                    timeline,
+                    private_copy_observations,
+                    run_id=run_id,
+                    provider_identity=_trusted_runtime_execution_provider_identity,
+                )
+            ):
+                blocked_result = {
+                    "ok": False,
+                    "action": tool_name,
+                    "status": "blocked",
+                    "reason": "current_page_link_source_unverified",
+                    "summary": "未能确认当前网页的完整地址或窗口身份；未执行复制。",
+                    "postcondition_verified": False,
+                    "retryable": False,
+                }
+                timeline.append(
+                    self._timeline(
+                        "agent.tool.skipped",
+                        tool_name,
+                        input_preview=input_preview,
+                        result=blocked_result,
+                        status="blocked",
+                        **trace_payload,
+                    )
+                )
+                if run_id:
+                    self._append_run_event(
+                        run_id,
+                        "agent.tool.skipped",
+                        {
+                            "tool": tool_name,
+                            "input_preview": input_preview,
+                            "result": blocked_result,
+                            "status": "blocked",
+                            **trace_payload,
+                        },
+                    )
+                raise AgentDirectOutcomeUnverified(
+                    blocked_result["summary"],
+                    reason=blocked_result["reason"],
+                    tool_name=tool_name,
+                    input_preview=input_preview,
+                    tool_call_id=str(tool_request.get("tool_call_id") or ""),
+                )
             from .clipboard_paste_target import clipboard_paste_target_is_bound, observed_clipboard_paste_target
             if clipboard_paste_target_is_bound(tool_request) and not observed_clipboard_paste_target(
                 tool_request, {}, timeline, run_id=run_id, before_dispatch=True,
@@ -9295,6 +9349,19 @@ class RuntimeToolRequestRunner:
                     private_typed_observations=private_typed_observations,
                 )
             )
+            from .current_page_link_copy import PAGE_LINK_VERIFY_STEP
+            if (
+                page_link_copy_bound(tool_request)
+                and _runtime_request_step_id(tool_request) == PAGE_LINK_VERIFY_STEP
+                and not trusted_observation_receipt
+            ):
+                raise AgentDirectOutcomeUnverified(
+                    "已执行复制，但未能确认剪贴板中的链接与当前网页地址一致；任务已停止。",
+                    reason="current_page_link_copy_unverified",
+                    tool_name=tool_name,
+                    input_preview=input_preview,
+                    tool_call_id=str(tool_request.get("tool_call_id") or ""),
+                )
             if trusted_observation_receipt:
                 prepared_context = (
                     _private_prepared_submit_context_from_observation(
@@ -10566,6 +10633,33 @@ def _post_action_verification_request(
         if isinstance(tool_request.get("input"), Mapping)
         else {}
     )
+    from .current_page_link_copy import (
+        PAGE_LINK_COPY_STEP,
+        PAGE_LINK_PREDICATE,
+        PAGE_LINK_VERIFY_STEP,
+        page_link_copy_bound,
+    )
+    if (
+        tool_name == "desktop.safe_shortcut"
+        and raw_input.get("action") == "copy_current_page_link"
+        and source_step_id == PAGE_LINK_COPY_STEP
+        and page_link_copy_bound(tool_request)
+    ):
+        terminal = [
+            r for r in remaining_requests
+            if _runtime_request_step_id(r) == PAGE_LINK_VERIFY_STEP
+        ]
+        if len(terminal) == 1 and page_link_copy_bound(terminal[0]):
+            terminal[0].update(
+                {
+                    "source_tool": tool_name,
+                    "source_step_id": source_step_id,
+                    "source_request_id": source_request_id,
+                    "source_tool_call_id": source_tool_call_id,
+                    "verification_predicate_kind": PAGE_LINK_PREDICATE,
+                }
+            )
+            return {}
     semantic_clipboard_copy = bool(
         tool_name in {"desktop.safe_shortcut", "desktop.shortcut"}
         and str(raw_input.get("action") or "").strip().lower() == "copy"

@@ -30,12 +30,14 @@ class PrivateNativeObservationChannel:
         *,
         authority: object,
         tools: frozenset[str] = frozenset({"desktop.ui_elements"}),
+        require_focused_element: bool = True,
     ):
         if not tools or not tools.issubset(_READ_TOOLS):
             raise ValueError("private_native_observation_tools_invalid")
         self._bound_request = bound_request
         self._authority = authority
         self._tools = tools
+        self._require_focused_element = require_focused_element
 
     def capture(
         self,
@@ -60,8 +62,9 @@ class PrivateNativeObservationChannel:
             return None
         if tool == "desktop.ui_elements":
             focused = data.get("focused_element")
-            if not isinstance(focused, Mapping):
+            if not isinstance(focused, Mapping) and self._require_focused_element:
                 return None
+            focused = focused if isinstance(focused, Mapping) else {}
             raw = {
                 key: deepcopy(data.get(key))
                 for key in ("app_name", "pid", "window_id", "title", "truncated")

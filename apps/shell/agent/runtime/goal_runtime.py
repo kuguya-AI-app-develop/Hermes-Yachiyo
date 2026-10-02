@@ -1645,6 +1645,7 @@ def _trusted_verifier_link(
         "exact_submit_dispatch_receipt",
         "exact_app_search_result_present",
         "exact_selected_full_text_copied",
+        "exact_current_page_link_copied",
         EXACT_FILE_CONTENT_PRESENT_PREDICATE,
     }:
         return None
@@ -1772,6 +1773,15 @@ def _verifier_matches_source_attempt(
         if (
             str(event.get("step_id") or event.get("planner_step_id") or "")
             != "copy-selected-full-text"
+        ):
+            return False
+    if predicate_kind == "exact_current_page_link_copied":
+        source_input = event.get("input_preview") or {}
+        if (
+            source_tool != "desktop.safe_shortcut"
+            or source_input.get("action") != "copy_current_page_link"
+            or str(event.get("step_id") or event.get("planner_step_id") or "")
+            != "copy-current-page-link"
         ):
             return False
     verifier_tool = str(verifier_link.get("verifier_tool") or "").strip()

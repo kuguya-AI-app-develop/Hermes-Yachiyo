@@ -4756,6 +4756,8 @@ class RuntimePlanner:
             desktop_steps = self._desktop_operation_steps(
                 intent, allowed, prefer_background_desktop=prefer_background_desktop,
             )
+            if explicit_native_typed_binding:
+                desktop_steps = _explicit_current_page_link_copy_steps(intent, desktop_steps, allowed)
             return _explicit_clipboard_paste_readback_steps(
                 intent,
                 (_explicit_typed_target_steps(intent, desktop_steps, allowed)
@@ -12840,6 +12842,81 @@ def _direct_communication_steps(
         )
     return steps
 
+
+def _explicit_current_page_link_copy_steps(
+    intent: TaskIntentSnapshot,
+    steps: list[ToolPlanStepSnapshot],
+    allowed: set[str] | None,
+) -> list[ToolPlanStepSnapshot]:
+    """Verify one current-page link against its actual native address control."""
+    from apps.shell.agent.runtime.current_page_link_copy import bounded_page_link_copy_goal
+
+    if not bounded_page_link_copy_goal(intent.user_goal):
+        return steps
+    if not {"desktop.ui_elements", "clipboard.read", "desktop.safe_shortcut"}.issubset(
+        allowed or set()
+    ):
+        return steps
+    primary = [
+        s
+        for s in steps
+        if s.tool_name == "desktop.safe_shortcut"
+        and s.input_preview == {"action": "copy_current_page_link"}
+    ]
+    if len(primary) != 1:
+        return steps
+    original = primary[0]
+    prefix = [s for s in steps if s is not original and s.step_id != "verify-desktop-result"]
+    if any(s.tool_name != "desktop.running_apps" for s in prefix):
+        return steps
+    before = _step(
+        intent,
+        "read-page-link-pasteboard-before",
+        "Read clipboard revision",
+        "clipboard.read",
+        "clipboard.read",
+        input_preview={"max_chars": 2000},
+        depends_on=[],
+        action="read_clipboard",
+        reason="Record the stable pasteboard revision before copying the current page link.",
+    )
+    source = _step(
+        intent,
+        "read-page-link-source-ui",
+        "Read native address control",
+        "desktop.app_discovery",
+        "desktop.ui_elements",
+        input_preview={"limit": 80},
+        depends_on=[before.step_id],
+        action="read_ui",
+        reason="Bind one actual address control, its full HTTP(S) URL and window before copying.",
+    )
+    copy = original.model_copy(
+        update={"step_id": "copy-current-page-link", "depends_on": [source.step_id]}
+    )
+    target = _step(
+        intent,
+        "read-page-link-target-ui",
+        "Read copied address control",
+        "desktop.app_discovery",
+        "desktop.ui_elements",
+        input_preview={"limit": 80},
+        depends_on=[copy.step_id],
+        action="read_ui",
+        reason="Observe the same focused address control and unchanged URL after copying.",
+    )
+    verify = _step(
+        intent,
+        "verify-copied-page-link",
+        "Verify copied page link",
+        "clipboard.read",
+        "clipboard.read",
+        input_preview={"max_chars": 12000},
+        depends_on=[copy.step_id, target.step_id],
+        action="verify",
+        reason="Require exact native URL bytes and a newer stable pasteboard revision.",
+    )
+    return [before, source, copy, target, verify]
 
 def _explicit_clipboard_paste_readback_steps(
     intent: TaskIntentSnapshot,
