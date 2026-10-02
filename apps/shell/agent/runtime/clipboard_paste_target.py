@@ -319,7 +319,8 @@ def private_clipboard_paste_observation_data(
     consume: bool = False,
 ) -> dict[str, Any]:
     """Keep original bytes confined to this exact, canonically owned read."""
-    if not private_observations or not clipboard_paste_observation_is_bound(request):
+    if (not run_id or request.get("run_id") != run_id
+        or not private_observations or not clipboard_paste_observation_is_bound(request)):
         return {}
     call_id = str(request.get("tool_call_id") or "")
     record = private_observations.get(call_id)

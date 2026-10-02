@@ -482,3 +482,15 @@ def test_private_paste_observation_cannot_be_replayed_or_minted_by_public_mappin
             "data": raw["data"],
         }
     assert pt.consume_clipboard_paste_observation(token, target, run_id="run-paste") == {}
+
+
+def test_private_paste_readback_keeps_request_run_identity_exact():
+    requests, _paste, _verifier, events, _source = _case()
+    target = next(r for r in requests if r["step_id"].startswith("inspect-clipboard-paste-target-"))
+    raw = deepcopy(events[0]["result"])
+    raw["data"]["focused_element"] = dict(raw["data"]["elements"][0])
+    token = pt.capture_clipboard_paste_observation(target, raw, local_broker_executed=True)
+    record = pt.consume_clipboard_paste_observation(token, target, run_id="run-paste")
+    observations = {target["tool_call_id"]: record}
+    assert pt.private_clipboard_paste_observation_data(target, observations, run_id="run-paste")
+    assert pt.private_clipboard_paste_observation_data({**target, "run_id": "foreign"}, observations, run_id="run-paste") == {}
