@@ -1942,7 +1942,26 @@ class ToolBroker:
         return desktop.system_media_control(action)
 
     def system_settings_open(self, target: str) -> dict[str, Any]:
-        return desktop.system_settings_open(target)
+        from apps.shell.agent.runtime.system_settings_receipts import observed_settings_pane
+
+        result = _without_supplied_completion_claims(desktop.system_settings_open(target))
+        data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        # The dispatch result cannot supply the independent observation.
+        data = {key: value for key, value in data.items() if key != "settings_readback"}
+        result = {**result, "data": data}
+        if not (
+            result.get("ok") is True and result.get("action") == "system.settings_open"
+            and data.get("target") == str(target).strip()
+            and not result.get("permission_error")
+        ):
+            return result
+        before = desktop.active_window()
+        ui = desktop.ui_elements(app_name="System Settings", role_filter="", limit=80)
+        after = desktop.active_window()
+        observation = observed_settings_pane(target, before, ui, after)
+        if observation:
+            result["data"]["settings_readback"] = observation
+        return _with_native_postcondition_receipt(result, verified=bool(observation))
 
     def system_volume(
         self,
