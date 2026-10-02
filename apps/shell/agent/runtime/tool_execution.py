@@ -7302,7 +7302,8 @@ def persisted_prepared_submit_receipt_from_private_context(
         "version": _RUNTIME_PERSISTED_PREPARED_SUBMIT_RECEIPT_VERSION,
         "receipt_kind": "runtime_prepared_submit_receipt",
         **{
-            key: str(context.get(key) or "").strip()
+            key: (str(context.get(key) or "") if key == "content"
+                  else str(context.get(key) or "").strip())
             for key in scalar_keys
         },
         "target_window": dict(context.get("target_window") or {}),
