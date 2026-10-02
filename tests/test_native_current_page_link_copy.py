@@ -205,6 +205,8 @@ def test_native_address_and_new_exact_pasteboard_complete_the_original_copy_goal
         "invalid_utf8",
         "ack_claim",
         "no_actual_broker",
+        "fallback_outcome",
+        "truncated_outcome",
     ],
 )
 def test_url_copy_rejects_unobserved_or_foreign_addresses_and_clipboard_evidence(bad):
@@ -269,6 +271,10 @@ def test_url_copy_rejects_unobserved_or_foreign_addresses_and_clipboard_evidence
     elif bad == "ack_claim":
         after.pop("focused_element")
         events[2]["result"].update(postcondition_verified=True, clipboard_source_verified=True)
+    elif bad == "fallback_outcome":
+        events[1]["result"]["fallback_used"] = True
+    elif bad == "truncated_outcome":
+        events[1]["result"]["truncated"] = True
     assert _receipt(events, verifier, observed, actual_broker=bad != "no_actual_broker") == {}
     assert not runtime_goal_assessment(contract, events).completed
 

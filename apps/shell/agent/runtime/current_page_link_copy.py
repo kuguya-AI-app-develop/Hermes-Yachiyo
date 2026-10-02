@@ -239,6 +239,8 @@ def _events(request, timeline, steps, *, run_id, provider_identity):
             or result.get("ok") is not True
             or result.get("permission_error")
             or result.get("approval_required")
+            or result.get("fallback_used") is True
+            or result.get("truncated") is True
         ):
             return {}
         actual_provider = provider_identity(event, result)
