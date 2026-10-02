@@ -1808,7 +1808,11 @@ class TaskIntentRouter:
         text: str,
         metadata: Mapping[str, Any],
     ) -> TaskIntentSnapshot:
-        if metadata.get("desktop_permission_recovery") and metadata.get("recovery_tool"):
+        if (
+            metadata.get("desktop_permission_recovery")
+            and metadata.get("recovery_tool")
+            and metadata.get("recovery_tool") not in {"system.volume", "system.brightness"}
+        ):
             return _empty_intent("system_control", text)
         if _finder_special_location_hint(text):
             return _empty_intent("system_control", text)
@@ -1818,7 +1822,10 @@ class TaskIntentRouter:
             return _empty_intent("system_control", text)
         if _desktop_ui_field_edit_hint(text):
             return _empty_intent("system_control", text)
-        hint = system_control_hint(affirmative_desktop_action_text(text, "focus"))
+        control_text = _speech_act_strip_unauthorized_contextual_tails(text)
+        hint = system_control_hint(affirmative_desktop_action_text(control_text, "focus"))
+        if str(hint.get("kind") or "") in {"volume", "brightness"}:
+            hint = _authorized_system_adjustment_hint(text)
         if not hint:
             return _empty_intent("system_control", text)
         hint_kind = str(hint.get("kind") or "").strip()
@@ -3320,7 +3327,9 @@ _MODEL_INTENT_ACTION_EVIDENCE_RE = re.compile(
     r"发(?=消息|邮件|一封)|回复|"
     r"删除|移动|复制|粘贴|改成|改为|更新为|置为|重命名|整理|分析|"
     r"生成|输出|提醒(?!事项|应用|列表)|预约|"
-    r"关闭|调整|设置(?!按钮|项|页面|界面)|下载|上传|安装|卸载|导入|导出|"
+    r"关闭|调整|调到|调大|调小|调高|调低|调亮|调暗|提高|降低|"
+    r"取消静音|解除静音|静音|恢复声音|设置(?!按钮|项|页面|界面)|"
+    r"下载|上传|安装|卸载|导入|导出|"
     r"点击|点开|输入(?!框|栏|按钮)|填入|填到|填进|选择|切换|切到|切回|"
     r"聚焦|滚动|提交|确认|截(?:图|屏)|录屏|总结|汇总|翻译|"
     r"调研|调查|研究|比较|转换|列出|列举|检查|发现|探测|起草|草拟|"
@@ -3329,7 +3338,8 @@ _MODEL_INTENT_ACTION_EVIDENCE_RE = re.compile(
     r"output|remind|schedule|close|adjust|set|download|upload|click|type|select|"
     r"switch|focus|scroll|capture|summari[sz]e|translate|research|compare|"
     r"convert|list|check|inspect|discover|draft|record|export|import|install|"
-    r"uninstall|submit|confirm|arrange|add|produce|collaborate|review|form)\b"
+    r"uninstall|submit|confirm|arrange|add|produce|collaborate|review|form|"
+    r"mute|unmute|increase|decrease)\b"
     r")",
     flags=re.IGNORECASE,
 )
@@ -3890,6 +3900,41 @@ def _speech_act_strip_unauthorized_contextual_tails(value: str) -> str:
         characters[start:end] = " " * (end - start)
     sanitized = re.sub(r"\s+", " ", "".join(characters)).strip()
     return sanitized.strip(" ，,;；")
+
+
+def _authorized_system_adjustment_hint(value: str) -> dict[str, Any]:
+    """Parse each concrete adjustment from its own authorized, unquoted clause."""
+
+    text = unicodedata.normalize("NFKC", str(value or ""))
+    characters = list(text)
+    for start, end in _speech_act_quote_spans(text):
+        characters[start:end] = " " * (end - start)
+    text = _speech_act_strip_unauthorized_contextual_tails("".join(characters))
+    for match in re.finditer(r"[^，,。；;！!？?\n]+", text):
+        clause = re.sub(r"^(?:并且|并|再)\s*", "", match.group(0).strip())
+        hint = system_control_hint(clause)
+        if str(hint.get("kind") or "") not in {"volume", "brightness"}:
+            continue
+        actions = tuple(_MODEL_INTENT_ACTION_EVIDENCE_RE.finditer(clause))
+        if actions and not any(
+            _speech_act_action_occurrence_is_authorized(
+                clause, action.start(), action.end(),
+            )
+            for action in actions
+        ):
+            continue
+        context = re.search(
+            r"音量|声音|亮度|静音|大声|大点声|大一点声|小声|小点声|小一点声|"
+            r"太暗|太亮|亮一点|暗一点|volume|sound|brightness|louder|quieter|"
+            r"brighter|dimmer|turn it up",
+            clause, re.I,
+        )
+        if not actions and context and not _speech_act_action_occurrence_is_authorized(
+            clause, context.start(), context.end(),
+        ):
+            continue
+        return hint
+    return {}
 
 
 def _authorized_terminal_command_hint(value: str) -> dict[str, str]:
@@ -20399,6 +20444,7 @@ def _task_step_action_target(
         "key",
         "modifiers",
         "direction",
+        "level",
         "x",
         "y",
         "limit",

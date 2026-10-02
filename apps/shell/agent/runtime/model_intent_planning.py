@@ -502,6 +502,10 @@ def _planned_step_action_families(step: Any) -> tuple[str, ...]:
     raw_input = getattr(step, "input_preview", None)
     input_preview = raw_input if isinstance(raw_input, Mapping) else {}
 
+    if tool_name == "browser.open_url_and_screenshot":
+        return ("open", "capture")
+    if tool_name == "browser.open_url_and_extract_text":
+        return ("open", "read", "extract")
     if tool_name in {"browser.search", "browser.search_web"}:
         primary_family = "search"
     elif action in {

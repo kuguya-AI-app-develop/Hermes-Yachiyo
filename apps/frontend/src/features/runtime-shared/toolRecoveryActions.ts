@@ -589,7 +589,7 @@ function runtimeToolRecoveryExecutableLabel(tool: string, input: Record<string, 
   if (foregroundPrompt) return foregroundPrompt;
   if (tool === 'browser.open_url' && url) return `打开 ${url}`;
   if (tool === 'browser.open_url_and_extract_text' && url) return `打开并读取 ${url}`;
-  if (tool === 'browser.open_url_and_screenshot' && url) return `打开并截取 ${url}`;
+  if (tool === 'browser.open_url_and_screenshot' && url) return `打开 ${url} 并截图`;
   if (tool === 'browser.screenshot') return '截取当前网页';
   if (tool === 'system.settings_open' && target) return `打开${target}`;
   if (tool === 'desktop.open_path' && path) return `打开 ${path}`;
@@ -703,7 +703,7 @@ function runtimeToolRecoveryRetryPrompt(tool: string, input: Record<string, unkn
   if (tool === 'app.status' && appName) return `检查${appName}是否打开`;
   if (tool === 'browser.open_url' && url) return `打开 ${url}`;
   if (tool === 'browser.open_url_and_extract_text' && url) return `打开并读取 ${url}`;
-  if (tool === 'browser.open_url_and_screenshot' && url) return `打开并截取 ${url}`;
+  if (tool === 'browser.open_url_and_screenshot' && url) return `打开 ${url} 并截图`;
   if (tool === 'browser.current_page') return '查看当前网页';
   if (tool === 'browser.extract_text') return '读取当前网页正文';
   if (tool === 'browser.screenshot') return '截取当前网页';

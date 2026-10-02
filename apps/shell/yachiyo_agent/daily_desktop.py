@@ -2654,6 +2654,10 @@ def _structured_recovery_request_runtime_binding(
             envelope = original_envelope
             matches = original_matches
         else:
+            if direct_tool in {"system.volume", "system.brightness"}:
+                # Concrete system controls must already belong to the user's
+                # compiled goal; recovery metadata cannot supply that authority.
+                return None
             recovery_goal = daily_desktop_recovery_prompt(metadata)
             if not recovery_goal:
                 return None

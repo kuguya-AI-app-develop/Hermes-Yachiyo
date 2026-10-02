@@ -62,6 +62,7 @@ test('native recovery prompts identify the selected observation and application'
     ['media.apple_music_play', { query: '超时空辉夜姬' }, '在 Apple Music 中播放 超时空辉夜姬'],
     ['media.music_app_open_and_play', { app_name: 'Music' }, '打开Apple Music并播放'],
     ['media.music_app_open_and_play', { app_name: 'Spotify' }, '打开Spotify并播放'],
+    ['browser.open_url_and_screenshot', { url: 'https://github.com' }, '打开 https://github.com 并截图'],
     ['clipboard.write', { text: 'hello' }, '把 hello 复制到剪贴板'],
     ['browser.current_page', {}, '读取当前网页标题和地址'],
     ['desktop.running_apps', {}, '列出当前运行的应用'],
