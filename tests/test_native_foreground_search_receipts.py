@@ -485,6 +485,7 @@ def test_current_search_never_falls_back_to_unbound_routed_effect(tmp_path, monk
         deepcopy(source), DAILY_DESKTOP_TOOL_NAMES, broker, prefix, run_id="foreground-run"
     )
     assert result["ok"] is False
+    assert result.get("reason") == "foreground_search_atomic_binding_unavailable"
     assert calls == []
 
 
