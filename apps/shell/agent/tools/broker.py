@@ -721,6 +721,20 @@ class ToolBroker:
             "decoding_lossy": decoding_lossy,
         }
 
+    def validate_tool_request(self, name: str, payload: dict[str, Any]) -> None:
+        """Reject invalid workspace writes before presenting an approval.
+
+        This preflight performs no tool effect. The execution adapter repeats
+        its path checks after approval, including current symlink resolution.
+        """
+        if name == "workspace.write_patch":
+            if str(payload.get("content") or "").strip():
+                raise AgentRuntimeError(
+                    "workspace.write_patch 不再支持 content 全量写入；"
+                    "请提供单文件 unified diff patch"
+                )
+            self._resolve_workspace_path(str(payload.get("path") or ""), write=True)
+
     def workspace_write_patch(
         self,
         path: str,

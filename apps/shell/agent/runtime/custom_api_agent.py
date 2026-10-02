@@ -2038,6 +2038,15 @@ class RuntimeCustomApiAgentLoop:
                         # Project the precondition failure through the Runner
                         # instead of requesting approval for an impossible action.
                         first_approval_index = -1
+                    validate_request = getattr(broker, "validate_tool_request", None)
+                    if first_approval_index == 0 and callable(validate_request):
+                        try:
+                            validate_request(approval_tool, dict(approval_candidate.get("input") or {}))
+                        except Exception:
+                            # Keep invalid input in the authoritative Runner
+                            # so its denial and recovery hint are recorded.
+                            # No approval can make an out-of-scope path valid.
+                            first_approval_index = -1
                 if first_approval_index == 0:
                     approval_request = execution_tool_requests[0]
                     approval_tool = str(approval_request.get("tool") or "").strip()

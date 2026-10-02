@@ -5254,6 +5254,10 @@ def _pre_execution_approval_required_result(
     )
     if not request_requires_approval and not broker_requires_approval:
         return None
+    validate_request = getattr(broker, "validate_tool_request", None)
+    if callable(validate_request):
+        request_input = tool_request.get("input")
+        validate_request(tool_name, dict(request_input) if isinstance(request_input, Mapping) else {})
     policy_reason = str(
         tool_request.get("policy_reason")
         or tool_request.get("approval_reason")
