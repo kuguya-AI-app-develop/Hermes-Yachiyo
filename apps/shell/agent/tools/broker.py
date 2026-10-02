@@ -849,20 +849,15 @@ class ToolBroker:
             return {"ok": False, "approval_required": True, "tool": "workspace.write_patch"}
         creating = any(line == "--- /dev/null" for line in str(patch or "").splitlines())
         mode = "create" if creating else "patch"
-        if target.exists() and not target.is_file():
+        if not creating and target.exists() and not target.is_file():
             return {"ok": False, "path": path, "error": "workspace.write_patch 只能写入普通文件"}
-        if creating and target.exists():
-            return {
-                "ok": False, "path": path,
-                "error": "workspace.write_patch create patch 要求目标文件不存在",
-            }
-        if not target.exists() and not creating:
+        if not creating and not target.exists():
             return {
                 "ok": False,
                 "path": path,
                 "error": "workspace.write_patch patch 模式要求目标文件已存在",
             }
-        before_bytes = target.read_bytes() if target.exists() else b""
+        before_bytes = b"" if creating else target.read_bytes()
         before_sha256 = _sha256_bytes(before_bytes)
         clean_expected_sha256 = str(expected_sha256 or "").strip()
         if creating and clean_expected_sha256 != before_sha256:
@@ -888,20 +883,21 @@ class ToolBroker:
         content = _apply_single_file_unified_diff(
             before_text, str(patch or ""), expected_path=path, allow_create=creating
         )
-        target.parent.mkdir(parents=True, exist_ok=True)
         if creating:
             try:
-                _atomic_create_text(target, content)
+                observed_bytes = _atomic_create_text(target, content)
+                after_sha256 = _sha256_bytes(observed_bytes)
             except OSError as exc:
                 return {
                     "ok": False, "path": path,
                     "error": f"workspace_patch_create_failed:{type(exc).__name__}",
                 }
         else:
+            target.parent.mkdir(parents=True, exist_ok=True)
             _atomic_write_text(target, content)
-        after_sha256 = _sha256_file(target)
+            after_sha256 = _sha256_file(target)
         postcondition_verified = bool(
-            target.is_file()
+            (creating or target.is_file())
             and after_sha256 == _sha256_bytes(content.encode("utf-8"))
         )
         if not postcondition_verified:

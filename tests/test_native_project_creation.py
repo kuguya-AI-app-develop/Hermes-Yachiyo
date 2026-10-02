@@ -125,9 +125,9 @@ def test_concurrent_creation_cannot_be_overwritten_by_publication(broker, monkey
     tool, workspace = broker
     link = os.link
 
-    def competing_link(source, target):
-        target.write_text("concurrent project\n")
-        return link(source, target)
+    def competing_link(source, target, **kwargs):
+        (workspace / "app.py").write_text("concurrent project\n")
+        return link(source, target, **kwargs)
 
     monkeypatch.setattr("apps.shell.agent.tools.workspace.os.link", competing_link)
     result = _create(tool)
@@ -164,11 +164,131 @@ def test_creation_cannot_escape_workspace_through_symlink_or_relative_path(broke
 
 def test_failed_readback_is_not_reported_as_verified_success(broker, monkeypatch):
     tool, workspace = broker
-    monkeypatch.setattr("apps.shell.agent.tools.broker._sha256_file", lambda _p: "0" * 64)
+    observed = iter((b"X" * len(SOURCE.encode()), b""))
+    monkeypatch.setattr("apps.shell.agent.tools.workspace.os.read", lambda *_a: next(observed))
     result = _create(tool)
     assert not result["ok"] and result["verification_failed"]
     assert result.get("postcondition_verified") is not True
     assert (workspace / "app.py").read_text() == SOURCE
+
+
+@pytest.mark.parametrize("ancestor", [False, True])
+def test_parent_swapped_before_pinning_never_creates_an_outside_file(
+    broker, monkeypatch, tmp_path, ancestor
+):
+    from apps.shell.agent.tools import workspace as workspace_mod
+
+    tool, workdir = broker
+    parent = workdir / "child" / "nested"
+    parent.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    if ancestor:
+        (outside / "nested").mkdir()
+    original = workspace_mod._atomic_create_text
+    swapped = parent.parent if ancestor else parent
+    moved = workdir / "original-parent"
+
+    def replace_parent(target, content):
+        swapped.rename(moved)
+        swapped.symlink_to(outside, target_is_directory=True)
+        return original(target, content)
+
+    monkeypatch.setattr("apps.shell.agent.tools.broker._atomic_create_text", replace_parent)
+    result = _create(
+        tool,
+        path="child/nested/app.py",
+        patch=PATCH.replace("+++ app.py", "+++ child/nested/app.py"),
+    )
+    assert not result["ok"]
+    assert result.get("postcondition_verified") is not True
+    assert not any(outside.rglob("app.py"))
+    assert not any(moved.rglob("app.py"))
+
+
+@pytest.mark.parametrize("moment", ["before_publish", "after_publish"])
+def test_pinned_parent_swap_cannot_redirect_publishing_or_claim_current_path(
+    broker, monkeypatch, tmp_path, moment
+):
+    from apps.shell.agent.tools import workspace as workspace_mod
+
+    tool, workdir = broker
+    parent = workdir / "child"
+    parent.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    moved = workdir / "original-parent"
+    check = workspace_mod._assert_directory_namespace
+    checked = 0
+
+    def swap_and_check(path, fd):
+        nonlocal checked
+        checked += 1
+        if checked == (1 if moment == "before_publish" else 2):
+            parent.rename(moved)
+            parent.symlink_to(outside, target_is_directory=True)
+        return check(path, fd)
+
+    monkeypatch.setattr(
+        "apps.shell.agent.tools.workspace._assert_directory_namespace", swap_and_check
+    )
+    result = _create(
+        tool, path="child/app.py", patch=PATCH.replace("+++ app.py", "+++ child/app.py")
+    )
+    assert not result["ok"]
+    assert result.get("postcondition_verified") is not True
+    assert not list(outside.iterdir())
+    assert not list(moved.glob(".*.tmp"))
+    if moment == "before_publish":
+        assert not (moved / "app.py").exists()
+    else:
+        # Publication affected only the originally approved directory inode;
+        # a changed namespace cannot be reported as the requested-path success.
+        assert (moved / "app.py").read_text() == SOURCE
+
+
+def test_readback_cannot_follow_a_replaced_target_symlink(broker, monkeypatch, tmp_path):
+    tool, workdir = broker
+    outside = tmp_path / "outside.py"
+    outside.write_text(SOURCE)
+    link = os.link
+
+    def replace_published_target(source, target, **kwargs):
+        link(source, target, **kwargs)
+        (workdir / "app.py").unlink()
+        (workdir / "app.py").symlink_to(outside)
+
+    monkeypatch.setattr("apps.shell.agent.tools.workspace.os.link", replace_published_target)
+    result = _create(tool)
+    assert not result["ok"]
+    assert result.get("postcondition_verified") is not True
+    assert outside.read_text() == SOURCE
+
+
+def test_readback_requires_the_published_inode_even_when_replacement_bytes_match(
+    broker, monkeypatch
+):
+    tool, workdir = broker
+    link = os.link
+
+    def replace_published_target(source, target, **kwargs):
+        link(source, target, **kwargs)
+        (workdir / "app.py").unlink()
+        (workdir / "app.py").write_text(SOURCE)
+
+    monkeypatch.setattr("apps.shell.agent.tools.workspace.os.link", replace_published_target)
+    result = _create(tool)
+    assert not result["ok"]
+    assert result.get("postcondition_verified") is not True
+
+
+def test_new_nested_project_parent_is_created_without_following_symlinks(broker):
+    tool, workdir = broker
+    result = _create(
+        tool, path="new/nested/app.py", patch=PATCH.replace("+++ app.py", "+++ new/nested/app.py")
+    )
+    assert result["ok"] and result["postcondition_verified"]
+    assert (workdir / "new" / "nested" / "app.py").read_text() == SOURCE
 
 
 @pytest.mark.parametrize("phrase", ["做一个小项目", "做个小项目", "做一个项目", "做个项目"])
