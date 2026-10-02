@@ -452,8 +452,12 @@ def test_typed_raw_observation_is_private_one_use_and_requires_actual_local_brok
         "  api_key=sk-typed-synthetic-secret123456 tail  ",
     ],
 )
-def test_changed_persisted_original_goal_never_authorizes_literal_body(tmp_path, monkeypatch, body):
-    """The existing public-root sanitation must not turn into effect authority."""
+def test_sanitized_original_goal_is_refused_before_literal_input(tmp_path, monkeypatch, body):
+    """Current root normalization refuses these valid inputs before any effect.
+
+    This records a deferred literal-goal limitation, not simulated tampering
+    or successful typing/sending. Strict goal matching remains unchanged.
+    """
     bridge, service, store, state = _fixture(tmp_path, monkeypatch, native_shape=True)
     try:
         result = bridge.send_quick_message(
