@@ -9,7 +9,7 @@ from typing import Any
 
 from apps.shell.agent.repositories.memories import MemoryQuery
 from apps.shell.agent.runtime.foreground_lock_scope import foreground_lock_broker_kwargs
-from apps.shell.agent.runtime.goal_runtime import planned_goal_contract_payload
+from apps.shell.agent.runtime.goal_runtime import planned_goal_contract_payload, runtime_goal_contract
 
 
 @dataclass
@@ -71,6 +71,7 @@ class RuntimeAgentRunPreparer:
         upstream: str = "",
         run_group_id: str = "",
         workflow_run_id: str = "",
+        runtime_execution_envelope: dict[str, Any] | None = None,
     ) -> AgentRunPreparation:
         backend = self._normalize_execution_backend(
             agent.get("execution_backend"),
@@ -107,10 +108,24 @@ class RuntimeAgentRunPreparer:
             upstream,
             skills=skills,
         )
-        goal_contract = planned_goal_contract_payload(
-            user_goal,
-            allowed_tools=runtime["tool_policy"].get("allowed_tools") or [],
-        )
+        if runtime_execution_envelope:
+            # The entrypoint planner already compiled this immutable goal.
+            # Resolve it against the original objective before constructing a
+            # broker; a second deterministic compilation can reject a valid
+            # compound plan or introduce a conflicting completion contract.
+            contract = runtime_goal_contract(
+                run_id=run_id, original_goal=user_goal,
+                runtime_execution_envelope=runtime_execution_envelope,
+                runtime_execution_metadata=None, messages=[], timeline=[],
+            )
+            if contract is None:
+                raise ValueError("goal_contract_missing")
+            goal_contract = contract.to_payload()
+        else:
+            goal_contract = planned_goal_contract_payload(
+                user_goal,
+                allowed_tools=runtime["tool_policy"].get("allowed_tools") or [],
+            )
         default_runnable_id = str(agent.get("agent_id") or "")
         approval_required = runtime["tool_policy"].get("approval_required") or {}
         if self._tool_brokers is not None:

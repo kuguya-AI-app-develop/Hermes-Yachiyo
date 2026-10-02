@@ -580,6 +580,10 @@ class RuntimeAgentRunExecutor:
                 upstream,
                 run_group_id=run_group_id,
                 workflow_run_id=workflow_run_id,
+                **({"runtime_execution_envelope": runtime_execution_envelope}
+                   if runtime_execution_envelope and supports_keyword(
+                       self._preparer.prepare, "runtime_execution_envelope"
+                   ) else {}),
             )
             timeline = preparation.timeline
             artifacts = preparation.artifacts

@@ -1648,10 +1648,10 @@ def test_native_runtime_uses_split_agent_run_starter(tmp_path, monkeypatch) -> N
         )
 
         first = service.create_agent_run(
-            {"agent_id": agent["agent_id"], "user_goal": "Finish", "client_run_id": "starter-client-1"}
+            {"agent_id": agent["agent_id"], "user_goal": "Reply with exactly 'Done'", "client_run_id": "starter-client-1"}
         )
         second = service.create_agent_run(
-            {"agent_id": agent["agent_id"], "user_goal": "Finish", "client_run_id": "starter-client-1"}
+            {"agent_id": agent["agent_id"], "user_goal": "Reply with exactly 'Done'", "client_run_id": "starter-client-1"}
         )
 
         assert first["status"] == "completed"
