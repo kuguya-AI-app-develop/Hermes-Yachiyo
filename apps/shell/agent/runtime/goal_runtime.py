@@ -1642,6 +1642,7 @@ def _trusted_verifier_link(
         "app_window_present",
         "exact_typed_content_present",
         "exact_submit_dispatch_receipt",
+        "exact_app_search_result_present",
         EXACT_FILE_CONTENT_PRESENT_PREDICATE,
     }:
         return None
