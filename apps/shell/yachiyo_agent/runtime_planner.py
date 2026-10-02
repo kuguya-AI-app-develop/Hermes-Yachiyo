@@ -16,10 +16,13 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote_plus
 
-from apps.shell.agent.runtime.dispatch_semantics import is_semantic_safe_shortcut
 from apps.shell.agent.runtime.action_targets import (
     canonical_action_name,
     canonical_action_target,
+)
+from apps.shell.agent.runtime.dispatch_semantics import (
+    is_semantic_safe_key,
+    is_semantic_safe_shortcut,
 )
 from apps.shell.agent.runtime.verification_receipts import (
     EXACT_FILE_CONTENT_PRESENT_PREDICATE,
@@ -20199,6 +20202,8 @@ def _task_replan_signals(steps: list[ToolPlanStepSnapshot]) -> list[ReplanSignal
 
 
 def _step_is_dispatch_receipt(step: ToolPlanStepSnapshot) -> bool:
+    if is_semantic_safe_key(step.tool_name):
+        return False
     return bool(
         str(step.action or "").strip()
         in {
@@ -20365,8 +20370,10 @@ def _task_step_action_target(
     action = str(step.action or "").strip()
     if action:
         target["action"] = action
-    if "shortcut" in str(step.tool_name or "") or "hotkey" in str(
-        step.tool_name or ""
+    if (
+        is_semantic_safe_key(step.tool_name)
+        or "shortcut" in str(step.tool_name or "")
+        or "hotkey" in str(step.tool_name or "")
     ):
         shortcut_action = str(input_preview.get("action") or "").strip().lower()
         if shortcut_action:
@@ -20435,6 +20442,8 @@ def _task_step_target_kind(
     tool_name = str(step.tool_name or "").strip()
     action = str(step.action or "").strip()
     capability_id = str(step.capability_id or "").strip()
+    if is_semantic_safe_key(tool_name):
+        return "desktop_app" if input_preview.get("app_name") else "desktop_foreground"
     if tool_name.startswith(("app.", "desktop.")):
         if action in {
             "click",
