@@ -519,6 +519,14 @@ class TaskIntentRouter:
         app_control_text = _authorized_app_control_text(
             _speech_act_strip_unauthorized_contextual_tails(text)
         )
+        named_media = media_playback_hint(app_control_text)
+        if (
+            named_media.get("action") == "play"
+            and named_media.get("app_name")
+            and named_media.get("query")
+            and _desktop_operation_hint(app_control_text) == "play"
+        ):
+            return _empty_intent("desktop_operation", text)
         if (
             _APP_CONTROL_AUTHORITY_ACTION_RE.search(text)
             and not _APP_CONTROL_AUTHORITY_ACTION_RE.search(app_control_text)
@@ -1767,12 +1775,7 @@ class TaskIntentRouter:
                 "QQ 音乐",
             ],
         )
-        operand_hint = media_playback_hint(operand_text)
-        hint = (
-            operand_hint
-            if operand_hint.get("action") or operand_hint.get("query")
-            else media_playback_hint(text)
-        )
+        hint = media_playback_hint(operand_text)
         system_hint = system_control_hint(operand_text)
         if str(system_hint.get("kind") or "").strip() in {"volume", "brightness"}:
             return _empty_intent("media_playback", text)
