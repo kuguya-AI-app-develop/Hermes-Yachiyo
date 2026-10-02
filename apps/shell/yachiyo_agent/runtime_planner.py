@@ -512,6 +512,7 @@ class TaskIntentRouter:
         text: str,
         metadata: Mapping[str, Any],
     ) -> TaskIntentSnapshot:
+        readonly_discovery = _pure_desktop_discovery_question(text)
         app_control_text = _authorized_app_control_text(
             _speech_act_strip_unauthorized_contextual_tails(text)
         )
@@ -522,9 +523,14 @@ class TaskIntentRouter:
                 text,
                 _DESKTOP_NON_APP_AUTHORITY_ACTION_RE,
             )
+            and not readonly_discovery
         ):
             return _empty_intent("desktop_operation", text)
-        if not app_control_text and _negated_app_control_clause(text):
+        if (
+            not app_control_text
+            and _negated_app_control_clause(text)
+            and not readonly_discovery
+        ):
             return _empty_intent("desktop_operation", text)
         if _looks_like_non_action_desktop_validation_task(text):
             return _empty_intent("desktop_operation", text)
@@ -3978,6 +3984,15 @@ def _runtime_plan_is_cached_permission_diagnostic(plan: RuntimePlanSnapshot) -> 
     return tool_names == {"desktop.permissions"}
 
 
+def _runtime_plan_is_pure_desktop_discovery(plan: RuntimePlanSnapshot) -> bool:
+    steps = list(getattr(getattr(plan, "tool_plan", None), "steps", []) or [])
+    return bool(steps) and all(
+        getattr(step, "tool_name", "") in {"desktop.permissions", "desktop.running_apps"}
+        and not getattr(step, "input_preview", {})
+        for step in steps
+    )
+
+
 def _model_intent_action_evidence_is_grounded(
     immutable_goal: str,
     planning_goal: str,
@@ -4184,6 +4199,10 @@ class RuntimePlanner:
             and not (
                 _speech_act_goal_requests_cached_diagnostic(prompt)
                 and _runtime_plan_is_cached_permission_diagnostic(plan)
+            )
+            and not (
+                _pure_desktop_discovery_question(prompt)
+                and _runtime_plan_is_pure_desktop_discovery(plan)
             )
         ):
             selected = _empty_intent("general", _clean_prompt(prompt))
@@ -35453,6 +35472,33 @@ def _looks_like_browser_current_page_metadata(value: str, lowered: str) -> bool:
         or re.search(
             r"\bwhat(?:'s| is)\s+(?:the\s+)?(?:current|this)\s+(?:page|tab)\b",
             lowered,
+        )
+    )
+
+
+def _pure_desktop_discovery_question(text: str) -> bool:
+    """Recognize bounded observations before rejecting unauthorized mutations.
+
+    An open-app question can contain an action word without authorizing that
+    action. Compound instructions retain their normal planning and policy path.
+    """
+    value = _clean_prompt(text).rstrip("。！？!?.").strip()
+    app_label = r"(?:应用程序|应用|软件|程序|apps?|applications?)"
+    permission_question = (
+        rf"(?:为什么|为何|怎么)(?:我|你|现在)?(?:不能|无法|没法)"
+        rf"(?:(?:打开|启动|开启){app_label}|(?:读取|查看|控制)屏幕)"
+    )
+    running_question = (
+        rf"(?:(?:现在|当前)(?:开了|打开了?|开着|运行着?)(?:哪些|什么){app_label}|"
+        rf"(?:现在|当前)(?:有哪些|哪些|什么){app_label}(?:开着|打开|在运行|运行中)|"
+        rf"(?:列一下|列出|列|看看|查看)(?:当前|现在)?"
+        rf"(?:打开|开着|运行|正在运行)(?:的)?{app_label})"
+    )
+    return bool(
+        re.fullmatch(
+            rf"(?:请|帮我|麻烦)?\s*(?:{permission_question}|{running_question})",
+            value,
+            flags=re.IGNORECASE,
         )
     )
 
