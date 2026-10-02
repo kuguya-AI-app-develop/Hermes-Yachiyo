@@ -434,7 +434,8 @@ def _volume_prompt(action: str, recovery_input: Mapping[str, Any]) -> str:
     }.get(action, "")
     if prompt or action != "set":
         return prompt
-    level = str(recovery_input.get("level") or "").strip()
+    level_value = recovery_input.get("level")
+    level = str(level_value if level_value is not None else "").strip()
     return f"把音量调到 {level}%" if level else ""
 
 

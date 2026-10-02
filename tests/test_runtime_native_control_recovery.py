@@ -2,6 +2,7 @@
 
 import pytest
 
+from apps.shell.agent.runtime.desktop_recovery_metadata import daily_desktop_recovery_prompt
 from apps.shell.agent.runtime.model_intent_planning import planner_selection_needs_model_assistance
 from apps.shell.agent.tools.registry import TOOL_DISPATCH_REGISTRY
 from apps.shell.yachiyo_agent.daily_desktop import daily_desktop_entrypoint_runtime_plan
@@ -16,6 +17,11 @@ def _metadata(tool, inputs):
         "recovery_risk_level": "low",
         "allow_user_foreground_takeover": True,
     }
+
+
+def test_backend_volume_recovery_prompt_preserves_zero_as_an_explicit_level():
+    metadata = _metadata("system.volume", {"action": "set", "level": 0})
+    assert daily_desktop_recovery_prompt(metadata) == "把音量调到 0%"
 
 
 @pytest.mark.parametrize("level", [0, 35, 100])
