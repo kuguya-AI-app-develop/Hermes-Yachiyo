@@ -13,6 +13,14 @@ class AgentWorkspaceBoundaryError(AgentRuntimeError):
     """Raised when a workspace request is rejected by its configured boundary."""
 
 
+class AgentDelegationProposed(AgentRuntimeError):
+    """A model proposal awaiting runtime goal and permission binding."""
+
+    def __init__(self, proposal: str) -> None:
+        self.proposal = proposal
+        super().__init__("native_delegation_proposed")
+
+
 class AgentDirectOutcomeUnverified(AgentRuntimeError):
     """Raised when a direct action ran but its requested outcome is unverified."""
 

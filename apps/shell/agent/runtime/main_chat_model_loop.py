@@ -8,6 +8,7 @@ from typing import Any, Callable
 from apps.shell.agent.runtime.callbacks import supports_keyword
 from apps.shell.agent.runtime.errors import (
     AgentApprovalRequired,
+    AgentDelegationProposed,
     AgentDirectOutcomeUnverified,
     AgentRuntimeError,
 )
@@ -22,6 +23,9 @@ from apps.shell.agent.runtime.model_messages import (
     message_visible_content_text,
     messages_require_model_first,
     model_output_metadata,
+)
+from apps.shell.agent.runtime.model_less_desktop_outcome import (
+    executed_bounded_desktop_requests,
 )
 from apps.shell.agent.runtime.model_intent_planning import (
     ModelIntentClarificationResolution,
@@ -421,6 +425,7 @@ class MainChatModelLoopRunner:
         artifacts = [item for item in run.get("artifacts") or [] if isinstance(item, dict)]
         preserve_browser_target = False
         model_execution_succeeded = False
+        tool_timeline_start = len(timeline)
         try:
             original_goal_kwargs = (
                 {"original_goal": user_goal}
@@ -446,6 +451,16 @@ class MainChatModelLoopRunner:
                 **original_goal_kwargs,
             )
             model_execution_succeeded = True
+        except AgentDelegationProposed as exc:
+            projected, committed = self._cas_from_running(
+                run_id, status="running", result=exc.proposal,
+                timeline=timeline, artifacts=artifacts,
+            )
+            if committed:
+                self._append_run_event(run_id, "agent.delegation.proposed",
+                    {"proposal": exc.proposal, "source": "model_proposal"},
+                    visibility="internal", **_run_event_fence(projected, status="running"))
+            return projected
         except AgentApprovalRequired as exc:
             preserve_browser_target = True
             pending = self._main_chat_pending_approval(
@@ -474,6 +489,23 @@ class MainChatModelLoopRunner:
                 )
                 else {}
             )
+            if (
+                not direct_partial
+                and direct_daily_desktop_intent
+                and not default_profile_id
+                and _is_missing_chat_profile_error(exc)
+            ):
+                execution_requests = list(direct_tool_requests or [])
+                if direct_tool_request is not None:
+                    execution_requests.append(direct_tool_request)
+                if not execution_requests:
+                    execution_requests = runtime_execution_requests_from_envelope_payload(
+                        runtime_execution_envelope, allowed_tools=allowed_tools,
+                    )
+                direct_partial = _bounded_desktop_dispatch_partial(
+                    execution_requests, timeline,
+                    tool_timeline_start=tool_timeline_start,
+                )
             provider_blocker = (
                 _desktop_provider_required_failure(timeline)
                 if (
@@ -837,6 +869,40 @@ def _run_accepts_model_loop_projection(run: dict[str, Any]) -> bool:
         str(run.get("status") or "").strip().lower() == "running"
         and not run.get("pending_approval")
     )
+
+
+def _bounded_desktop_dispatch_partial(
+    requests: list[dict[str, Any]],
+    timeline: list[dict[str, Any]],
+    *,
+    tool_timeline_start: int,
+) -> dict[str, Any]:
+    executed = executed_bounded_desktop_requests(
+        requests, timeline, tool_timeline_start=tool_timeline_start,
+    )
+    if not executed:
+        return {}
+    primary = next((r for r in reversed(executed) if str(r.get("tool") or "").startswith(
+        ("app.open_and_safe_", "app.focus_and_safe_")
+    )), None)
+    if primary is None:
+        return {}
+    payload = dict(primary.get("input") or {})
+    action = str(payload.get("action") or "")
+    action_label = {
+        "copy": "复制选中内容", "paste": "粘贴", "toggle_full_screen": "切换当前窗口全屏",
+        "tab": "Tab", "shift_tab": "Shift+Tab", "arrow_down": "下箭头",
+        "arrow_up": "上箭头", "arrow_left": "左箭头", "arrow_right": "右箭头",
+    }.get(action, action or "桌面操作")
+    return {
+        "reason": "desktop_dispatch_postcondition_unverified",
+        "tool": str(primary.get("tool") or ""),
+        "input_preview": payload,
+        "summary": (
+            f"已向 {payload['app_name']} 发送“{action_label}”操作，"
+            "但未能确认界面已按预期变化；请确认后重试。"
+        ),
+    }
 
 
 def _direct_clipboard_copy_partial(

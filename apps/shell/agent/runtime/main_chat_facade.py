@@ -38,6 +38,58 @@ def _preferred_runtime_execution_mapping(
 class RuntimeMainChatFacadeMixin:
     """Keeps daily Chat runtime methods while delegating to split services."""
 
+    def prepare_main_chat_delegation(
+        self, run_id: str, *, selected_ids: set[str], group_scope: bool = False, direct_group: bool = False,
+        tool_policy: dict[str, Any] | None = None,
+        workspace_policy: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        from .main_chat_delegation import MainChatDelegationCoordinator
+
+        agent = self._main_chat_agent_config(
+            model_profile_id="", tool_policy=tool_policy, workspace_policy=workspace_policy,
+        )
+        return MainChatDelegationCoordinator(self).prepare(
+            run_id, parent_runtime=self._compile_agent_runtime(agent), selected_ids=selected_ids, group_scope=group_scope, direct_group=direct_group,
+        )
+
+    def start_main_chat_delegation(
+        self, run_id: str, proposals: list[dict[str, Any]], *, task_id: str, group: bool, upstream: str,
+    ) -> list[dict[str, Any]]:
+        from .main_chat_delegation import MainChatDelegationCoordinator
+
+        return MainChatDelegationCoordinator(self).start(
+            run_id, proposals, task_id=task_id, group=group, upstream=upstream,
+        )
+
+    def verify_main_chat_delegation(self, run_id: str) -> dict[str, Any]:
+        from .main_chat_delegation import MainChatDelegationCoordinator
+
+        return MainChatDelegationCoordinator(self).verify(run_id)
+
+    def bind_main_chat_delegation_summary(self, run_id: str, task: Any) -> dict[str, Any]:
+        from .main_chat_delegation import MainChatDelegationCoordinator
+
+        return MainChatDelegationCoordinator(self).bind_summary(run_id, task)
+
+    def verify_main_chat_delegation_summary(self, run_id: str) -> dict[str, Any]:
+        from .main_chat_delegation import MainChatDelegationCoordinator
+
+        return MainChatDelegationCoordinator(self).verify_summary(run_id)
+
+    def prepare_main_chat_delegation_proposal(
+        self, run_id: str, proposal: dict[str, Any], *,
+        tool_policy: dict[str, Any] | None = None,
+        workspace_policy: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        from .main_chat_delegation import MainChatDelegationCoordinator
+
+        parent = self._compile_agent_runtime(self._main_chat_agent_config(
+            model_profile_id="", tool_policy=tool_policy, workspace_policy=workspace_policy,
+        ))
+        return MainChatDelegationCoordinator(self).prepare_same_goal(
+            run_id, proposal, parent_runtime=parent,
+        )
+
     def bind_main_chat_supplied_images(
         self, run_id: str, messages: list[dict[str, Any]]
     ) -> dict[str, Any]:

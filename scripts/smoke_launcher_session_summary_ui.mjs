@@ -805,7 +805,6 @@ async function main() {
     && !document.querySelector('[data-testid="live2d-launcher-agent-task-compact"]')
     && document.querySelector('[data-testid="live2d-launcher-latest-reply"]')?.textContent?.includes(${JSON.stringify(LIVE2D_REPLY)})
   ), 'completed launcher task leaves latest reply without task chrome');
-  await consumerStateWin.close();
   await requestBridgeJson('/__smoke/reset-public-task');
   console.log('[electron-smoke] consumer running/completed Launcher presentation verified');
   const win = new BrowserWindow({
@@ -819,6 +818,9 @@ async function main() {
       backgroundThrottling: false,
     },
   });
+  // Keep one window alive between phases; Electron otherwise exits while
+  // awaiting the mock bridge reset before the next window is constructed.
+  await consumerStateWin.close();
   win.webContents.on('console-message', (_event, level, message) => {
     if (level >= 2) console.error('[renderer]', message);
   });

@@ -53,6 +53,13 @@ _APP_LIFECYCLE_INTRINSIC_RULES: dict[str, dict[str, Any]] = {
         "target_action": "minimize_app",
         "state": "fulfilled",
     },
+    "app.quit": {
+        "status_key": "quit_status",
+        "statuses": frozenset({"quit", "not_running"}),
+        "required_true_key": "quit_verified",
+        "target_action": "quit_app",
+        "state": "fulfilled",
+    },
     "app.focus_window": {
         "status_key": "focus_status",
         "statuses": frozenset({"focused"}),
@@ -189,6 +196,11 @@ def intrinsic_native_postcondition_state(
     ):
         return ""
     observed_app_key = str(rule.get("observed_app_key") or "").strip()
+    if clean_tool == "app.quit" and not (
+        data.get("launch_status") == "not_running" and data.get("running") is False
+        and not result.get("permission_error") and not result.get("fallback_used")
+    ):
+        return ""
     if observed_app_key and str(
         data.get(observed_app_key) or result.get(observed_app_key) or ""
     ).strip().casefold() != resolved_app.casefold():

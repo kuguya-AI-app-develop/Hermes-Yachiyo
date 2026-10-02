@@ -2228,6 +2228,7 @@ def _approval_resume_remaining_requests_after_tool(
         allowed_tools=context.allowed_tools,
         remaining_requests=[],
         active_window_target=None,
+        timeline=context.timeline,
     )
     if existing:
         if not post_action_verification:

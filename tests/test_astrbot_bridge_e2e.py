@@ -151,7 +151,7 @@ async def test_astrbot_commands_round_trip_through_oha_bridge(
 
     created = await on_y_command("/y do 写一条 AstrBot E2E 记录", sender_id="qq-1", config=config)
     created_task_id = re.search(r"ID: ([0-9a-f]{12})", created)
-    assert created_task_id is not None
+    assert created_task_id is not None, created
     task_id = created_task_id.group(1)
     assert "✅ 任务已提交" in created
 

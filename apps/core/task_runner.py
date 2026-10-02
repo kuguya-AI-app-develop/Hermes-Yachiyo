@@ -16,7 +16,7 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
-from apps.core.executor import ExecutionStrategy, SimulatedExecutor
+from apps.core.executor import ExecutionStrategy, NativeAgentExecutor, SimulatedExecutor
 from apps.core.state import AppState
 from packages.protocol.enums import TaskStatus
 
@@ -135,6 +135,8 @@ class TaskRunner:
         self._in_progress: dict[str, asyncio.Task] = {}
         self._running = False
         self._loop_task: asyncio.Task | None = None
+        if isinstance(self._executor, NativeAgentExecutor):
+            self._executor.set_task_runner(self)
 
     @property
     def executor(self) -> ExecutionStrategy:
@@ -148,6 +150,8 @@ class TaskRunner:
         """切换后续任务使用的执行器，返回切换前的执行器名称。"""
         previous = self._executor.name
         self._executor = executor
+        if isinstance(executor, NativeAgentExecutor):
+            executor.set_task_runner(self)
         logger.info("TaskRunner 执行器已切换: %s -> %s", previous, executor.name)
         return previous
 

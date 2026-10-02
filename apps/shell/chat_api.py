@@ -2518,48 +2518,19 @@ class ChatAPI:
                     direct_tool_requests=direct_daily_desktop_tool_requests or None,
                 )
             direct_planner_orchestration_task: dict[str, Any] | None = None
-            if direct_planner_orchestration_intent and direct_daily_desktop_task is None:
+            if direct_planner_orchestration_intent and direct_daily_desktop_task is None and not direct_group_dispatch_directives:
                 direct_planner_orchestration_task = self._record_planner_orchestration_handoff(
                     task_id=task_id,
                     requests=planner_orchestration_requests,
                 )
             if direct_group_dispatch_directives:
-                source_text = self._format_group_dispatch_direct_source()
-                self._state.update_task_status(
-                    task_id,
-                    TaskStatus.COMPLETED,
-                    result=source_text,
-                    progress_label="已派发",
-                )
-                assistant_id = self._session.upsert_assistant_message(
-                    task_id=task_id,
-                    content=source_text,
-                    status=MessageStatus.PROCESSING,
-                    metadata={
-                        "sender": self._main_model_sender_from_runtime(),
-                        "group_dispatch_pending": True,
-                        "group_dispatch_direct": True,
-                    },
-                )
-                assistant_message = self._session.get_assistant_message_for_task(task_id)
-                if assistant_message is not None:
-                    self._dispatch_group_agent_requests(
-                        assistant_message,
-                        direct_group_dispatch_directives,
-                        current_context,
-                        source_text=source_text,
-                    )
-                logger.info(
-                    "群组消息已直接派发: message_id=%s, task_id=%s, count=%d",
-                    message_id,
-                    task_id,
-                    len(direct_group_dispatch_directives),
+                assistant_id, native_status = self._start_native_direct_group_dispatch(
+                    task=task, original_goal=task_text, source_message_id=message_id,
+                    context=current_context,
                 )
                 return self._accepted_send_response({
-                    "message_id": message_id,
-                    "task_id": task_id,
-                    "assistant_message_id": assistant_id,
-                    "status": "completed",
+                    "message_id": message_id, "task_id": task_id,
+                    "assistant_message_id": assistant_id, "status": native_status,
                     "attachments": self._serialize_attachments(saved_attachments),
                     **({"desktop_snapshot_error": desktop_snapshot_error} if desktop_snapshot_error else {}),
                 }, idempotency_key)
@@ -5807,6 +5778,7 @@ class ChatAPI:
         同一个 task_id 永远只对应一条 assistant 消息，
         无论此方法被并发调用多少次都不会产生重复。
         """
+        self._sync_native_direct_group_tasks(notify_group_summary=notify_group_summary)
         synced_task_ids: set[str] = set()
         current_context = self._session_context()
         for msg in self._session.get_all_messages():
@@ -6070,6 +6042,38 @@ class ChatAPI:
         status = self._normalize_agent_run_status(str(run.get("status") or ""))
         assistant = self._session.get_assistant_message_for_task(task_id)
         existing_metadata = dict(assistant.metadata or {}) if assistant and isinstance(assistant.metadata, dict) else {}
+        if status in {"completed", "failed", "cancelled"}:
+            # Approval routes settle the durable Run independently of TaskRunner.
+            # Polling must project that same linked Run onto the in-memory Task.
+            if str(run.get("task_id") or task_id) != task_id:
+                return False
+            run_goal = run.get("user_goal")
+            if run_goal is not None and str(run_goal) != str(getattr(task, "description", "") or ""):
+                return False
+            if getattr(task, "status", None) != TaskStatus.RUNNING:
+                return False
+            summary = str(run.get("result") or "")
+            error = None
+            if status != "completed":
+                error = "任务已取消" if status == "cancelled" else summary or "任务执行失败"
+            terminal_status = {
+                "completed": TaskStatus.COMPLETED,
+                "failed": TaskStatus.FAILED,
+                "cancelled": TaskStatus.CANCELLED,
+            }[status]
+            try:
+                self._state.update_task_status(
+                    task_id,
+                    terminal_status,
+                    result=summary if status == "completed" else None,
+                    error=error,
+                )
+            except (KeyError, ValueError):
+                # Another observer may already have settled or removed this Task.
+                return False
+            if assistant is not None:
+                self._sync_missing_task_from_durable_run(assistant, run, self._session_context())
+            return True
         if status == "approval_required":
             content = self._project_main_chat_approval_message(
                 task_id=task_id,
@@ -6340,6 +6344,174 @@ class ChatAPI:
                 notify_group_summary=notify_group_summary,
             )
 
+    def _start_native_direct_group_dispatch(self, *, task: Any, original_goal: str,
+            source_message_id: str, context: dict[str, Any]) -> tuple[str, str]:
+        from apps.core.executor import NativeAgentExecutor
+
+        service = self._agent_runtime_service()
+        self._state.update_task_status(task.task_id, TaskStatus.RUNNING, progress_label="正在派发群组任务")
+        source_text = self._format_group_dispatch_direct_source()
+        assistant_id = self._session.upsert_assistant_message(task_id=task.task_id,
+            content=source_text, status=MessageStatus.PROCESSING,
+            metadata={"sender": self._main_model_sender_from_runtime(), "group_dispatch_direct": True})
+        parent = None
+        try:
+            parent = service.start_main_chat_run(task_id=task.task_id, session_id=self._session.session_id,
+                user_goal=original_goal, client_run_id=f"chat-group-parent:{task.task_id}",
+                metadata={"source_message_id": source_message_id, "native_group_owner": "chat_api_direct"})
+            selected_ids = {str(item["id"]) for item in context.get("participants") or []
+                            if isinstance(item, dict) and item.get("kind") == "agent" and item.get("id")}
+            plan = service.prepare_main_chat_delegation(parent["run_id"], selected_ids=selected_ids,
+                    group_scope=True, direct_group=True)
+            if plan is None:
+                raise AgentRuntimeError("群组目标缺少可验证的委派计划")
+            proposals = [{"kind": "agent", "runnable_id": target["runnable_id"], "goal": target["goal"]}
+                         for target in plan["binding"]["targets"]]
+            upstream = self._with_group_context_for_main_model(original_goal, context)
+            upstream += "\n\n[Oha-Yachiyo 群组执行约定]\n请按当前岗位职责处理已绑定子目标。"
+            children = service.start_main_chat_delegation(parent["run_id"], proposals,
+                        task_id=task.task_id, group=True, upstream=upstream)
+            names = [target["alias"] for target in plan["binding"]["targets"]]
+            dispatch_text = f"我把这个任务派给 {names[0]} 了。" if len(names) == 1 else f"我把 {len(names)} 个任务分别派给 {'、'.join(names)} 了。"
+            source_text = self._format_group_dispatch_visible_content(source_text, dispatch_text)
+            NativeAgentExecutor._project_native_group_dispatch(self._session, task, plan, children, source_text)
+            self._session.update_assistant_message(assistant_id, source_text, status=MessageStatus.PROCESSING,
+                metadata={"run_id": parent["run_id"], "run_status": "running", "native_group_parent": True})
+            return assistant_id, "processing"
+        except Exception as exc:
+            if parent is not None:
+                from apps.shell.agent.runtime.main_chat_delegation import MainChatDelegationCoordinator
+
+                MainChatDelegationCoordinator(service).cancel_children(parent["run_id"])
+                service.fail_main_chat_run(parent["run_id"], exc)
+            current = self._state.get_task(task.task_id)
+            if current and current.status in {TaskStatus.PENDING, TaskStatus.RUNNING}:
+                self._state.update_task_status(task.task_id, TaskStatus.FAILED, error=redact_api_error_text(exc))
+            self._session.update_assistant_message(assistant_id, "群组任务派发失败", status=MessageStatus.FAILED,
+                error=redact_api_error_text(exc), metadata={"run_id": parent["run_id"] if parent else "", "run_status": "failed"})
+            return assistant_id, "failed"
+
+    def _sync_native_direct_group_tasks(self, *, notify_group_summary: bool) -> None:
+        from types import SimpleNamespace
+
+        from apps.shell.agent.runtime.main_chat_delegation import MainChatDelegationCoordinator, bound_plan
+
+        service = None
+        for message in self._session.get_all_messages():
+            if message.role != MessageRole.ASSISTANT or not message.task_id or not (message.metadata or {}).get("native_group_parent"):
+                continue
+            task = self._state.get_task(message.task_id)
+            durable_only = task is None
+            if task is None:
+                task = SimpleNamespace(task_id=message.task_id, status=TaskStatus.RUNNING)
+            if task.status not in {TaskStatus.RUNNING, TaskStatus.CANCELLED}:
+                continue
+            try:
+                service = service or self._agent_runtime_service()
+                coordinator = MainChatDelegationCoordinator(service)
+                parent = service.get_run(str(message.metadata.get("run_id") or ""))
+                starts = [event for event in parent["timeline"] if event.get("event") == "run.started"]
+                link = service.get_task_run_link(task.task_id)
+                if (len(starts) != 1 or (starts[0].get("metadata") or {}).get("native_group_owner") != "chat_api_direct"
+                    or link.get("run_id") != parent["run_id"] or link.get("session_id") != self._session.session_id):
+                    raise AgentRuntimeError("群组父任务的持久绑定已失效")
+            except Exception as exc:
+                self._fail_native_direct_group_projection(message, exc)
+                continue
+            try:
+                if task.status == TaskStatus.CANCELLED:
+                    coordinator.cancel_children(parent["run_id"])
+                    service.cancel_run(parent["run_id"])
+                    self._cancel_native_group_summary_task(parent)
+                    continue
+                if parent.get("status") == "cancelled":
+                    coordinator.cancel_children(parent["run_id"])
+                    self._cancel_native_group_summary_task(parent)
+                    if not durable_only:
+                        self._state.cancel_task(task.task_id)
+                    else:
+                        self._session.update_assistant_message(message.message_id, message.content,
+                            status=MessageStatus.FAILED, error="任务已取消", metadata={"run_status": "cancelled"})
+                    continue
+                plan = bound_plan(parent)
+                children = coordinator.owned_children(parent)
+                for child in children:
+                    child_message = next((item for item in self._session.get_all_messages()
+                        if (item.metadata or {}).get("run_id") == child["run_id"]), None)
+                    if child_message:
+                        self._update_agent_run_message_from_result(child_message.message_id,
+                            child_message.metadata.get("sender") or {}, child, notify_group_summary=False)
+                failed = next((child for child in children if child.get("status") in {"failed", "cancelled", "awaiting_user"}), None)
+                if failed or parent.get("status") == "failed":
+                    raise AgentRuntimeError(str((failed or parent).get("result") or "群组子目标未完成"))
+                if any(child.get("status") != "completed" or child.get("pending_approval") for child in children):
+                    continue
+                if parent.get("status") == "running":
+                    service.verify_main_chat_delegation(parent["run_id"])
+                    if notify_group_summary:
+                        self._maybe_create_group_agent_summary_task(task.task_id)
+                    if plan["binding"].get("summary_required"):
+                        current_message = self._session.get_assistant_message_for_task(task.task_id)
+                        summary_id = str(((current_message.metadata if current_message else {}) or {}).get("group_agent_summary_task_id") or "")
+                        summary = self._state.get_task(summary_id)
+                        if summary is None:
+                            if not summary_id and not notify_group_summary:
+                                continue
+                            durable_summary = coordinator.owned_summary(service.get_run(parent["run_id"]))
+                            if durable_summary.get("status") != "completed" or durable_summary.get("pending_approval"):
+                                raise AgentRuntimeError("群组总结任务状态已丢失，需要重新生成总结")
+                        else:
+                            service.bind_main_chat_delegation_summary(parent["run_id"], summary)
+                            if summary.status in {TaskStatus.FAILED, TaskStatus.CANCELLED}:
+                                raise AgentRuntimeError(summary.error or "群组总结未完成")
+                            if summary.status != TaskStatus.COMPLETED:
+                                continue
+                        service.verify_main_chat_delegation_summary(parent["run_id"])
+                    parent = coordinator.settle(parent["run_id"], message.content)
+                if parent.get("status") == "completed":
+                    if not durable_only:
+                        self._state.update_task_status(task.task_id, TaskStatus.COMPLETED, result=str(parent.get("result") or ""))
+                    self._session.update_assistant_message(message.message_id, message.content,
+                        status=MessageStatus.PROCESSING if (message.metadata or {}).get("group_agent_summary_pending") else MessageStatus.COMPLETED,
+                        metadata={"run_status": "completed"})
+            except Exception as exc:
+                try:
+                    coordinator.cancel_children(parent["run_id"])
+                except Exception:
+                    logger.debug("群组子任务绑定已失效，无法安全取消", exc_info=True)
+                try:
+                    service.fail_main_chat_run(parent["run_id"], exc)
+                except Exception:
+                    logger.debug("群组父任务终态投影失败", exc_info=True)
+                self._fail_native_direct_group_projection(message, exc)
+
+    def _fail_native_direct_group_projection(self, message: ChatMessage, error: Exception) -> None:
+        current = self._state.get_task(message.task_id)
+        if current and current.status in {TaskStatus.PENDING, TaskStatus.RUNNING}:
+            self._state.update_task_status(current.task_id, TaskStatus.FAILED, error=redact_api_error_text(error))
+        self._session.update_assistant_message(message.message_id, message.content,
+            status=MessageStatus.FAILED, error=redact_api_error_text(error),
+            metadata={"native_group_parent": False, "run_status": "failed", "group_agent_summary_pending": False})
+
+    def _cancel_native_group_summary_task(self, parent: dict[str, Any]) -> None:
+        from apps.shell.agent.runtime.main_chat_delegation import SUMMARY_BOUND_EVENT, SOURCE, _digest, bound_plan
+
+        plan = bound_plan(parent)
+        bindings = [event for event in parent["timeline"] if event.get("event") == SUMMARY_BOUND_EVENT]
+        if plan is None or len(bindings) != 1:
+            return
+        binding = bindings[0]
+        task = self._state.get_task(str(binding.get("task_id") or ""))
+        if (task is None or binding.get("source") != SOURCE or binding.get("parent_run_id") != parent["run_id"]
+            or binding.get("binding_id") != plan["binding_id"] or task.description != binding.get("goal")
+            or task.chat_session_id != binding.get("session_id") or _digest(task.response_context) != binding.get("context_digest")):
+            return
+        runner = getattr(self._runtime, "task_runner", None)
+        if runner is not None:
+            runner.cancel_task(task.task_id)
+        if task.status in {TaskStatus.PENDING, TaskStatus.RUNNING}:
+            self._state.cancel_task(task.task_id)
+
     def _sync_group_dispatches_from_completed_tasks(self, *, notify_group_summary: bool = True) -> None:
         context = self._session_context()
         if context.get("conversation_kind") != "group":
@@ -6347,6 +6519,11 @@ class ChatAPI:
         for msg in self._session.get_all_messages():
             if msg.role != MessageRole.ASSISTANT or not msg.task_id:
                 continue
+            native_metadata = msg.metadata if isinstance(msg.metadata, dict) else {}
+            if native_metadata.get("group_dispatch_handled") and notify_group_summary:
+                parent_task = self._state.get_task(msg.task_id)
+                if parent_task is not None and parent_task.status == TaskStatus.COMPLETED:
+                    self._maybe_create_group_agent_summary_task(msg.task_id)
             if msg.status != MessageStatus.COMPLETED:
                 continue
             metadata = msg.metadata if isinstance(msg.metadata, dict) else {}

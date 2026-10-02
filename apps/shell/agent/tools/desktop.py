@@ -8481,7 +8481,7 @@ def _app_running_verification(app_name: str) -> dict[str, Any]:
     if result.get("ok"):
         status = str(result.get("stdout") or "").strip()
         return {
-            "launch_verified": status == "running",
+            "launch_verified": True if status == "running" else False if status == "not_running" else None,
             "launch_status": status or "unknown",
         }
     return {

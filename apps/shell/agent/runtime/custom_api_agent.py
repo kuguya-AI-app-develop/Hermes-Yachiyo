@@ -27,6 +27,7 @@ from apps.shell.agent.runtime.desktop_tool_labels import (
 )
 from apps.shell.agent.runtime.errors import (
     AgentApprovalRequired,
+    AgentDelegationProposed,
     AgentDirectOutcomeUnverified,
 )
 from apps.shell.agent.runtime.event_scopes import (
@@ -1284,6 +1285,7 @@ class RuntimeCustomApiAgentLoop:
         run_id: str = "",
         timeline: list[dict[str, Any]],
         budget: Any,
+        force_planning: bool = False,
     ) -> DirectToolSelection | ModelIntentClarificationResolution | None:
         """Resolve only ambiguous first-turn intent; execution stays Runtime-owned.
 
@@ -1312,7 +1314,7 @@ class RuntimeCustomApiAgentLoop:
             deterministic_selection,
             immutable_goal,
         )
-        if clarification_authority is None and not needs_model_assistance:
+        if clarification_authority is None and not needs_model_assistance and not force_planning:
             return None
         if not _model_intent_plan_may_replace_execution_envelope(
             runtime_execution_envelope,
@@ -1562,12 +1564,16 @@ class RuntimeCustomApiAgentLoop:
         default_messages = messages is None
         normalized_start_iteration = self._normalize_tool_iteration(start_iteration)
         goal_contract = None
-        if original_goal is None:
+        if original_goal is None or any(
+            isinstance(event, Mapping)
+            and str(event.get("event") or event.get("event_type") or "") == "agent.goal.contract"
+            for event in timeline
+        ):
             # Restore before any planner or prompt construction. Continuations
             # must not invoke a new planner merely to rebuild system guidance.
             goal_contract = runtime_goal_contract(
                 run_id=run_id,
-                original_goal=None,
+                original_goal=str(original_goal).strip() if original_goal is not None else None,
                 runtime_execution_envelope=(
                     runtime_execution_envelope
                     if isinstance(runtime_execution_envelope, Mapping)
@@ -6441,6 +6447,13 @@ class RuntimeCustomApiAgentLoop:
                 metadata=self._model_message_metadata(dict(message)),
                 truncated=truncated,
             )
+        if run_id.startswith("main_chat_run_") and any(criterion.effectful for criterion in contract.criteria):
+            from .main_chat_delegation import is_delegation_proposal
+
+            if is_delegation_proposal(content) and not runtime_goal_assessment(contract, timeline).completed:
+                # No tool effect occurs here. Core must bind this proposal to
+                # the same immutable objective and narrowed child authority.
+                raise AgentDelegationProposed(content)
         semantic_assessments = self._assess_pending_semantic_artifacts(
             contract,
             timeline=timeline,
