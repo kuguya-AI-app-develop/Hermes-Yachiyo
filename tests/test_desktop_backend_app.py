@@ -49,7 +49,8 @@ def test_bridge_endpoint_falls_back_to_config_for_invalid_env_url(monkeypatch):
 
 
 def test_desktop_backend_generates_bridge_session_token_when_missing(monkeypatch):
-    monkeypatch.delenv("OHA_YACHIYO_BRIDGE_TOKEN", raising=False)
+    # Track an initially absent key so the token minted by production is undone.
+    monkeypatch.setenv("OHA_YACHIYO_BRIDGE_TOKEN", "")
 
     generated = _ensure_bridge_session_token()
 
@@ -74,7 +75,7 @@ def test_desktop_backend_preserves_injected_bridge_session_token(monkeypatch):
 
 def test_desktop_backend_main_starts_native_app_runtime_without_hermes(monkeypatch, tmp_path):
     monkeypatch.setenv("OHA_YACHIYO_HOME", str(tmp_path / "oha-yachiyo-home"))
-    monkeypatch.delenv("OHA_YACHIYO_BRIDGE_TOKEN", raising=False)
+    monkeypatch.setenv("OHA_YACHIYO_BRIDGE_TOKEN", "")
     monkeypatch.delenv("HERMES_HOME", raising=False)
     monkeypatch.delenv("HERMES_YACHIYO_HOME", raising=False)
     monkeypatch.setattr(desktop_backend_app, "_setup_logging", lambda: None)

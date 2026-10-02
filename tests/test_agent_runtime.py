@@ -10981,7 +10981,7 @@ def test_main_chat_tool_exception_is_redacted_from_tool_messages_events_and_stor
         )
         result = service.execute_main_chat_model_loop(
             run["run_id"],
-            [{"role": "user", "content": "Read README"}],
+            [{"role": "user", "content": run["user_goal"]}],
             tool_policy={"allowed_tools": ["workspace.read"]},
             workspace_policy={"default_workdir": str(workdir), "readable_scopes": ["."]},
         )
