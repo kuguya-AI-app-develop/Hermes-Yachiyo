@@ -15,13 +15,17 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from apps.shell.agent.tools.policy import (
     KNOWN_AGENT_TOOLS,
+    TOOL_NAME_ALIASES,
     RuntimePolicyCompiler,
     ToolDescriptorRegistry,
-    TOOL_NAME_ALIASES,
 )
 from apps.shell.agent.tools.registry import TOOL_DISPATCH_REGISTRY
 from apps.shell.yachiyo_agent import RuntimePlanner
 from apps.shell.yachiyo_agent.planner_execution import planner_tool_requests
+from apps.shell.yachiyo_agent.runtime_execution import (
+    runtime_execution_envelope_payload,
+    runtime_execution_requests_from_envelope_payload,
+)
 
 PLANNER_TOOL_PARITY_CASES: tuple[dict[str, Any], ...] = (
     {
@@ -315,12 +319,16 @@ PLANNER_TOOL_PARITY_CASES: tuple[dict[str, Any], ...] = (
         "category": "orchestrator",
         "prompt": "读取剪贴板内容并发给 Slack 的 yachiyo",
         "expected_intent": "communication",
+        "native_full_plan": True,
         "expected_plan_tools": [
             "app.focus",
             "desktop.safe_shortcut",
             "desktop.safe_type_text",
             "desktop.search_submit",
+            "clipboard.read",
+            "desktop.ui_elements",
             "desktop.safe_shortcut",
+            "desktop.ui_elements",
             "desktop.submit_foreground",
             "desktop.ui_elements",
         ],
@@ -329,10 +337,67 @@ PLANNER_TOOL_PARITY_CASES: tuple[dict[str, Any], ...] = (
             "desktop.safe_shortcut",
             "desktop.safe_type_text",
             "desktop.search_submit",
+            "clipboard.read",
+            "desktop.ui_elements",
+            "desktop.safe_shortcut",
+            "desktop.ui_elements",
+            "desktop.submit_foreground",
+            "desktop.ui_elements",
+        ],
+        "expected_legacy_request_tools": [
+            "app.focus",
+            "desktop.safe_shortcut",
+            "desktop.safe_type_text",
+            "desktop.search_submit",
             "desktop.safe_shortcut",
             "desktop.submit_foreground",
         ],
-        "expected_deferred_plan_tools": ["desktop.ui_elements"],
+        "expected_deferred_plan_tools": [],
+        "expected_native_bindings": {
+            "open-or-focus-app": {
+                "input": {"app_name": "Slack"}, "depends_on": [],
+            },
+            "focus-communication-recipient-search": {
+                "input": {"action": "find"}, "depends_on": ["open-or-focus-app"],
+            },
+            "type-communication-recipient": {
+                "input": {"text": "yachiyo"},
+                "depends_on": ["focus-communication-recipient-search"],
+            },
+            "submit-communication-recipient-search": {
+                "input": {}, "depends_on": ["type-communication-recipient"],
+            },
+            "read-clipboard-before-paste-communication-message": {
+                "input": {"max_chars": 12000},
+                "depends_on": ["submit-communication-recipient-search"],
+            },
+            "inspect-clipboard-paste-target-paste-communication-message": {
+                "input": {"role_filter": "", "limit": 80, "app_name": "Slack"},
+                "depends_on": ["read-clipboard-before-paste-communication-message"],
+            },
+            "paste-communication-message": {
+                "input": {"action": "paste"},
+                "depends_on": [
+                    "read-clipboard-before-paste-communication-message",
+                    "inspect-clipboard-paste-target-paste-communication-message",
+                ],
+            },
+            "verify-clipboard-paste-paste-communication-message": {
+                "input": {"app_name": "Slack", "role_filter": "", "limit": 80},
+                "depends_on": ["paste-communication-message"],
+            },
+            "send-communication-message": {
+                "input": {"action": "send"},
+                "depends_on": [
+                    "paste-communication-message",
+                    "verify-clipboard-paste-paste-communication-message",
+                ],
+            },
+            "verify-communication-message": {
+                "input": {"app_name": "Slack", "role_filter": "text", "limit": 80},
+                "depends_on": ["send-communication-message"],
+            },
+        },
         "approval_required": ["desktop.submit_foreground"],
     },
     {
@@ -451,7 +516,15 @@ def _case_evidence(case: dict[str, Any]) -> dict[str, Any]:
     allowed_tools = [str(tool) for tool in policy.get("allowed_tools") or []]
     prompt = str(case["prompt"])
     decision = RuntimePlanner().decision(prompt, allowed_tools=allowed_tools)
-    requests = planner_tool_requests(prompt, allowed_tools)
+    legacy_requests = planner_tool_requests(prompt, allowed_tools)
+    requests = legacy_requests
+    if case.get("native_full_plan") is True:
+        requests = runtime_execution_requests_from_envelope_payload(
+            runtime_execution_envelope_payload(
+                decision, allowed_tools=allowed_tools, full_plan=True,
+            ),
+            allowed_tools=allowed_tools,
+        )
     plan_tools = [
         str(getattr(step, "tool_name", "") or "").strip()
         for step in decision.plan.tool_plan.steps
@@ -503,6 +576,23 @@ def _case_evidence(case: dict[str, Any]) -> dict[str, Any]:
             if tool not in expected_approval_tools
         ),
     }
+    native_bindings = []
+    if case.get("native_full_plan") is True:
+        native_bindings = [
+            {
+                "step_id": request.get("step_id"),
+                "input": request.get("input"),
+                "depends_on": request.get("depends_on") or [],
+            }
+            for request in requests
+        ]
+        checks["native_declared_chain_matches"] = native_bindings == [
+            {"step_id": step, **binding}
+            for step, binding in case["expected_native_bindings"].items()
+        ]
+        checks["legacy_projection_matches"] = [
+            request.get("tool") for request in legacy_requests
+        ] == case["expected_legacy_request_tools"]
     return {
         "id": str(case["id"]),
         "ok": all(checks.values()),
@@ -511,6 +601,11 @@ def _case_evidence(case: dict[str, Any]) -> dict[str, Any]:
         "intent_kind": decision.selected_intent.kind,
         "plan_tools": plan_tools,
         "request_tools": request_tools,
+        "request_mode": (
+            "native_full_plan" if case.get("native_full_plan") is True else "legacy_projection"
+        ),
+        "native_request_bindings": native_bindings,
+        "legacy_request_tools": [request.get("tool") for request in legacy_requests],
         "deferred_plan_tools": deferred_plan_tools,
         "request_continue_to_model": request_continue_to_model,
         "descriptor_tools": descriptor_tools,

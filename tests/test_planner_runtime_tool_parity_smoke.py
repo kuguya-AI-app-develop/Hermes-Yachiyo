@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from scripts import smoke_planner_runtime_tool_parity as smoke
 
 
@@ -106,6 +108,18 @@ def test_planner_runtime_tool_parity_covers_runtime_executable_tools():
         "desktop.safe_shortcut",
         "desktop.safe_type_text",
         "desktop.search_submit",
+        "clipboard.read",
+        "desktop.ui_elements",
+        "desktop.safe_shortcut",
+        "desktop.ui_elements",
+        "desktop.submit_foreground",
+        "desktop.ui_elements",
+    ]
+    assert case_by_id["clipboard_send_to_slack"]["legacy_request_tools"] == [
+        "app.focus",
+        "desktop.safe_shortcut",
+        "desktop.safe_type_text",
+        "desktop.search_submit",
         "desktop.safe_shortcut",
         "desktop.submit_foreground",
     ]
@@ -114,13 +128,17 @@ def test_planner_runtime_tool_parity_covers_runtime_executable_tools():
         "desktop.safe_shortcut",
         "desktop.safe_type_text",
         "desktop.search_submit",
+        "clipboard.read",
+        "desktop.ui_elements",
         "desktop.safe_shortcut",
+        "desktop.ui_elements",
         "desktop.submit_foreground",
         "desktop.ui_elements",
     ]
-    assert case_by_id["clipboard_send_to_slack"]["deferred_plan_tools"] == [
-        "desktop.ui_elements"
-    ]
+    assert case_by_id["clipboard_send_to_slack"]["deferred_plan_tools"] == []
+    assert case_by_id["clipboard_send_to_slack"]["request_mode"] == "native_full_plan"
+    assert case_by_id["clipboard_send_to_slack"]["checks"]["native_declared_chain_matches"]
+    assert case_by_id["clipboard_send_to_slack"]["checks"]["legacy_projection_matches"]
     assert case_by_id["clipboard_send_to_slack"]["approval_required_tools"] == [
         "desktop.submit_foreground"
     ]
@@ -141,6 +159,36 @@ def test_planner_runtime_tool_parity_covers_runtime_executable_tools():
     assert case_by_id["explicit_terminal_command"]["approval_required_tools"] == [
         "terminal.run"
     ]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["missing_read", "missing_pre_ax", "missing_post_ax", "reordered", "wrong_app",
+     "extra_input", "send_without_readback"],
+)
+def test_clipboard_parity_rejects_missing_or_changed_native_guards(monkeypatch, mutation):
+    compiler = smoke.runtime_execution_requests_from_envelope_payload
+
+    def changed_requests(*args, **kwargs):
+        requests = compiler(*args, **kwargs)
+        if mutation in {"missing_read", "missing_pre_ax", "missing_post_ax"}:
+            requests.pop({"missing_read": 4, "missing_pre_ax": 5, "missing_post_ax": 7}[mutation])
+        elif mutation == "reordered":
+            requests[5], requests[6] = requests[6], requests[5]
+        elif mutation == "wrong_app":
+            requests[5]["input"]["app_name"] = "WeChat"
+        elif mutation == "extra_input":
+            requests[6]["input"]["submit"] = True
+        else:
+            requests[8]["depends_on"] = ["paste-communication-message"]
+        return requests
+
+    monkeypatch.setattr(smoke, "runtime_execution_requests_from_envelope_payload", changed_requests)
+    case = next(case for case in smoke.PLANNER_TOOL_PARITY_CASES
+                if case["id"] == "clipboard_send_to_slack")
+    evidence = smoke._case_evidence(case)
+    assert evidence["ok"] is False
+    assert evidence["checks"]["native_declared_chain_matches"] is False
 
 
 def test_planner_runtime_tool_parity_cli_outputs_json(capsys):
