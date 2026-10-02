@@ -2287,8 +2287,21 @@ class TaskIntentRouter:
             )
         ):
             return _empty_intent("report_generation", text)
+        # A recipient name is an operand of a communication request. Words
+        # such as 文件 in 文件传输助手 must not manufacture a competing report
+        # action. Keep every action outside that parsed recipient intact.
+        report_action_text = text
+        direct_context = _direct_context_communication_hint(
+            text, _communication_context_source_hint(text)
+        )
+        recipient = str(direct_context.get("recipient") or "").strip()
+        recipient_index = text.rfind(recipient) if recipient else -1
+        if recipient_index >= 0:
+            report_action_text = (
+                text[:recipient_index] + text[recipient_index + len(recipient):]
+            )
         score = _score_terms(
-            text,
+            report_action_text,
             [
                 "report",
                 "summarize",
@@ -2378,7 +2391,7 @@ class TaskIntentRouter:
         if _looks_like_non_desktop_content_task(text):
             score = max(score, 0.24)
         if score <= 0 and context_source == "visible_text" and _contains_any(
-            text,
+            report_action_text,
             [
                 "整理",
                 "写",
@@ -2404,7 +2417,7 @@ class TaskIntentRouter:
         ):
             score = 0.18
         if score <= 0 and context_source in {"selection", "clipboard"} and _contains_any(
-            text,
+            report_action_text,
             [
                 "整理",
                 "写",
