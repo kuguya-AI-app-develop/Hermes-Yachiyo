@@ -19078,6 +19078,26 @@ def _goal_contract_snapshot(
                 verifier_step_ids=[step.step_id for step in verifier_steps],
             )
         )
+    if intent.kind == "desktop_operation" and isinstance(
+        intent.inputs.get("screen_capture_hint"), Mapping,
+    ):
+        covered_sources = {
+            source_id for criterion in criteria for source_id in criterion.source_step_ids
+        }
+        requested_captures = [
+            step for step in steps
+            if step.tool_name == "screen.capture"
+            and step.step_id == "capture-screen"
+            and step.step_id not in covered_sources
+        ]
+        capture_criteria = _goal_explicit_subgoal_criteria(intent, requested_captures, steps)
+        for criterion, source in zip(capture_criteria, requested_captures, strict=True):
+            target = _task_step_target_metadata_for_intent(
+                intent, source, steps=steps,
+            ).get("action_target")
+            if isinstance(target, Mapping) and target:
+                criterion.expected["target"] = dict(target)
+        criteria.extend(capture_criteria)
     if not criteria:
         criteria.append(
             GoalCriterionSnapshot(
@@ -20347,6 +20367,31 @@ def _task_step_target_metadata_for_intent(
             }
 
     metadata = _task_step_target_metadata(step)
+    if step.tool_name == "screen.capture" and step.step_id == "capture-screen":
+        by_id = {item.step_id: item for item in steps}
+        pending = list(step.depends_on)
+        visited: set[str] = set()
+        while pending:
+            dependency = pending.pop(0)
+            if dependency in visited:
+                continue
+            visited.add(dependency)
+            source = by_id.get(dependency)
+            if source is None:
+                continue
+            source_target = _task_step_target_metadata_for_intent(
+                intent, source,
+            ).get("action_target")
+            if isinstance(source_target, Mapping) and source_target.get("kind") == "desktop_app":
+                metadata["action_target"] = {
+                    **dict(metadata.get("action_target") or {}),
+                    **{key: source_target[key] for key in (
+                        "selection_source", "app_name", "query", "title_contains",
+                        "resolved_app_name", "resolved_app_path",
+                    ) if key in source_target},
+                }
+                break
+            pending.extend(source.depends_on)
     foreground_management = intent.inputs.get("foreground_management_hint")
     foreground_action = str(
         foreground_management.get("action")
