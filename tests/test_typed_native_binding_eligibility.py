@@ -37,6 +37,7 @@ def test_actual_model_semantic_send_preserves_existing_unverified_path(
     from tests.test_agent_runtime import FakeDefaultProfileService
     from tests.test_native_typed_draft_target import _fixture
 
+    monkeypatch.setattr("apps.shell.agent.runtime.tooling.MAX_AGENT_TOOL_ITERATIONS", 10)
     _, service, store, state = _fixture(tmp_path, monkeypatch)
     goal = "在WeChat输入你好并发送"
     state["selected"] = True
