@@ -11262,6 +11262,12 @@ def _trusted_postcondition_observation_receipt_for_verifier(
                     private_typed_observations=private_typed_observations,
                 )
             if not observed:
+                from .query_typing_receipts import trusted_query_typing_receipt
+                observed = trusted_query_typing_receipt(
+                    action_tool, event, verifier_request, verifier_result, timeline,
+                    run_id=clean_run_id,
+                )
+            if not observed:
                 observed = _trusted_exact_pasted_content_observation_receipt(
                     action_tool,
                     event,
