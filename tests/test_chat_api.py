@@ -280,7 +280,7 @@ def test_chat_api_direct_generic_app_open_forwards_safe_direct_requests(
             "selection_source": "desktop.list_apps",
             "verification_goal": "app_running",
         }
-        assert captured["direct_tool_requests"][2]["continue_to_model"] is True
+        assert captured["direct_tool_requests"][2]["continue_to_model"] is False
         assert captured["runtime_execution_envelope"]["requests"]
     finally:
         store.close()
@@ -3371,6 +3371,7 @@ def test_send_message_executes_browser_prefix_search_field_type_without_browser_
     click_calls: list[tuple[str, str, int]] = []
     active_app = "Google Chrome"
     typed_text = ""
+    field_target = "搜索框"
     monkeypatch.setattr(
         "apps.shell.agent_runtime.get_model_profile_service",
         lambda: SimpleNamespace(
@@ -3462,6 +3463,8 @@ def test_send_message_executes_browser_prefix_search_field_type_without_browser_
             "summary": f"Inspected {app_name}",
             "data": {
                 "app_name": app_name,
+                "pid": 1234,
+                "window_id": 42,
                 "app_found": True,
                 "running": True,
                 "focus_verified": focus,
@@ -3476,8 +3479,9 @@ def test_send_message_executes_browser_prefix_search_field_type_without_browser_
                         "elements": [
                             {
                                 "role": "AXTextField",
-                                "name": "搜索",
+                                "name": field_target,
                                 "enabled": True,
+                                "value": typed_text,
                             }
                         ],
                         "role_filter": role_filter,
@@ -3519,6 +3523,49 @@ def test_send_message_executes_browser_prefix_search_field_type_without_browser_
             "data": {"key": "return", "modifiers": []},
         })
 
+    def fake_type_into_ui_element(
+        target: str,
+        text: str,
+        *,
+        role_filter: str = "",
+        limit: int = 80,
+        expected_app_name: str = "",
+    ) -> dict:
+        nonlocal field_target
+        assert not expected_app_name or expected_app_name == active_app
+        field_target = target
+        fake_click_ui_element(target, role_filter=role_filter, limit=limit)
+        fake_safe_type_text(text)
+        return {
+            "ok": True,
+            "action": "desktop.type_into_ui_element",
+            "summary": f"Typed {len(text)} characters into {target}",
+            "data": {
+                "app_name": active_app,
+                "target": target,
+                "text": text,
+                "role_filter": role_filter,
+                "character_count": len(text),
+                "pid": 1234,
+                "window_id": 42,
+                "grounded_element": {
+                    "role": "AXTextField", "name": target,
+                    "pid": 1234, "window_id": 42,
+                },
+            },
+        }
+
+    def fake_submit_foreground(action: str = "submit") -> dict:
+        nonlocal typed_text
+        assert action == "confirm"
+        calls.append(("search_submit", ""))
+        typed_text = ""
+        return {
+            "ok": True,
+            "action": "desktop.submit_foreground",
+            "data": {"submit_action": action, "key": "return", "modifiers": []},
+        }
+
     def fake_active_window() -> dict:
         return _native_postcondition_result({
             "ok": True,
@@ -3538,9 +3585,11 @@ def test_send_message_executes_browser_prefix_search_field_type_without_browser_
             "data": {
                 "app_name": active_app,
                 "active_app_name": active_app,
+                "pid": 1234,
+                "window_id": 42,
                 "title": "Search",
                 "elements": [
-                    {"role": "AXTextField", "name": "搜索", "value": typed_text},
+                    {"role": "AXTextField", "name": field_target, "value": typed_text},
                 ],
             },
         })
@@ -3552,11 +3601,13 @@ def test_send_message_executes_browser_prefix_search_field_type_without_browser_
         "apps.shell.agent.tools.desktop.click_ui_element",
         fake_click_ui_element,
     )
+    monkeypatch.setattr("apps.shell.agent.tools.desktop.type_into_ui_element", fake_type_into_ui_element)
     monkeypatch.setattr("apps.shell.agent.tools.desktop.active_window", fake_active_window)
     monkeypatch.setattr("apps.shell.agent.tools.desktop.ui_elements", fake_ui_elements)
     monkeypatch.setattr("apps.shell.agent.tools.desktop.desktop_safe_shortcut", fake_safe_shortcut)
     monkeypatch.setattr("apps.shell.agent.tools.desktop.desktop_safe_type_text", fake_safe_type_text)
     monkeypatch.setattr("apps.shell.agent.tools.desktop.desktop_search_submit", fake_search_submit)
+    monkeypatch.setattr("apps.shell.agent.tools.desktop.desktop_submit_foreground", fake_submit_foreground)
     try:
         result = _send_foreground_message(api, "Chrome 点击搜索框输入 yachiyo")
         run = service.get_run(result["run_id"])
@@ -3569,17 +3620,17 @@ def test_send_message_executes_browser_prefix_search_field_type_without_browser_
         assert result["status"] == "waiting_approval"
         assert result["agent_task"]["status"] == "waiting_approval"
         assert calls == []
-        assert inspect_calls == [("Google Chrome", False)]
+        assert inspect_calls == [("Google Chrome", True)]
         assert result["agent_task"]["pending_approvals"][0]["tool_name"] == (
-            "app.focus_and_click_ui_element"
+            "app.focus_and_type_into_ui_element"
         )
         _assert_dict_contains(
             result["agent_task"]["pending_approvals"][0]["input_preview"],
             {
                 "app_name": "Google Chrome",
-                "target": "搜索",
+                "target": "搜索框",
                 "role_filter": "text",
-                "click_count": 1,
+                "text": "yachiyo",
             },
         )
         assert run["status"] == "approval_required"
@@ -3591,10 +3642,9 @@ def test_send_message_executes_browser_prefix_search_field_type_without_browser_
         approved = service.approve_run_approval(run["run_id"])
         assert approved["status"] == "completed"
         assert calls == [("focus", "Google Chrome"), ("type", "yachiyo")]
-        assert click_calls == [("搜索", "text", 1)]
+        assert click_calls == [("搜索框", "text", 1)]
         assert approved["result"] == (
-            "已切到 Google Chrome 并点击前台控件：搜索。 "
-            "已向前台输入文字（7 个字符）。"
+            "已在 Google Chrome 的 搜索框 输入文字（7 个字符）。"
         )
 
         calls.clear()
@@ -3609,15 +3659,15 @@ def test_send_message_executes_browser_prefix_search_field_type_without_browser_
         assert second["ok"] is True
         assert second["status"] == "waiting_approval"
         assert second["agent_task"]["pending_approvals"][0]["tool_name"] == (
-            "app.open_and_click_ui_element"
+            "app.open_and_type_into_ui_element"
         )
         _assert_dict_contains(
             second["agent_task"]["pending_approvals"][0]["input_preview"],
             {
                 "app_name": "Google Chrome",
-                "target": "搜索",
+                "target": "搜索栏",
                 "role_filter": "text",
-                "click_count": 1,
+                "text": "yachiyo",
             },
         )
         assert second_run["status"] == "approval_required"
@@ -3627,6 +3677,14 @@ def test_send_message_executes_browser_prefix_search_field_type_without_browser_
         assert "model.requested" not in second_event_types
 
         second_approved = service.approve_run_approval(second_run["run_id"])
+        assert second_approved["status"] == "approval_required"
+        assert second_approved["pending_approval"]["tool"] == "desktop.submit_foreground"
+        assert calls == [
+            ("open", "Google Chrome"),
+            ("focus", "Google Chrome"),
+            ("type", "yachiyo"),
+        ]
+        second_approved = service.approve_run_approval(second_run["run_id"])
         assert second_approved["status"] == "completed"
         assert calls == [
             ("open", "Google Chrome"),
@@ -3634,10 +3692,10 @@ def test_send_message_executes_browser_prefix_search_field_type_without_browser_
             ("type", "yachiyo"),
             ("search_submit", ""),
         ]
-        assert click_calls == [("搜索", "text", 1)]
+        assert click_calls == [("搜索栏", "text", 1)]
         assert second_approved["result"] == (
-            "已打开 Google Chrome 并点击“搜索”。 "
-            "已向前台输入文字（7 个字符）。 已提交前台搜索。"
+            "已在 Google Chrome 的 搜索栏 输入文字（7 个字符）。 "
+            "已向前台发送确认指令。"
         )
     finally:
         service.close()
@@ -10003,7 +10061,7 @@ def test_send_message_executes_direct_spotlight_search_sequence_without_model(
             "desktop.safe_shortcut",
             "desktop.safe_type_text",
         ]
-        assert observed_ui_values == ["yachiyo"]
+        assert observed_ui_values == ["", "yachiyo"]
         assert task is not None
         assert task.status == TaskStatus.COMPLETED
         assert task.result == expected_summary
@@ -13990,7 +14048,7 @@ def test_agent_mention_creates_agent_run_without_general_task(tmp_path, monkeypa
     monkeypatch.setattr(chat_api_mod, "get_agent_runtime_service", lambda: service)
     monkeypatch.setattr("apps.shell.agent_runtime.openai_compatible_chat_message", lambda *_args, **_kwargs: {"content": "Agent result"})
     try:
-        result = api.send_message("@Helper 做个总结")
+        result = api.send_message("@Helper Respond with exactly \"Agent result\".")
         assert result["ok"] is True
         assert result["runnable_command"] is True
         assert result["agent_run_id"]
@@ -14044,12 +14102,12 @@ def test_agent_scoped_session_continues_without_new_mention(tmp_path, monkeypatc
         lambda *_args, **_kwargs: {"content": next(responses)},
     )
     try:
-        first = api.send_message("@Helper 第一轮")
+        first = api.send_message("@Helper Respond with exactly \"First agent result\".")
         # 等待第一个 Agent Run 完成
         _wait_for_agent_run(service, first["agent_run_id"])
         _wait_for_assistant_content(runtime, "First agent result")
 
-        second = api.send_message("继续处理")
+        second = api.send_message("Respond with exactly \"Second agent result\".")
         # 等待第二个 Agent Run 完成
         _wait_for_agent_run(service, second["agent_run_id"])
         _wait_for_assistant_content(runtime, "Second agent result")
@@ -15277,7 +15335,7 @@ def test_selected_runnable_creates_agent_run_without_mention(tmp_path, monkeypat
     monkeypatch.setattr("apps.shell.agent_runtime.openai_compatible_chat_message", lambda *_args, **_kwargs: {"content": "Agent result"})
     try:
         result = api.send_message(
-            "整理需求",
+            "Respond with exactly \"Agent result\".",
             runnable_id=agent["agent_id"],
             client_message_id="client-runnable-1",
         )
@@ -21043,7 +21101,7 @@ def test_group_dispatch_uses_runtime_native_service_end_to_end(tmp_path, monkeyp
         context = str(messages[-1]["content"])
         captured_contexts.append(context)
         assert "# Agent\nName: Coding Agent" in context
-        assert "# User Goal\n做真实 Native 群聊派发验证" in context
+        assert "# User Goal\nRespond with exactly Coding native dispatch result." in context
         assert "[Oha-Yachiyo 群组执行约定]" in context
         assert "你在群内身份是：Coding" in context
         return {"content": "Coding native dispatch result"}
@@ -21069,7 +21127,7 @@ def test_group_dispatch_uses_runtime_native_service_end_to_end(tmp_path, monkeyp
         assert created["session_context"]["conversation_kind"] == "group"
         assert created["session_context"]["participants"][1]["id"] == coding["agent_id"]
 
-        sent = api.send_message("@主模型 请安排 Coding 做真实 Native 群聊派发验证")
+        sent = api.send_message("@主模型 请安排 Coding Respond with exactly Coding native dispatch result.")
         assert sent["ok"] is True
         runtime.state.update_task_status(
             sent["task_id"],
@@ -21077,7 +21135,7 @@ def test_group_dispatch_uses_runtime_native_service_end_to_end(tmp_path, monkeyp
             result=(
                 "我会让 Coding 处理这件事。\n"
                 '{"tool":"oha.group_dispatch","input":{"tasks":[{"kind":"agent","target":"Coding",'
-                '"goal":"做真实 Native 群聊派发验证"}]}}'
+                '"goal":"Respond with exactly Coding native dispatch result."}]}}'
             ),
         )
 
@@ -21099,7 +21157,7 @@ def test_group_dispatch_uses_runtime_native_service_end_to_end(tmp_path, monkeyp
         assert agent_message["status"] == "processing"
         assert agent_message["metadata"]["runnable_id"] == coding["agent_id"]
         assert agent_message["metadata"]["delegated_by_task_id"] == sent["task_id"]
-        assert agent_message["metadata"]["delegated_goal"] == "做真实 Native 群聊派发验证"
+        assert agent_message["metadata"]["delegated_goal"] == "Respond with exactly Coding native dispatch result."
 
         run = _wait_for_agent_run(service, run_id)
         assert run["status"] == "completed"
@@ -22616,7 +22674,7 @@ def test_agent_mention_supports_multiword_names(tmp_path, monkeypatch):
     monkeypatch.setattr(chat_api_mod, "get_agent_runtime_service", lambda: service)
     monkeypatch.setattr("apps.shell.agent_runtime.openai_compatible_chat_message", lambda *_args, **_kwargs: {"content": "Agent result"})
     try:
-        result = api.send_message("@Draft Agent 整理需求")
+        result = api.send_message("@Draft Agent Respond with exactly \"Agent result\".")
         assert result["ok"] is True
         assert result["agent_run_id"]
         # 等待异步执行完成
@@ -22655,7 +22713,7 @@ def test_agent_mention_can_appear_inline_without_catching_email(tmp_path, monkey
         assert runtime.state.get_task(normal["task_id"]) is not None
 
         runtime.start_new_session()
-        result = api.send_message("请 @Design 做一版视觉方向")
+        result = api.send_message("Respond with @Design exactly \"Design result\".")
 
         assert result["ok"] is True
         assert result["agent_run_id"]
@@ -22664,7 +22722,7 @@ def test_agent_mention_can_appear_inline_without_catching_email(tmp_path, monkey
         _wait_for_assistant_content(runtime, "Design result")
         run = service.get_run(result["agent_run_id"])
         assert run["runnable_id"] == agent["agent_id"]
-        assert run["user_goal"] == "请 做一版视觉方向"
+        assert run["user_goal"] == "Respond with exactly \"Design result\"."
     finally:
         service.close()
         store.close()
