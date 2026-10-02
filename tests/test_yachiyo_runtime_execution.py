@@ -9,6 +9,43 @@ from apps.shell.yachiyo_agent.runtime_execution import (
     runtime_execution_requests_from_envelope_payload,
 )
 from apps.shell.yachiyo_agent.runtime_planner import RuntimePlanner
+from apps.shell.yachiyo_agent.daily_desktop import daily_desktop_allowed_tools
+from apps.shell.yachiyo_agent.planner_execution import planner_decision_and_tool_requests
+from apps.shell.yachiyo_agent.planner_execution import _desktop_observation_step_is_direct_readback
+
+
+@pytest.mark.parametrize("prompt", ["打开 ChatGPT 客户端", "打开微信在消息框输入文件传输助手"])
+def test_execution_projection_preserves_canonical_app_and_exact_ui_target(prompt: str) -> None:
+    allowed_tools = daily_desktop_allowed_tools()
+    decision, _requests = planner_decision_and_tool_requests(prompt, allowed_tools)
+    envelope = runtime_execution_envelope_from_decision(
+        decision, allowed_tools=allowed_tools, full_plan=True,
+    )
+
+    assert envelope is not None
+    if "消息框" in prompt:
+        action = next(request for request in envelope.requests if "type_into_ui_element" in request.tool_name)
+        assert action.input["target"] == "消息框"
+        assert action.action_target["target"] == "消息框"
+    else:
+        action = next(request for request in envelope.requests if request.tool_name == "app.open")
+        assert action.input["app_name"] == "ChatGPT 客户端"
+        assert action.action_target["app_name"] == "ChatGPT 客户端"
+
+
+@pytest.mark.parametrize("prompt", ["what app am I using?", "what windows are open in Slack"])
+def test_identity_readback_does_not_require_model_followup(prompt: str) -> None:
+    _decision, requests = planner_decision_and_tool_requests(prompt, daily_desktop_allowed_tools())
+
+    assert requests
+    assert not any(request.get("continue_to_model") for request in requests)
+
+
+def test_identity_readback_does_not_bypass_requested_analysis() -> None:
+    assert _desktop_observation_step_is_direct_readback(
+        "what app am I using and summarize its content",
+        {"operation_hint": "read_active_window"},
+    ) is False
 
 
 def test_dispatch_shortcut_binds_exact_keyboard_copy_identity() -> None:
